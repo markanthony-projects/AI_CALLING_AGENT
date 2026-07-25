@@ -8,6 +8,8 @@ from app.core.config import settings
 from loguru import logger
 
 _redis_client = None
+_l1_project_cache = {}  # In-memory L1 cache: campaign_id -> (timestamp, project_dict)
+L1_CACHE_TTL = 300  # 5 minutes in-memory TTL
 
 async def get_redis_client():
     global _redis_client
@@ -31,13 +33,29 @@ async def discover_projects(db: AsyncSession, filters: ProjectFilterParams):
     return result.scalars().all()
 
 async def get_project_by_campaign(db: AsyncSession, campaign_id: str):
+    import time
+    now = time.time()
+    
+    # 1. Check In-Memory L1 Cache (0ms latency)
+    if campaign_id in _l1_project_cache:
+        ts, cached_dict = _l1_project_cache[campaign_id]
+        if now - ts < L1_CACHE_TTL:
+            logger.info(f"L1 In-Memory Cache HIT for campaign {campaign_id}")
+            return cached_dict
+
+    # 2. Check Redis L2 Cache
     cache = await get_redis_client()
     cache_key = f"project_context:{campaign_id}"
     
-    cached_data = await cache.get(cache_key)
-    if cached_data:
-        logger.info(f"Cache HIT for campaign {campaign_id}")
-        return json.loads(cached_data)
+    try:
+        cached_data = await cache.get(cache_key)
+        if cached_data:
+            logger.info(f"Redis L2 Cache HIT for campaign {campaign_id}")
+            project_dict = json.loads(cached_data)
+            _l1_project_cache[campaign_id] = (now, project_dict)
+            return project_dict
+    except Exception as e:
+        logger.warning(f"Redis L2 cache check failed: {e}")
         
     logger.info(f"Cache MISS for campaign {campaign_id}, querying DB")
     
@@ -70,10 +88,19 @@ async def get_project_by_campaign(db: AsyncSession, campaign_id: str):
         "config_json": project.config_json or []
     }
     
-    await cache.setex(cache_key, 86400, json.dumps(project_dict))
+    _l1_project_cache[campaign_id] = (now, project_dict)
+    try:
+        await cache.setex(cache_key, 86400, json.dumps(project_dict))
+    except Exception as e:
+        logger.warning(f"Redis L2 cache store failed: {e}")
+        
     return project_dict
 
 async def invalidate_project_cache(campaign_id: str):
-    cache = await get_redis_client()
-    await cache.delete(f"project_context:{campaign_id}")
-    logger.info(f"Invalidated cache for campaign {campaign_id}")
+    _l1_project_cache.pop(campaign_id, None)
+    try:
+        cache = await get_redis_client()
+        await cache.delete(f"project_context:{campaign_id}")
+    except Exception as e:
+        logger.warning(f"Redis cache invalidate failed: {e}")
+    logger.info(f"Invalidated L1 & L2 cache for campaign {campaign_id}")

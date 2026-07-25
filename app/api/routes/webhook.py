@@ -15,22 +15,33 @@ router = APIRouter()
 ACTIVE_CALLS = 0
 MAX_CALLS = 8
 
-@router.post("/exotel/answer/{campaign_id}/{call_sid}")
-async def exotel_answer(campaign_id: str, call_sid: str, request: Request):
-    host = request.headers.get("host", "localhost:8000")
-    protocol = "wss" if "localhost" not in host else "ws"
-    ws_url = f"{protocol}://{host}/ws/exotel/{campaign_id}/{call_sid}"
+@router.post("/vobiz/answer/{campaign_id}/{call_sid}")
+async def vobiz_answer(campaign_id: str, call_sid: str, request: Request):
+    from app.core.config import settings
+    
+    # Dynamically extract host and scheme from incoming HTTP request headers
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    
+    if forwarded_host:
+        ws_proto = "wss" if forwarded_proto in ("https", "wss") else "ws"
+        ws_url = f"{ws_proto}://{forwarded_host}/ws/vobiz/{campaign_id}/{call_sid}"
+    else:
+        base_ws_url = settings.WEBHOOK_BASE_URL.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+        ws_url = f"{base_ws_url}/ws/vobiz/{campaign_id}/{call_sid}"
+    
+    logger.info(f"Generated Vobiz WebSocket URL: {ws_url}")
     
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Connect>
-        <Stream url="{ws_url}" />
-    </Connect>
+    <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000">{ws_url}</Stream>
 </Response>"""
+    
+    logger.debug(f"Vobiz Answer XML:\n{xml}")
     return Response(content=xml, media_type="application/xml")
 
-@router.websocket("/ws/exotel/{campaign_id}/{call_sid}")
-async def exotel_webhook(
+@router.websocket("/ws/vobiz/{campaign_id}/{call_sid}")
+async def vobiz_webhook(
     websocket: WebSocket,
     campaign_id: str,
     call_sid: str,
@@ -46,7 +57,7 @@ async def exotel_webhook(
     await websocket.accept()
     ACTIVE_CALLS += 1
     started_at = datetime.utcnow()
-    logger.info(f"Incoming Exotel WS | Campaign {campaign_id} | Call {call_sid} | Active: {ACTIVE_CALLS}")
+    logger.info(f"Incoming Vobiz WS | Campaign {campaign_id} | Call {call_sid} | Active: {ACTIVE_CALLS}")
     
     transcript = ""
     try:

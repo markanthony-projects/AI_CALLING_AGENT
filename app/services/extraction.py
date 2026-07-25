@@ -1,16 +1,11 @@
-from arq import create_pool
-from arq.connections import RedisSettings
+import asyncio
 from loguru import logger
-
-_redis_pool = None
-
-async def get_redis_pool():
-    global _redis_pool
-    if not _redis_pool:
-        _redis_pool = await create_pool(RedisSettings(host="localhost", port=6379))
-    return _redis_pool
+from app.worker import process_extraction
 
 async def dispatch_extraction_task(transcript: str, call_sid: str):
-    pool = await get_redis_pool()
-    await pool.enqueue_job('process_extraction', transcript, call_sid)
-    logger.info(f"Dispatched extraction task to Redis for {call_sid}")
+    try:
+        # Schedule the background extraction natively in Uvicorn's event loop
+        asyncio.create_task(process_extraction(transcript, call_sid))
+        logger.info(f"Dispatched background extraction task natively for {call_sid}")
+    except Exception as e:
+        logger.error(f"Failed to dispatch extraction task for {call_sid}: {e}")

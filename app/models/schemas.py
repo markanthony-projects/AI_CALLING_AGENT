@@ -9,9 +9,10 @@ class LeadExtraction(BaseModel):
     preferred_location: Optional[str] = Field(None, description="Preferred locality or city")
     budget: Optional[float] = Field(None, description="Customer budget numerically")
     timeline: Optional[str] = Field(None, description="Purchase timeline")
-    callback_time: Optional[datetime] = Field(None, description="Scheduled callback date and time")
-    site_visit_time: Optional[datetime] = Field(None, description="Scheduled site visit date and time")
+    callback_time: Optional[datetime] = Field(None, description="Scheduled callback date and time in ISO 8601 format calculated relative to base reference time.")
+    site_visit_time: Optional[datetime] = Field(None, description="Scheduled site visit date and time in ISO 8601 format calculated relative to base reference time.")
     status: Optional[LeadStatus] = Field(None, description="Lead status: HOT, WARM, or COLD")
+    transliterated_transcript: Optional[str] = Field(default="", description="The entire conversation transcript completely transliterated into English/Latin script (e.g. Hindi written in English letters).")
 
 class ProjectFilterParams(BaseModel):
     city: Optional[str] = None

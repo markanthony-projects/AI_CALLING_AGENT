@@ -6,7 +6,7 @@ from pipecat.pipeline.worker import PipelineWorker, PipelineParams
 from pipecat.frames.frames import EndFrame, TextFrame, TTSSpeakFrame
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.services.groq.llm import GroqLLMService
-from pipecat.services.sarvam.stt import SarvamSTTService
+from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
@@ -17,7 +17,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from app.core.config import settings
-from app.utils.exotel_serializer import ProductionExotelSerializer
+from app.utils.vobiz_serializer import VobizSerializer
 from app.prompts.agent_prompts import get_system_prompt
 import sys
 from loguru import logger
@@ -35,19 +35,15 @@ async def run_voice_agent(
     websocket,
     campaign_context: str,
     call_sid: str,
-    client_type: str = "exotel",
+    client_type: str = "vobiz",
     project_name: str = "your project",
 ):
     logger.info(f"[{call_sid}] Voice agent starting | client={client_type} | project='{project_name}' | model={GROQ_MODEL}")
 
-    # 1. Faster VAD Endpointing (0.5s instead of default 0.8s) to reduce latency gap
-    vad_analyzer = SileroVADAnalyzer(params=VADParams(min_volume=0.1, confidence=0.5, stop_secs=0.5))
+    # 1. Strict VAD Endpointing (0.2s) to prevent Pipecat from collapsing STT wait timeout and forcing aggregator fallback delays
+    vad_analyzer = SileroVADAnalyzer(params=VADParams(min_volume=0.1, confidence=0.5, stop_secs=0.2))
 
-    # Single unified serializer for both browser and Exotel (G.711 µ-law @ 8 kHz)
-    serializer = ProductionExotelSerializer(
-        stream_sid=call_sid,
-        params=ProductionExotelSerializer.InputParams(auto_hang_up=False, exotel_sample_rate=8000),
-    )
+    serializer = VobizSerializer(stream_sid=call_sid)
 
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -55,19 +51,36 @@ async def run_voice_agent(
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            audio_in_sample_rate=8000,
-            audio_out_sample_rate=8000,
+            audio_in_sample_rate=16000,
+            audio_out_sample_rate=16000,
             serializer=serializer,
         ),
     )
 
     llm = GroqLLMService(api_key=settings.GROQ_API_KEY, settings=GroqLLMService.Settings(model=GROQ_MODEL))
-    stt = SarvamSTTService(api_key=settings.SARVAM_API_KEY, settings=SarvamSTTService.Settings(model="saaras:v3"))
+    stt = DeepgramSTTService(
+        api_key=settings.DEEPGRAM_API_KEY,
+        sample_rate=16000,
+        encoding="linear16",
+        channels=1,
+        settings=DeepgramSTTService.Settings(
+            model="nova-2-general",
+            language="hi", # 'hi' model natively supports Hinglish and English mixed
+            interim_results=True,
+            smart_format=True,
+            endpointing=300,
+        ),
+    )
     
-    # 2. Revert TTS Pace to 1.0
+    # Low-latency streaming WebSocket Sarvam TTS with pace 1.0
     tts = SarvamTTSService(
         api_key=settings.SARVAM_API_KEY,
-        settings=SarvamTTSService.Settings(model="bulbul:v3", voice=settings.SARVAM_VOICE_ID, pace=1.0),
+        settings=SarvamTTSService.Settings(
+            model="bulbul:v3",
+            voice=settings.SARVAM_VOICE_ID,
+            pace=1.0,
+            max_chunk_length=150,
+        ),
     )
 
     system_prompt = get_system_prompt(campaign_context)
@@ -76,10 +89,9 @@ async def run_voice_agent(
     task_ref = []
     
     # 1. Dummy function to generate the JSON schema via Pipecat's inspect logic
-    # Pipecat requires the first parameter to be named 'params' for direct functions.
     async def end_call(params: dict):
         """
-        Ends the call. Call this function ONLY when the conversation is completely finished.
+        Ends the call. Call this function ONLY when the prospect explicitly and unambiguously says goodbye or ends the conversation.
         """
         pass
         
@@ -111,14 +123,22 @@ async def run_voice_agent(
     task_ref.append(task)
     
     _turn_start_time: float = 0.0
+    _user_has_spoken: bool = False
+    _startup_task = None
 
     # ─── Pipeline Started ──────────────────────────────────────────────────────
     @task.event_handler("on_pipeline_started")
     async def on_pipeline_started(worker, frame):
-        opening_line = f"Hello, I am Priya calling from {project_name}. Do you have 2 minutes?"
-        context.add_message({"role": "assistant", "content": opening_line})
-        logger.info(f"[{call_sid}] AGENT → \"{opening_line}\"")
-        await task.queue_frames([TTSSpeakFrame(opening_line)])
+        async def startup_greeting():
+            await asyncio.sleep(0.2)
+            if not _user_has_spoken:
+                opening_line = f"Hi there! This is Priya calling from {project_name}. How are you doing today?"
+                context.add_message({"role": "assistant", "content": opening_line})
+                logger.info(f"[{call_sid}] AGENT → \"{opening_line}\"")
+                await task.queue_frames([TTSSpeakFrame(opening_line)])
+                
+        nonlocal _startup_task
+        _startup_task = asyncio.create_task(startup_greeting())
 
     # ─── Client Disconnected ───────────────────────────────────────────────────
     @transport.event_handler("on_client_disconnected")
@@ -129,7 +149,8 @@ async def run_voice_agent(
     # ─── User Starts Speaking ──────────────────────────────────────────────────
     @user_agg.event_handler("on_user_turn_started")
     async def on_user_turn_started(aggregator, strategy):
-        nonlocal _turn_start_time
+        nonlocal _turn_start_time, _user_has_spoken
+        _user_has_spoken = True
         _turn_start_time = time.time()
         if client_type == "exotel":
             try:
@@ -142,8 +163,8 @@ async def run_voice_agent(
     async def on_user_turn_stopped(aggregator, strategy, message):
         transcript = (message.content or "").strip() if message and hasattr(message, "content") else ""
         if transcript:
-            stt_latency = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
-            logger.info(f"[{call_sid}] USER  → \"{transcript}\" (Turn Duration + STT latency: {stt_latency})")
+            total_turn_time = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
+            logger.info(f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})")
 
     # ─── Agent Generation Logging ──────────────────────────────────────────────
     @llm.event_handler("on_client_connected")
@@ -165,12 +186,15 @@ async def run_voice_agent(
         logger.info(f"[{call_sid}] Pipeline finished. Extracting transcript...")
         transcript_str = ""
         try:
+            prev_content = ""
             for msg in context.messages:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
-                if role in ("user", "assistant") and content:
+                # Deduplicate consecutive identical messages (fixes Pipecat context double-append on startup greeting)
+                if role in ("user", "assistant") and content and content != prev_content:
                     speaker = "Prospect" if role == "user" else "Agent"
                     transcript_str += f"{speaker}: {content}\n"
+                    prev_content = content
         except Exception as e:
             logger.error(f"[{call_sid}] Failed to compile transcript: {e}")
             

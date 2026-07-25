@@ -2,38 +2,42 @@ import httpx
 from app.core.config import settings
 from loguru import logger
 
-async def trigger_exotel_call(customer_number: str, campaign_id: str, call_sid: str) -> bool:
-    """Trigger outbound call via Exotel REST API"""
-    if not settings.EXOTEL_ACCOUNT_SID or not settings.EXOTEL_API_KEY:
-        logger.error("Exotel credentials missing in .env")
+async def trigger_vobiz_call(customer_number: str, campaign_id: str, call_sid: str) -> bool:
+    """Trigger outbound call via Vobiz AI REST API"""
+    if not settings.VOBIZ_AUTH_ID or not settings.VOBIZ_AUTH_TOKEN or not settings.VOBIZ_PHONE_NUMBER:
+        logger.error("Vobiz credentials missing in .env")
         return False
         
-    url = f"https://api.exotel.com/v1/Accounts/{settings.EXOTEL_ACCOUNT_SID}/Calls.json"
-    auth = (settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN)
+    # Vobiz outbound call endpoint requires Auth ID in the path
+    url = f"https://api.vobiz.ai/api/v1/Account/{settings.VOBIZ_AUTH_ID}/Call/"
     
-    # URL that Exotel will hit when the customer answers the phone
-    answer_url = f"{settings.WEBHOOK_BASE_URL}/exotel/answer/{campaign_id}/{call_sid}"
+    headers = {
+        "X-Auth-ID": settings.VOBIZ_AUTH_ID,
+        "X-Auth-Token": settings.VOBIZ_AUTH_TOKEN,
+        "Content-Type": "application/json"
+    }
+    base_url = settings.WEBHOOK_BASE_URL.rstrip('/')
+    
+    # URL that Vobiz will hit when the customer answers the phone
+    answer_url = f"{base_url}/vobiz/answer/{campaign_id}/{call_sid}"
     
     data = {
-        "From": customer_number,
-        "To": settings.EXOTEL_CALLER_ID,
-        "CallerId": settings.EXOTEL_CALLER_ID,
-        "Url": answer_url,
-        "CallType": "trans",
-        "Record": "true"
+        "to": customer_number,
+        "from": settings.VOBIZ_PHONE_NUMBER,
+        "answer_url": answer_url
     }
     
-    logger.info(f"Triggering Exotel outbound call to {customer_number}")
+    logger.info(f"Triggering Vobiz outbound call to {customer_number}")
     
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(url, auth=auth, data=data)
-            if response.status_code == 200:
-                logger.info(f"Successfully triggered Exotel call for {customer_number}")
+            response = await client.post(url, headers=headers, json=data)
+            if response.status_code in (200, 201):
+                logger.info(f"Successfully triggered Vobiz call for {customer_number}")
                 return True
             else:
-                logger.error(f"Exotel call failed: {response.text}")
+                logger.error(f"Vobiz call failed: {response.text}")
                 return False
         except Exception as e:
-            logger.error(f"Error calling Exotel: {e}")
+            logger.error(f"Error calling Vobiz: {e}")
             return False

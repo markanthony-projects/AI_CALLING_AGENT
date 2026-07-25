@@ -9,6 +9,12 @@ from pydantic import field_validator
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Indian Real Estate Sales Voice Agent"
     
+    # Vobiz Credentials
+    VOBIZ_AUTH_ID: str = os.getenv("VOBIZ_AUTH_ID", "")
+    VOBIZ_AUTH_TOKEN: str = os.getenv("VOBIZ_AUTH_TOKEN", "")
+    VOBIZ_PHONE_NUMBER: str = os.getenv("VOBIZ_PHONE_NUMBER", "")
+    WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "")
+    
     DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379/0"
     
@@ -16,6 +22,7 @@ class Settings(BaseSettings):
     SARVAM_API_KEY: str
     SARVAM_VOICE_ID: str = "simran"
     GROQ_API_KEY: str = ""
+    DEEPGRAM_API_KEY: str = ""
     
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
