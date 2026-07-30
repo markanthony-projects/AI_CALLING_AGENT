@@ -28,9 +28,15 @@ class Settings(BaseSettings):
     DEFAULT_COUNTRY_CODE: str = "91"
 
     # Vobiz bills at dial time, so a leaked API key spends money whether or not the audio
-    # ever connects. MAX_CALLS only caps concurrent streams; these cap the dialing itself.
+    # ever connects. MAX_CONCURRENT_CALLS only caps streams; these cap the dialing itself.
     DIAL_MAX_PER_MINUTE: int = Field(default=30, ge=1)
     DIAL_MAX_PER_DAY: int = Field(default=500, ge=1)
+
+    # Streams accepted at once. Each one runs Silero VAD plus audio resampling on the CPU,
+    # so this has to match the droplet: roughly two calls per vCPU before audio starts to
+    # break up. Raising it past what the host can carry degrades every call in progress
+    # rather than rejecting the extra one.
+    MAX_CONCURRENT_CALLS: int = Field(default=4, ge=1)
 
     # Barge-in sensitivity. Pipecat defaults are 0.7 / 0.6; running at 0.5 / 0.1 let PSTN
     # line noise clear the bar and cut the agent off mid-sentence, leaving callers saying

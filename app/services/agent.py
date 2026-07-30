@@ -37,7 +37,7 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 # the turn with no speech at all. Left unhandled the caller just hears silence until they
 # hang up, so every failed turn must still produce audio.
 # Pipecat's default is 300s. A carrier can drop the PSTN leg without closing the websocket,
-# and the pipeline then sits there holding one of MAX_CALLS slots. Sixty seconds with
+# and the pipeline then sits there holding one of the concurrency slots. Sixty seconds with
 # neither party speaking is dead air on a phone call, not a pause for thought.
 IDLE_TIMEOUT_SECS = 60.0
 

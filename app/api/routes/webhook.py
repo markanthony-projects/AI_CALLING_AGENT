@@ -18,7 +18,6 @@ from app.utils.timeutils import utc_now
 router = APIRouter()
 
 ACTIVE_CALLS = 0
-MAX_CALLS = 8
 
 _HANGUP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -92,8 +91,11 @@ async def browser_webhook(websocket: WebSocket, campaign_id: str, call_sid: str)
 async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, client_type: str) -> None:
     global ACTIVE_CALLS
 
-    if ACTIVE_CALLS >= MAX_CALLS:
-        logger.warning(f"[{call_sid}] Concurrency limit reached (max {MAX_CALLS}); rejecting call")
+    if ACTIVE_CALLS >= settings.MAX_CONCURRENT_CALLS:
+        logger.warning(
+            f"[{call_sid}] Concurrency limit reached "
+            f"(max {settings.MAX_CONCURRENT_CALLS}); rejecting call"
+        )
         await websocket.close(code=1013)
         return
 

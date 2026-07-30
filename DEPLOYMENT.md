@@ -1,228 +1,257 @@
-# Deployment Guide — DigitalOcean Droplet (Bangalore)
+# Deployment Guide
 
-Ye guide maan kar chalti hai ki aapne pehle kabhi deploy nahi kiya. Har command copy-paste
-karne layak hai. Jahan aapko kuch **decide** karna hai ya kuch **likhna** hai, wahan saaf
-likha gaya hai.
+DigitalOcean Droplet, Bangalore. Written for someone deploying for the first time — every
+command can be copied as-is. Where you have to decide something or type your own value, it
+is marked clearly.
 
-**Architecture:**
+## Architecture
 
 ```
 Internet
    │
-   ▼  HTTPS (port 443)
-┌──────────────── Droplet (BLR1) ─────────────────┐
-│  nginx    TLS + reverse proxy                    │
-│  certbot  certificate renew karta rehta hai      │
-│  api      calls uthata hai, agent chalata hai    │
-│  worker   lead extract karta hai                 │
-│  redis    cache + job queue + counters           │
-│  migrate  ek baar chalta hai, phir band          │
-└──────────────────────────────────────────────────┘
-   │  private network
+   ▼  HTTPS :443
+┌──────────── Droplet (BLR1, 2 vCPU / 4 GB) ────────────┐
+│  nginx     terminates TLS, proxies to api             │
+│  certbot   renews the certificate in the background   │
+│  api       answers calls, runs the voice agent        │
+│  worker    extracts leads after each call             │
+│  redis     cache + job queue + dial counters          │
+│  migrate   runs once at startup, then exits           │
+└────────────────────────────────────────────────────────┘
+   │  TLS over the public internet, restricted by Trusted Sources
    ▼
 DigitalOcean Managed Postgres (BLR1)
 ```
 
-Postgres droplet par **nahi** chalega — wo aapka managed cluster hai. Redis droplet par hi
-chalega, container mein.
+Postgres does **not** run on the droplet — it is your managed cluster. Redis **does** run on
+the droplet, as a container. Redis is not only a cache: the job queue lives in it, and the
+API and worker are separate processes that cannot pass work to each other any other way.
+
+**Capacity:** configured for **4 concurrent calls**, which suits 2 vCPU. Each call runs voice
+activity detection and audio resampling on the CPU — roughly two calls per vCPU before audio
+begins to break up.
 
 ---
 
-## 0. Shuru karne se pehle kya chahiye
+## 0. What you need before starting
 
-| Cheez | Kahan se |
+| Item | Where it comes from |
 |---|---|
-| DigitalOcean account (billing on) | cloud.digitalocean.com |
-| Managed Postgres cluster, BLR1 | aapke paas already hai |
-| Domain `homebble.in` ka DNS access | aapka domain registrar |
+| DigitalOcean account with billing enabled | cloud.digitalocean.com |
+| Managed Postgres cluster in BLR1 | you already have this |
+| DNS access for `homebble.in` | your domain registrar |
 | GitHub repo access | `markanthony-projects/AI_CALLING_AGENT` |
-| Vobiz dashboard login | webhook URL set karne ke liye |
-| Provider keys | Groq, Deepgram, Sarvam, OpenAI — already hain |
-| SSH key aapke laptop par | Step 1 mein bana lenge |
+| Vobiz dashboard login | to update the webhook URL |
+| Provider API keys | Groq, Deepgram, Sarvam, OpenAI — you already have these |
+| An email address | Let's Encrypt sends expiry warnings to it |
 
-**Time:** pehli baar mein 60–90 minute. Jaldi mat kijiye.
-
----
-
-## 1. SSH key banaiye (laptop par)
-
-Ye aapke laptop ka "password" hai jisse droplet mein ghusenge. Password se zyada safe hai.
-
-PowerShell mein:
-
-```powershell
-ssh-keygen -t ed25519 -C "homebble-deploy"
-```
-
-Teen baar Enter dabaiye (default location, khaali passphrase — ya passphrase daal dijiye,
-zyada safe hai). Ab public key dekhiye:
-
-```powershell
-Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub
-```
-
-Jo lamba `ssh-ed25519 AAAA...` string dikhe, wo **copy** kar lijiye. Agli step mein chahiye.
-
-> `id_ed25519` (bina `.pub`) aapki **private** key hai. Ye kisi ko kabhi mat dijiye.
+**Time:** 60–90 minutes the first time. Do not rush.
 
 ---
 
-## 2. Droplet banaiye
+## 1. Create the droplet
 
 DigitalOcean console → **Create → Droplets**
 
-| Setting | Kya chunein | Kyun |
+| Setting | Choose | Why |
 |---|---|---|
-| Region | **Bangalore (BLR1)** | DB bhi BLR1 mein hai — same region zaroori |
+| Region | **Bangalore (BLR1)** | same region as your database |
 | OS | **Ubuntu 24.04 LTS x64** | long-term support |
-| Type | **Premium Intel**, 4 vCPU / 8 GB | neeche padhiye |
-| Authentication | **SSH Key** → naya add karein, Step 1 wali key paste karein | password login se safe |
-| VPC Network | **wahi VPC jisme aapka Postgres hai** | private network se DB connect hoga |
-| Hostname | `homebble-voice-prod` | pehchanne ke liye |
-| Monitoring | ✅ enable | free hai |
+| Type | **Regular**, 2 vCPU / 4 GB | matches 4 concurrent calls |
+| Authentication | **Password** | see below |
+| Hostname | `homebble-voice-prod` | so you can identify it later |
+| Monitoring | enable | free |
 
-**Size kyun 4 vCPU?** App ek waqt mein 8 calls tak leti hai (`MAX_CALLS = 8`), aur har call
-mein Silero VAD CPU par chalta hai plus audio resampling hota hai. 2 vCPU par 8 calls mein
-audio tootne lagega. Agar shuru mein sirf 1–2 test calls karni hain to 2 vCPU / 4 GB se
-shuru kar sakte hain, baad mein resize ho jaata hai (resize ke liye reboot lagta hai).
+### About password authentication
 
-Create dabaiye. 1 minute mein IP address mil jaayega — **usko note kar lijiye.**
+You asked for password login so that you or a colleague can get in from any machine without
+carrying a key file. That is a reasonable trade for a small team, but be clear about what it
+costs: **automated bots scan port 22 continuously and try common passwords.** SSH keys cannot
+be guessed; passwords can.
+
+So the password itself has to do the work. Generate one — do not invent it by hand:
+
+```powershell
+python -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24)))"
+```
+
+Paste that as the root password when creating the droplet, and store it in your company
+password manager (1Password, Bitwarden, Keeper — whatever your team already uses). A 24
+character random password is not guessable in any practical timeframe.
+
+In **Step 5** you will install `fail2ban`, which bans an IP after repeated failed logins.
+Password authentication without fail2ban is genuinely risky; with it, it is acceptable.
+
+Press Create. You get an IP address in about a minute — **write it down.**
 
 ---
 
-## 3. DNS record banaiye
+## 2. Create the DNS record
 
-Apne domain registrar mein (jahan `homebble.in` khareeda hai):
+In your domain registrar's DNS panel:
 
 | Field | Value |
 |---|---|
 | Type | `A` |
 | Name / Host | `ai-calls` |
-| Value / Points to | droplet ka IP |
-| TTL | 300 (ya Automatic) |
+| Value / Points to | your droplet's IP |
+| TTL | 300 or Automatic |
 
-Save kijiye. Ab check kijiye ki phaila ya nahi (laptop par):
+Save, then check from your laptop:
 
 ```powershell
 nslookup ai-calls.homebble.in
 ```
 
-Jab droplet ka IP dikhne lage, tabhi aage badhiye. **5–30 minute lag sakte hain.**
+Wait until it returns your droplet's IP before continuing. This takes **5–30 minutes.**
 
-> Ye step certificate lene se pehle hona **zaroori** hai. Let's Encrypt is naam par HTTP
-> request bhejkar check karta hai ki server aapka hai. DNS nahi phaila to certificate fail
-> hoga, aur production CA mein **ek ghante mein sirf 5 failed attempts** allowed hain.
+> This must be working before you request a certificate. Let's Encrypt proves you own the
+> domain by making an HTTP request to it. If DNS is not ready the request fails, and the
+> production service allows only **5 failures per hour per domain.**
 
 ---
 
-## 4. Cloud firewall lagaiye
+## 3. Create the cloud firewall
 
 Console → **Networking → Firewalls → Create Firewall**
 
 Name: `homebble-voice-fw`
 
-**Inbound Rules** — pehle jo default hai use delete karke ye teen banaiye:
+**Inbound rules** — delete the defaults and create these three:
 
 | Type | Protocol | Port | Sources |
 |---|---|---|---|
-| SSH | TCP | 22 | **My IP** (dropdown se) |
+| SSH | TCP | 22 | All IPv4, All IPv6 |
 | HTTP | TCP | 80 | All IPv4, All IPv6 |
 | HTTPS | TCP | 443 | All IPv4, All IPv6 |
 
-**Outbound Rules:** default hi rehne dijiye (sab allowed).
+**Outbound rules:** leave the defaults.
 
-Neeche **Apply to Droplets** mein apna droplet chunein. Create dabaiye.
+Under **Apply to Droplets**, select your droplet. Press Create.
 
-**Port 80 kyun khula?** Let's Encrypt certificate issue aur renew karne ke liye port 80 par
-challenge file maangta hai, aur nginx HTTP se HTTPS par redirect karta hai. Port 8000 kahin
-nahi khulega — wo `expose` hai, `ports` nahi, matlab sirf container network ke andar dikhta
-hai. Firewall galat hone par bhi internet se uspar route nahi hai.
+> **If your office has a fixed IP address**, set the SSH source to that IP instead of "All".
+> This is the single most effective protection available and costs nothing. You would then
+> only need to widen it when working from elsewhere.
+
+**Why is port 80 open?** Let's Encrypt requires it to issue and renew certificates, and
+nginx uses it to redirect visitors to HTTPS. Port 8000 is never exposed — it is declared
+`expose` rather than `ports` in the compose file, so it exists only on the internal container
+network. Even a misconfigured firewall cannot route to it.
 
 ---
 
-## 5. Droplet mein login aur basic hardening
+## 4. Log in
 
 ```powershell
 ssh root@ai-calls.homebble.in
 ```
 
-Pehli baar `yes` type karna padega. Ab andar ye sab chalaiye — **ek-ek line**:
+Type `yes` the first time, then your password.
+
+---
+
+## 5. Secure the server
+
+You are working as `root`. That is what you asked for, and it is workable — but root has no
+safety net, so the protections below are not optional.
+
+### 5a. Update the system
 
 ```bash
-# System update
 apt-get update && apt-get upgrade -y
-
-# Roz ke kaam ke liye non-root user (root se seedha kaam karna theek nahi)
-adduser --disabled-password --gecos "" deploy
-usermod -aG sudo deploy
-
-# Apni SSH key us user ko bhi de dijiye
-mkdir -p /home/deploy/.ssh
-cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys
-chown -R deploy:deploy /home/deploy/.ssh
-chmod 700 /home/deploy/.ssh
-chmod 600 /home/deploy/.ssh/authorized_keys
 ```
 
-Ab root login band kar dijiye:
+### 5b. Install fail2ban
+
+This is the piece that makes password login safe. It watches the SSH log and bans any IP
+that fails repeatedly.
 
 ```bash
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+apt-get install -y fail2ban
+
+cat > /etc/fail2ban/jail.local <<'EOF'
+[sshd]
+enabled  = true
+port     = ssh
+backend  = systemd
+maxretry = 4
+findtime = 10m
+bantime  = 24h
+EOF
+
+systemctl enable --now fail2ban
+```
+
+Verify it is running:
+
+```bash
+fail2ban-client status sshd
+```
+
+You should see a `Currently banned` count. Within a day or two it will not be zero — that is
+bots being turned away, and it is the reason this step matters.
+
+### 5c. Tighten SSH
+
+```bash
+cat > /etc/ssh/sshd_config.d/99-hardening.conf <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+MaxAuthTries 3
+LoginGraceTime 30
+X11Forwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+EOF
+
 sshd -t && systemctl restart ssh
 ```
 
-> `sshd -t` config test karta hai. Agar wo error de to **restart mat kijiye** — warna
-> aap khud bahar ho jaayenge. Error aaye to mujhe bataiye.
+> `sshd -t` tests the configuration. **If it reports an error, do not restart** — you would
+> lock yourself out. Fix the error first, or ask for help while your current session is still
+> open.
 
-Automatic security updates:
+`MaxAuthTries 3` means three wrong passwords per connection; fail2ban then bans the IP after
+four such connections.
+
+### 5d. Enable automatic security updates
 
 ```bash
 apt-get install -y unattended-upgrades
 dpkg-reconfigure -f noninteractive unattended-upgrades
 ```
 
-Ab `exit` karke naye user se login kijiye:
+### 5e. Keep a recovery route
 
-```powershell
-exit
-ssh deploy@ai-calls.homebble.in
+If you ever get locked out — wrong password, or fail2ban bans your own office IP — use the
+**DigitalOcean console** (droplet page → **Console** button, top right). It opens a terminal
+in your browser that does not go through SSH, so it works even when SSH does not. To clear a
+self-inflicted ban:
+
+```bash
+fail2ban-client set sshd unbanip YOUR.IP.HERE
 ```
-
-**Ab se saara kaam `deploy` user se hoga.**
 
 ---
 
-## 6. Docker install kijiye
+## 6. Install Docker
 
 ```bash
-sudo apt-get install -y ca-certificates curl gnupg
-sudo install -m 0755 -d /etc/apt/keyrings
+apt-get install -y ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
+  gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
 
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  > /etc/apt/sources.list.d/docker.list
 
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# deploy user ko docker chalane ki permission
-sudo usermod -aG docker deploy
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
-Ab **logout-login** kijiye (group change tabhi lagta hai):
-
-```bash
-exit
-```
-```powershell
-ssh deploy@ai-calls.homebble.in
-```
-
-Check:
+Check all three work:
 
 ```bash
 docker --version
@@ -230,71 +259,87 @@ docker compose version
 docker run --rm hello-world
 ```
 
-Teeno chalein to Docker ready hai.
+---
+
+## 7. Connect to the managed database
+
+### 7a. Allow the droplet through
+
+Console → **Databases → your cluster → Settings → Trusted Sources → Edit**
+
+Select your **droplet** from the dropdown. Save.
+
+If "All IPv4" was listed before, **remove it.** Trusted Sources is a firewall on the database
+itself — with only the droplet listed, nothing else on the internet can even attempt to
+connect, regardless of whether it has the password.
+
+> After this your laptop can no longer reach the database directly. If you need that for
+> local development, add your own IP as a second entry.
+
+### 7b. Copy the connection string
+
+Same page → **Connection Details** → **Connection string** → copy it.
+
+It looks like:
+
+```
+postgresql://doadmin:PASSWORD@db-blr1-xxxxx.b.db.ondigitalocean.com:25060/defaultdb?sslmode=require
+```
+
+### 7c. Adjust it for this application
+
+Make one change: replace `?sslmode=require` with **`?ssl=require`**.
+
+```
+postgresql://doadmin:PASSWORD@db-blr1-xxxxx.b.db.ondigitalocean.com:25060/defaultdb?ssl=require
+```
+
+Keep whatever database name you are already using in place of `defaultdb`.
+
+> **Why the rename?** The driver this application uses (`asyncpg`) recognises `ssl`, not
+> `sslmode`. Without it the driver defaults to "prefer", which tries SSL and **silently falls
+> back to an unencrypted connection** if it fails, without verifying the server's certificate.
+> `ssl=require` makes encryption mandatory. This was tested against your cluster.
+
+### About VPC / private networking
+
+You may have noticed a "VPC network" option in the connection details. Ignore it. Here is
+what it does and why you do not need it:
+
+A VPC keeps database traffic on DigitalOcean's internal network instead of the public
+internet. That sounds important, but in your setup it adds little:
+
+- The connection is already encrypted with TLS (`ssl=require`)
+- The database already rejects everyone except your droplet (Trusted Sources)
+- Both machines are in the same datacentre, so the latency difference is negligible
+- Database queries do not happen during a call — project data is cached in Redis, and the
+  call record is written after the call ends. So this is not on the latency path at all.
+
+It is a defence-in-depth measure for larger deployments. **Use the public connection string
+with `ssl=require`.** It is simpler, has fewer ways to go wrong, and is entirely appropriate
+at your scale.
 
 ---
 
-## 7. Managed Postgres ko droplet se jodiye
+## 8. Get the code onto the droplet
 
-### 7a. Trusted source add kijiye
-
-Console → **Databases → aapka cluster → Settings → Trusted Sources → Edit**
-
-Apna **droplet** chunein (dropdown mein naam se dikhega). Save kijiye.
-
-Agar pehle "All IPv4" tha to **use hata dijiye** — ab sirf droplet hi DB tak pahunche.
-
-> Dhyaan: is ke baad aapke laptop se DB connect nahi hoga. Local development ke liye
-> apna IP bhi add karna padega, ya laptop wale kaam ke liye alag entry rakhein.
-
-### 7b. Private connection string lijiye
-
-Usi page par **Connection Details** → dropdown mein **VPC network** chunein (Public network
-nahi). `Connection string` copy kar lijiye. Wo aisa dikhega:
-
-```
-postgresql://doadmin:PASSWORD@private-db-blr1-xxxxx.b.db.ondigitalocean.com:25060/defaultdb?sslmode=require
-```
-
-Private network use karne se DB traffic internet par nahi jaata — tez bhi hai aur safe bhi.
-
-### 7c. URL ko app ke format mein badliye
-
-Do badlaav kijiye:
-
-1. `?sslmode=require` ko **`?ssl=require`** kar dijiye — asyncpg `ssl` samajhta hai, `sslmode` nahi
-2. Database ka naam wahi rakhiye jo aap use kar rahe hain (aapka current DB naam)
-
-Final aisa hoga:
-
-```
-postgresql://doadmin:PASSWORD@private-db-blr1-xxxxx.b.db.ondigitalocean.com:25060/YOURDB?ssl=require
-```
-
-> **`ssl=require` kyun zaroori hai?** Agar ye na ho to asyncpg `ssl=prefer` use karta hai,
-> jiska matlab: SSL try karega, fail hone par **chup-chaap plaintext par gir jaayega**, aur
-> server ka certificate verify bhi nahi karega. `require` se SSL compulsory ho jaata hai.
-> Maine ye aapke cluster par test kiya hai — `ssl=require` kaam karta hai.
-
----
-
-## 8. Code droplet par laiye
-
-Repo private hai, to GitHub **deploy key** banate hain (password se behtar).
+The repository is private, so create a **deploy key** — a key that grants read-only access to
+this one repository.
 
 ```bash
 ssh-keygen -t ed25519 -C "droplet-deploy-key" -f ~/.ssh/github_deploy -N ""
 cat ~/.ssh/github_deploy.pub
 ```
 
-Jo output aaye use copy kijiye. Ab GitHub par:
+Copy the output. Then on GitHub:
 
 **Repo → Settings → Deploy keys → Add deploy key**
-- Title: `homebble-voice-droplet`
-- Key: paste kijiye
-- **Allow write access: OFF** (droplet ko sirf padhna hai)
 
-Add kijiye. Ab droplet par SSH config:
+- Title: `homebble-voice-droplet`
+- Key: paste it
+- **Allow write access: leave OFF** — the droplet only needs to read
+
+Back on the droplet:
 
 ```bash
 cat >> ~/.ssh/config <<'EOF'
@@ -303,169 +348,168 @@ Host github.com
   IdentitiesOnly yes
 EOF
 chmod 600 ~/.ssh/config
-```
 
-Clone kijiye:
-
-```bash
 cd ~
 git clone git@github.com:markanthony-projects/AI_CALLING_AGENT.git app
 cd app
 ```
 
-Pehli baar `yes` type karna padega.
-
-> **Agar clone fail ho:** matlab aapka local kaam abhi GitHub par push nahi hua. Laptop par
-> `git status` dekhiye — bahut si files untracked hain. Push karna hai to mujhe bataiye,
-> main commit aur push kar dunga.
+Type `yes` at the host key prompt.
 
 ---
 
-## 9. `.env` file banaiye
+## 9. Create the `.env` file
 
-**Ye sabse important step hai.** Yahan galti hui to kuch nahi chalega.
+This is the step most worth double-checking. A mistake here means nothing starts.
 
-Pehle secrets banaiye (droplet par hi):
+First generate the two application secrets:
 
 ```bash
 python3 scripts/gen_secrets.py
 ```
 
-Output ko safe jagah note kar lijiye — screen par ek hi baar aayega.
+These are values you create, not values you obtain from anyone. Note them down — they are
+printed once.
 
-Ab file banaiye:
+Now create the file:
 
 ```bash
 nano .env
 ```
 
-Neeche wala paste kijiye aur `<...>` waale hisse apne values se badliye:
+Paste the following and replace every `<...>` with your own value:
 
 ```bash
-# ---- Auth (production) ----
-# AUTH_ENABLED yahan likhna hi nahi hai. Default true hai. Likhne se galti ka risk hai.
-API_KEY=<gen_secrets se pehli line>
-CALL_TOKEN_SECRET=<gen_secrets se doosri line>
+# ---- Authentication ----
+# AUTH_ENABLED is deliberately absent. It defaults to true; writing it out only creates
+# a chance of setting it to false by accident.
+API_KEY=<first line from gen_secrets.py>
+CALL_TOKEN_SECRET=<second line from gen_secrets.py>
 CALL_TOKEN_TTL_SECONDS=900
 DOCS_ENABLED=false
 
-# ---- Database (managed, Step 7c) ----
-DATABASE_URL=postgresql://doadmin:<PASSWORD>@<private-host>:25060/<DBNAME>?ssl=require
+# ---- Database (from Step 7c) ----
+DATABASE_URL=postgresql://doadmin:<PASSWORD>@<your-db-host>:25060/<DBNAME>?ssl=require
 
-# ---- Redis: compose isko override karta hai, phir bhi rakhiye ----
+# ---- Redis (compose overrides this; keep it anyway) ----
 REDIS_URL=redis://redis:6379/0
 
 # ---- AI providers ----
-DEEPGRAM_API_KEY=<aapki key>
-SARVAM_API_KEY=<aapki key>
+DEEPGRAM_API_KEY=<your key>
+SARVAM_API_KEY=<your key>
 SARVAM_VOICE_ID=simran
-OPENAI_API_KEY=<aapki key>
-GROQ_API_KEY=<aapki key>
+OPENAI_API_KEY=<your key>
+GROQ_API_KEY=<your key>
 
 # ---- Telephony ----
-VOBIZ_AUTH_ID=<aapka id>
-VOBIZ_AUTH_TOKEN=<aapka token>
-VOBIZ_PHONE_NUMBER=<aapka number>
+VOBIZ_AUTH_ID=<your id>
+VOBIZ_AUTH_TOKEN=<your token>
+VOBIZ_PHONE_NUMBER=<your number>
 WEBHOOK_BASE_URL=https://ai-calls.homebble.in
 
-# ---- Dial ceilings (leaked key ka nuksaan seemit karta hai) ----
+# ---- Capacity and spend limits ----
+MAX_CONCURRENT_CALLS=4
 DIAL_MAX_PER_MINUTE=30
 DIAL_MAX_PER_DAY=500
 
 DEFAULT_COUNTRY_CODE=91
 ```
 
-Save: `Ctrl+O` → Enter → `Ctrl+X`
+Save with `Ctrl+O`, Enter, then `Ctrl+X`.
 
-Ab permission lock kijiye:
+Lock the file down:
 
 ```bash
 chmod 600 .env
-ls -l .env      # -rw------- dikhna chahiye
+ls -l .env      # should show -rw-------
 ```
 
-**`WEBHOOK_BASE_URL` mein trailing slash mat dijiye.** `https://ai-calls.homebble.in` — bas.
+Two things to get right:
+
+- **No trailing slash** on `WEBHOOK_BASE_URL`. Just `https://ai-calls.homebble.in`
+- **No spaces** around the `=` signs
 
 ---
 
-## 10. Stack start kijiye
+## 10. Start everything
 
-### 10a. Pehle app containers start kijiye (nginx ke bina)
+Three stages, because nginx cannot start until a certificate exists.
+
+### 10a. Start the application containers
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build redis migrate api worker
 ```
 
-Pehli baar 3–6 minute lagenge (Docker image ban raha hai).
+The first build takes 3–6 minutes. Then:
 
 ```bash
 docker compose -f docker-compose.prod.yml ps
 ```
 
-| Service | State |
+| Service | Expected state |
 |---|---|
 | `redis` | Up (healthy) |
-| `migrate` | **Exited (0)** ← ye sahi hai |
+| `migrate` | **Exited (0)** |
 | `api` | Up |
 | `worker` | Up |
 
-> `migrate` ka `Exited (0)` **success** hai. Usne DB migration chala kar kaam khatam kiya.
-> `Exited (1)` ho to migration fail hui — `docker compose -f docker-compose.prod.yml logs migrate`
+> `Exited (0)` for `migrate` means **success.** It applied the database migrations and
+> finished. `Exited (1)` means it failed — check
+> `docker compose -f docker-compose.prod.yml logs migrate`. Almost always a wrong
+> `DATABASE_URL` or a missing Trusted Sources entry.
 
-### 10b. TLS certificate lijiye
+### 10b. Obtain the TLS certificate
 
-Nginx bina certificate ke start nahi hota, aur certbot ko certificate lene ke liye nginx
-chahiye. Ye murgi-anda problem ek script solve karti hai — wo pehle ek nakli certificate
-rakhti hai, nginx start karti hai, phir asli certificate laakar nakli hata deti hai.
+Nginx will not start without a certificate, and certbot cannot obtain one until nginx is
+serving the challenge. A script resolves this: it installs a temporary self-signed
+certificate, starts nginx, then replaces it with the real one.
 
-**Pehle staging par test kijiye** (production CA mein ghanta bhar mein sirf 5 galtiyaan
-allowed hain):
+**Test with the staging service first.** The production service allows only 5 failures per
+hour, and a DNS mistake is much cheaper to discover here:
 
 ```bash
 STAGING=1 LETSENCRYPT_EMAIL=you@homebble.in ./scripts/init_letsencrypt.sh
 ```
 
-Script pehle check karti hai ki `ai-calls.homebble.in` isi droplet par point karta hai. Agar
-DNS galat hai to wo wahin ruk jaayegi — ye jaan-boojh kar hai, warna aap rate limit mein
-phas jaate.
+The script first verifies that `ai-calls.homebble.in` resolves to this droplet. If it does
+not, it stops — deliberately, so you do not spend your rate limit on a known-bad setup.
 
-`curl -k https://ai-calls.homebble.in/health` chale to staging kaam kar gaya. Ab asli
-certificate lijiye:
+Confirm it worked:
+
+```bash
+curl -k https://ai-calls.homebble.in/health
+```
+
+(`-k` skips certificate validation, which is expected with staging.)
+
+Now get the real certificate:
 
 ```bash
 rm -rf ./certbot/conf/live ./certbot/conf/archive ./certbot/conf/renewal
 LETSENCRYPT_EMAIL=you@homebble.in ./scripts/init_letsencrypt.sh
 ```
 
-### 10c. Poora stack start kijiye
+### 10c. Start the full stack
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps
 ```
 
-Ab saat services mein se ye dikhni chahiye:
+You should now have six services, with `nginx` and `certbot` both Up.
 
-| Service | State |
-|---|---|
-| `redis` | Up (healthy) |
-| `migrate` | Exited (0) |
-| `api` | Up |
-| `worker` | Up |
-| `nginx` | Up |
-| `certbot` | Up |
-
-`certbot` background mein chalta rehta hai — har 12 ghante jaagta hai aur 30 din se kam
-bache certificate ko renew karta hai. Nginx har 6 ghante khud reload karta hai, to naya
-certificate apne aap uth jaata hai.
+`certbot` runs continuously — it wakes every 12 hours and renews any certificate within 30
+days of expiry. Nginx reloads itself every 6 hours so a renewed certificate is picked up
+without you doing anything.
 
 ---
 
-## 11. Sab kuch verify kijiye
+## 11. Verify the deployment
 
-### 11a. HTTPS aur auth
+### 11a. HTTPS and authentication
 
-Laptop se:
+From your laptop:
 
 ```powershell
 curl https://ai-calls.homebble.in/health
@@ -477,10 +521,10 @@ Expected:
 {"status":"ok","auth":"enabled"}
 ```
 
-- `"auth":"enabled"` — auth chalu hai ✅
-- Browser mein padlock dikhna chahiye
+`"auth":"enabled"` confirms authentication is active. Your browser should also show a padlock
+with no warning.
 
-Agar certificate ka problem ho to:
+If the certificate is not working:
 
 ```bash
 docker compose -f docker-compose.prod.yml logs nginx
@@ -488,89 +532,95 @@ docker compose -f docker-compose.prod.yml exec nginx nginx -t
 docker compose -f docker-compose.prod.yml run --rm --entrypoint "certbot certificates" certbot
 ```
 
-Aakhri command batayegi ki certificate kis din expire hoga.
+The last command shows the expiry date.
 
-### 11b. Docs band hain
-
-```powershell
-curl -o /dev/null -w "%{http_code}" https://ai-calls.homebble.in/docs
-```
-
-**404** aana chahiye. Aa gaya to schema public nahi hai ✅
-
-### 11c. API key ke bina block hota hai
+### 11b. The API schema is not public
 
 ```powershell
-curl -o /dev/null -w "%{http_code}" -X POST https://ai-calls.homebble.in/api/v1/campaigns/
+curl -o NUL -w "%{http_code}" https://ai-calls.homebble.in/docs
 ```
 
-**401** aana chahiye ✅
+Expected: **404**
 
-### 11d. DB migration ho gayi
+### 11c. Requests without a key are rejected
+
+```powershell
+curl -o NUL -w "%{http_code}" -X POST https://ai-calls.homebble.in/api/v1/campaigns/
+```
+
+Expected: **401**
+
+### 11d. Database migrations applied
 
 ```bash
 docker compose -f docker-compose.prod.yml exec api alembic current
 ```
 
-`db0682dd0be0 (head)` dikhna chahiye.
+Expected: `db0682dd0be0 (head)`
 
-### 11e. Worker zinda hai
+### 11e. The worker is alive
 
 ```bash
 docker compose -f docker-compose.prod.yml logs --tail 20 worker
 ```
 
-Har minute ye line aani chahiye:
+Every minute you should see:
 
 ```
 recording health: j_complete=0 j_failed=0 j_ongoing=0 queued=0
 ```
 
-`queued=0` matlab koi kaam pending nahi ✅
+`queued=0` means nothing is waiting. If that number grows and never falls, the worker has
+stopped picking up jobs.
+
+### 11f. fail2ban is watching
+
+```bash
+fail2ban-client status sshd
+```
 
 ---
 
-## 12. Vobiz ko naya URL bataiye
+## 12. Update Vobiz
 
-Vobiz dashboard mein aapka answer URL abhi pinggy tunnel par hai. Usko badal dijiye:
+In the Vobiz dashboard, change the answer URL to:
 
 ```
 https://ai-calls.homebble.in/vobiz/answer/{campaign_id}/{call_sid}
 ```
 
-App khud hi `?token=...` जोड़ता hai jab call place karta hai, to aapko token manually nahi
-dena. Bas base URL sahi hona chahiye.
+The application appends the `?token=...` itself when placing a call — you do not add it.
 
 ---
 
-## 13. Pehli test call
+## 13. Make a test call
 
-Apne hi number par kijiye — kisi customer par nahi.
+Call your own number, not a customer's.
 
 ```powershell
-curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/cdd5da76-a87d-4f98-9f32-5fe1f7869b77/dial/vobiz" `
-  -H "X-API-Key: <aapka API_KEY>" `
+curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/<CAMPAIGN_ID>/dial/vobiz" `
+  -H "X-API-Key: <your API_KEY>" `
   -H "Content-Type: application/json" `
   -d '{\"phone_numbers\":[\"+919604100447\"]}'
 ```
 
-Saath hi droplet par logs dekhte rahiye:
+Watch the logs while it runs:
 
 ```bash
 docker compose -f docker-compose.prod.yml logs -f api worker
 ```
 
-**Kya dekhna hai:**
+What to check during the call:
 
-| Check | Expected |
+| Test | Expected behaviour |
 |---|---|
-| Priya pehle bolti hai | 1–2 second mein, silence nahi |
-| Beech mein rukein | turn na toote |
-| Din bataayein, time nahi | agent time poochhe, call band na kare |
-| Time bhi bataayein | sign-off mein time repeat ho |
-| Log mein | `phone=+91...`, `unit=...`, `status=...` |
+| Call connects | Priya speaks within 1–2 seconds, no silence |
+| Pause mid-sentence | your turn is not split; the agent waits |
+| Give a day but no time | the agent asks for a time and does **not** hang up |
+| Then give a time | the closing line repeats the day and time back to you |
+| Worker log | `phone=+91...`, `unit=...`, `status=...` all populated |
 
-Phir DB check:
+Then confirm the data landed:
 
 ```bash
 docker compose -f docker-compose.prod.yml exec api python -c "
@@ -578,18 +628,66 @@ import asyncio
 from sqlalchemy import select
 from app.core.database import AsyncSessionLocal
 from app.models.db import Lead
-async def m():
+async def main():
     async with AsyncSessionLocal() as db:
-        l = (await db.execute(select(Lead).order_by(Lead.created_at.desc()).limit(1))).scalars().first()
-        for f in ('customer_name','phone_number','budget','preferred_unit_type','status','site_visit_time'):
-            print(f'{f:20} = {getattr(l,f)}')
-asyncio.run(m())
+        lead = (await db.execute(
+            select(Lead).order_by(Lead.created_at.desc()).limit(1)
+        )).scalars().first()
+        for f in ('customer_name','phone_number','budget','preferred_unit_type',
+                  'status','site_visit_time'):
+            print(f'{f:20} = {getattr(lead, f)}')
+asyncio.run(main())
 "
 ```
 
 ---
 
-## 14. Roz ke kaam (Operations)
+## 14. Testing after deployment
+
+The server is live but you are still testing. A few things make that easier.
+
+**Enable the API docs temporarily.** Swagger gives you an "Authorize" button so you can paste
+the API key once and test every endpoint from the browser:
+
+```bash
+sed -i 's/^DOCS_ENABLED=.*/DOCS_ENABLED=true/' .env
+docker compose -f docker-compose.prod.yml up -d api
+```
+
+Then open `https://ai-calls.homebble.in/docs`. **Set it back to `false` when you are done** —
+it publishes your full route list.
+
+**Test without spending Vobiz credit.** The browser test client runs the same voice agent
+through your browser's microphone instead of the phone network:
+
+```powershell
+curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/<CAMPAIGN_ID>/dial/browser" `
+  -H "X-API-Key: <your API_KEY>"
+```
+
+It returns a link to open. Note that this still consumes Groq, Deepgram and Sarvam credit —
+only the telephony leg is free.
+
+**Clear test data before going live:**
+
+```bash
+docker compose -f docker-compose.prod.yml exec api python -c "
+import asyncio
+from sqlalchemy import text
+from app.core.database import engine
+async def main():
+    async with engine.begin() as c:
+        await c.execute(text('TRUNCATE transcripts, calls, leads RESTART IDENTITY CASCADE'))
+        print('cleared')
+asyncio.run(main())
+"
+```
+
+Projects and campaigns are preserved — those are what the agent pitches from.
+
+---
+
+## 15. Day-to-day operations
 
 ```bash
 cd ~/app
@@ -598,64 +696,58 @@ cd ~/app
 docker compose -f docker-compose.prod.yml logs -f api
 docker compose -f docker-compose.prod.yml logs -f worker
 docker compose -f docker-compose.prod.yml logs --tail 100 nginx
-docker compose -f docker-compose.prod.yml logs --tail 50 certbot
 
-# Restart
+# Restart one service
 docker compose -f docker-compose.prod.yml restart api
 
-# Naya code deploy
+# Deploy new code
 git pull
 docker compose -f docker-compose.prod.yml up -d --build
 
-# Status
+# Status and resource use
 docker compose -f docker-compose.prod.yml ps
 docker stats --no-stream
 ```
 
-### ⚠️ Kabhi ye mat chalaiye
+### Never run this
 
 ```bash
-docker compose -f docker-compose.prod.yml down -v     # ❌ -v Redis ka data uda dega
+docker compose -f docker-compose.prod.yml down -v      # the -v is the problem
 ```
 
-`-v` volumes delete karta hai. Redis mein pending extraction jobs hoti hain — wo gum ho
-jaayengi aur un calls ki leads kabhi nahi banengi. Sirf `down` (bina `-v`) safe hai.
+`-v` deletes volumes, including Redis. Any extraction jobs still queued are lost, and those
+calls never produce a lead. Plain `down` without `-v` is safe.
 
-### Test data saaf karna (jab production shuru karein)
+### Raising capacity later
+
+If you resize the droplet, update the cap to match — roughly two calls per vCPU:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec api python -c "
-import asyncio
-from sqlalchemy import text
-from app.core.database import engine
-async def m():
-    async with engine.begin() as c:
-        await c.execute(text('TRUNCATE transcripts, calls, leads RESTART IDENTITY CASCADE'))
-        print('cleared')
-asyncio.run(m())
-"
+sed -i 's/^MAX_CONCURRENT_CALLS=.*/MAX_CONCURRENT_CALLS=8/' .env
+docker compose -f docker-compose.prod.yml up -d api
 ```
 
-Projects aur campaigns bache rahenge — agent unhi se pitch karta hai.
+Setting it higher than the host can carry degrades every call in progress instead of
+rejecting the extra one.
 
 ---
 
-## 15. Kuch galat ho to
+## 16. Troubleshooting
 
-| Problem | Kya karein |
+| Symptom | What to check |
 |---|---|
-| `curl /health` timeout | Cloud firewall mein 443 khula hai? `docker compose ... ps` mein nginx Up hai? |
-| Certificate nahi mila | `nslookup` sahi IP de raha hai? Port 80 khula hai? `logs certbot` |
-| Deploy ke baad `502 Bad Gateway` | `logs nginx` dekhiye. Config mein resolver hai to apne aap theek ho jaata hai 10s mein; warna `restart nginx` |
-| `nginx: [emerg] cannot load certificate` | certificate nahi bana. Step 10b dobara chalaiye |
-| `migrate` Exited (1) | `logs migrate` — 99% cases mein `DATABASE_URL` galat hai ya trusted source add nahi hua |
-| DB connection refused | Step 7a: droplet trusted sources mein hai? Private host use kiya? |
-| `401` sahi key ke saath bhi | header `X-API-Key` hai (case matter karta hai)? `.env` mein extra space? |
-| Call connect hoti hai, awaaz nahi | `logs api` mein Sarvam/Deepgram error dekhiye — credits khatam? |
-| Lead nahi ban rahi | `logs worker`. `queued` badhta ja raha hai? Worker crash hua? |
-| Call ke beech audio toot rahi | droplet chhota hai — `docker stats` mein CPU dekhiye, resize karein |
+| `curl /health` times out | Is 443 open in the cloud firewall? Is `nginx` Up in `ps`? |
+| Certificate not issued | Does `nslookup` return the right IP? Is port 80 open? `logs certbot` |
+| `migrate` exited (1) | `logs migrate`. Nearly always a wrong `DATABASE_URL` or a missing Trusted Sources entry |
+| Database connection refused | Step 7a — is the droplet in Trusted Sources? Is `?ssl=require` present? |
+| `502 Bad Gateway` after deploying | `logs nginx`. Should self-correct within 10 seconds; if not, `restart nginx` |
+| `401` even with the right key | Header must be exactly `X-API-Key`. Check for stray spaces in `.env` |
+| Call connects but there is no audio | `logs api` — look for Sarvam or Deepgram errors. Out of credit? |
+| No lead created | `logs worker`. Is `queued` climbing? Did the worker crash? |
+| Audio breaking up | `docker stats` — if CPU is saturated, lower `MAX_CONCURRENT_CALLS` or resize |
+| Locked out of SSH | Use the DigitalOcean browser console, then `fail2ban-client set sshd unbanip YOUR.IP` |
 
-Logs bhejne ke liye:
+To capture logs for sharing:
 
 ```bash
 docker compose -f docker-compose.prod.yml logs --tail 200 api > /tmp/api.log
@@ -663,39 +755,43 @@ docker compose -f docker-compose.prod.yml logs --tail 200 api > /tmp/api.log
 
 ---
 
-## 16. Go-live se pehle final checklist
+## 17. Final checklist before going live
 
-- [ ] `curl /health` → `{"status":"ok","auth":"enabled"}`
-- [ ] `/docs` → 404
-- [ ] Bina API key → 401
-- [ ] Browser mein padlock (valid TLS)
-- [ ] `alembic current` → `db0682dd0be0 (head)`
-- [ ] Cloud firewall: sirf 22 (My IP), 80, 443
-- [ ] DB trusted sources: sirf droplet
-- [ ] `DATABASE_URL` mein `?ssl=require` hai
-- [ ] `.env` permissions `600`
-- [ ] Root SSH login band
-- [ ] Vobiz webhook naye domain par
-- [ ] Vobiz account par **balance alert** laga hua
-- [ ] Ek test call safaltapoorvak, lead DB mein
-- [ ] Test data truncate kiya
+- [ ] `curl /health` returns `{"status":"ok","auth":"enabled"}`
+- [ ] `/docs` returns 404
+- [ ] A request without an API key returns 401
+- [ ] Browser shows a valid padlock
+- [ ] `alembic current` shows `db0682dd0be0 (head)`
+- [ ] `fail2ban-client status sshd` reports the jail is active
+- [ ] Cloud firewall allows only 22, 80, 443
+- [ ] Database Trusted Sources lists only the droplet
+- [ ] `DATABASE_URL` contains `?ssl=require`
+- [ ] `.env` permissions are `600`
+- [ ] Root password is 20+ random characters and stored in a password manager
+- [ ] Vobiz points at the new domain
+- [ ] A **balance alert** is configured on your Vobiz account
+- [ ] One successful test call, with the lead visible in the database
+- [ ] Test data cleared
 
 ---
 
-## Baaki cheezein jo abhi nahi hain
+## What this deployment does not yet include
 
-Ye jaan-boojh kar chhodi gayi hain, chhupayi nahi gayi:
+Listed openly rather than left to be discovered:
 
-- **Database backup** — DO managed Postgres daily backup deta hai, par aapne verify nahi
-  kiya ki restore chalta hai. Ek baar test restore kar lena chahiye.
-- **`doadmin` superuser** — app DB ka admin user use kar rahi hai. Production grade mein
-  ek limited user hona chahiye jo sirf apni tables padh/likh sake.
-- **`ssl=verify-full`** — abhi `require` hai. `verify-full` server ka certificate bhi
-  verify karta hai, par uske liye DO ka CA certificate file droplet par rakhni padegi.
-- **Ek hi droplet** — droplet gaya to sab gaya. Uptime chahiye to load balancer + do
-  droplets, par tab Redis ko shared karna padega.
-- **Alerting** — abhi kuch nahi hai jo aapko batayega ki calls fail ho rahi hain. Logs
-  khud dekhne padenge.
-- **Read APIs** — sales team ke liye leads dekhne ka koi endpoint nahi hai.
+- **Verified backups.** DigitalOcean backs up managed Postgres daily, but you have not tested
+  a restore. Untested backups are not backups.
+- **A limited database user.** The application connects as `doadmin`, the cluster
+  administrator. A dedicated user with access only to its own tables would be better.
+- **Per-person server accounts.** Everyone shares the root password, so the logs cannot tell
+  you who did what. Fine for two or three people who trust each other; worth revisiting as
+  the team grows.
+- **Certificate pinning for the database.** `ssl=require` encrypts the connection but does not
+  verify the server's certificate. `ssl=verify-full` would, but needs DigitalOcean's CA
+  certificate placed on the droplet.
+- **A second server.** One droplet means one point of failure. Redundancy needs a load
+  balancer and shared Redis.
+- **Alerting.** Nothing notifies you when calls start failing. You have to read the logs.
+- **Read APIs for the sales team.** There is no endpoint yet for viewing leads.
 
-Inme se koi bhi chahiye to bataiye.
+Ask when you want any of these.

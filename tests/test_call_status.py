@@ -48,7 +48,7 @@ def test_idle_timeout_is_reported_as_idle():
 
 
 def test_idle_timeout_is_shorter_than_pipecat_default():
-    """300s of a wedged leg holds one of MAX_CALLS slots for five minutes."""
+    """300s of a wedged leg holds one of the concurrency slots for five minutes."""
     from app.services.agent import IDLE_TIMEOUT_SECS
 
     assert 0 < IDLE_TIMEOUT_SECS <= 120

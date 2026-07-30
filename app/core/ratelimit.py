@@ -1,6 +1,6 @@
 """Ceilings on outbound dialing.
 
-The API key is a bearer secret: whoever holds it can dial. MAX_CALLS caps how many media
+The API key is a bearer secret: whoever holds it can dial. MAX_CONCURRENT_CALLS caps media
 streams run at once, but Vobiz bills at dial time and that check only runs when the stream
 opens — so a runaway loop or a leaked key could place thousands of billed calls of which
 eight got audio. These ceilings sit in front of the dial instead.
