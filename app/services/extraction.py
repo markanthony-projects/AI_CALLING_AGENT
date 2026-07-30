@@ -1,11 +1,19 @@
-import asyncio
 from loguru import logger
-from app.worker import process_extraction
 
-async def dispatch_extraction_task(transcript: str, call_sid: str):
+from app.core.queue import get_arq_pool
+
+
+async def enqueue_extraction(call_sid: str) -> bool:
+    """Hand the call off to the arq worker; the transcript is already durable in Postgres."""
     try:
-        # Schedule the background extraction natively in Uvicorn's event loop
-        asyncio.create_task(process_extraction(transcript, call_sid))
-        logger.info(f"Dispatched background extraction task natively for {call_sid}")
+        job = await get_arq_pool().enqueue_job("process_extraction", call_sid, _job_id=f"extract:{call_sid}")
     except Exception as e:
-        logger.error(f"Failed to dispatch extraction task for {call_sid}: {e}")
+        logger.error(f"[{call_sid}] Failed to enqueue extraction job: {e}")
+        return False
+
+    if job is None:
+        logger.info(f"[{call_sid}] Extraction job already queued or recently completed; skipping duplicate")
+        return False
+
+    logger.info(f"[{call_sid}] Enqueued extraction job {job.job_id}")
+    return True

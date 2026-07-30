@@ -1,11 +1,11 @@
-from sqlalchemy import Column, String, Text, DateTime, Numeric, Enum, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, Numeric, Enum, ForeignKey, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 import uuid
-from datetime import datetime
 import enum
 from pgvector.sqlalchemy import Vector
 from app.core.database import Base
+from app.utils.timeutils import utc_now
 
 class LeadStatus(str, enum.Enum):
     HOT = "HOT"
@@ -49,7 +49,7 @@ class Campaign(Base):
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
     name = Column(String, nullable=False)
     status = Column(Enum(CampaignStatus), default=CampaignStatus.ACTIVE)
-    start_date = Column(DateTime, default=datetime.utcnow)
+    start_date = Column(DateTime, default=utc_now)
     end_date = Column(DateTime)
     total_leads_dialed = Column(Numeric, default=0)
     
@@ -60,27 +60,50 @@ class Lead(Base):
     __tablename__ = "leads"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # The number we dialled, carried over from the Call. Without it a booked site visit
+    # cannot be confirmed, a lead cannot be de-duplicated, and DND cannot be honoured.
+    phone_number = Column(String, index=True)
     customer_name = Column(String)
     preferred_location = Column(String)
-    budget = Column(Numeric)
+    # Which configuration the prospect wants, normalised against the project's config_json
+    # so "2bhk"/"2 BHK"/"two bedroom" all land on the same value a rep can filter by.
+    preferred_unit_type = Column(String)
+    budget = Column(Numeric(14, 2))
     timeline = Column(String)
     callback_time = Column(DateTime)
     site_visit_time = Column(DateTime)
-    status = Column(Enum(LeadStatus))
-    
+    # A null status hides the lead from every filter sales works from, so the column carries
+    # the floor rather than trusting each writer to supply one.
+    status = Column(
+        Enum(LeadStatus),
+        default=LeadStatus.WARM,
+        server_default=text("'WARM'"),
+        nullable=False,
+    )
+    created_at = Column(
+        DateTime,
+        default=utc_now,
+        server_default=text("(now() at time zone 'utc')"),
+        nullable=False,
+    )
+
     calls = relationship("Call", back_populates="lead")
 
 class Call(Base):
     __tablename__ = "calls"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id"), nullable=False)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id"), index=True, nullable=False)
     lead_id = Column(UUID(as_uuid=True), ForeignKey("leads.id"), nullable=True)
     call_sid = Column(String, unique=True, index=True, nullable=False)
+    # E.164 number actually dialled. Recorded here so a call can be traced to a person even
+    # when extraction produces no lead.
+    phone_number = Column(String, index=True)
     status = Column(Enum(CallStatus), default=CallStatus.IN_PROGRESS)
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=utc_now)
     ended_at = Column(DateTime, nullable=True)
-    duration_seconds = Column(Numeric, nullable=True)
+    # Bounded precision: an unbounded NUMERIC stored 54.51915999999999939973349682986736
+    duration_seconds = Column(Numeric(10, 2), nullable=True)
     
     campaign = relationship("Campaign", back_populates="calls")
     lead = relationship("Lead", back_populates="calls")
@@ -92,6 +115,6 @@ class Transcript(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     call_id = Column(UUID(as_uuid=True), ForeignKey("calls.id"), unique=True, nullable=False)
     full_text = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
     
     call = relationship("Call", back_populates="transcript")

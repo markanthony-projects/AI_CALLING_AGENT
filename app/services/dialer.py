@@ -1,5 +1,6 @@
 import httpx
 from app.core.config import settings
+from app.core.security import issue_call_token
 from loguru import logger
 
 async def trigger_vobiz_call(customer_number: str, campaign_id: str, call_sid: str) -> bool:
@@ -19,7 +20,8 @@ async def trigger_vobiz_call(customer_number: str, campaign_id: str, call_sid: s
     base_url = settings.WEBHOOK_BASE_URL.rstrip('/')
     
     # URL that Vobiz will hit when the customer answers the phone
-    answer_url = f"{base_url}/vobiz/answer/{campaign_id}/{call_sid}"
+    token = issue_call_token(campaign_id, call_sid)
+    answer_url = f"{base_url}/vobiz/answer/{campaign_id}/{call_sid}?token={token}"
     
     data = {
         "to": customer_number,

@@ -1,0 +1,95 @@
+# Docker's default json-file driver never rotates. This service logs every ASGI request,
+# so an unbounded log fills the droplet's disk and takes Postgres down with it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: voiceagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: voiceagent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voiceagent -d voiceagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    logging: *default-logging
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Runs migrations to completion, then exits. api and worker wait for it, so no process
+  # ever starts against a schema it does not expect.
+  migrate:
+    build: .
+    logging: *default-logging
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voiceagent:${POSTGRES_PASSWORD}@postgres:5432/voiceagent
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    logging: *default-logging
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voiceagent:${POSTGRES_PASSWORD}@postgres:5432/voiceagent
+      REDIS_URL: redis://redis:6379/0
+    # Localhost only. Docker publishes ports by writing its own iptables rules, which sit in
+    # front of UFW — "0.0.0.0:8000" would put the unfronted API on the public internet even
+    # with UFW denying it. Nginx reaches it from inside the droplet.
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    logging: *default-logging
+    command: ["arq", "app.worker.WorkerSettings"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voiceagent:${POSTGRES_PASSWORD}@postgres:5432/voiceagent
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

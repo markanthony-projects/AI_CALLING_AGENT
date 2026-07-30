@@ -1,0 +1,85 @@
+# Droplet deployment: DigitalOcean managed Postgres (BLR), Redis local to the box.
+#
+# Redis runs here rather than as a managed service — same host, no network hop, no extra
+# bill. It is not only a cache: arq's job queue lives in it, and the API and worker are
+# separate processes, so an in-process store could not pass an extraction job between them.
+#
+# Postgres is absent on purpose. DATABASE_URL points at the managed cluster, so the only
+# database credentials on this box are in the env file.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  redis:
+    image: redis:7-alpine
+    # appendonly survives a droplet reboot; without it a restart loses queued extractions.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Runs to completion before api and worker start, so no process ever serves traffic
+  # against a schema it does not expect.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    restart: "no"
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["arq", "app.worker.WorkerSettings"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  # Terminates TLS and obtains its own certificate. The API key travels in a header on every
+  # request, so plaintext transport would expose it to anyone on the path.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+      - caddylogs:/var/log/caddy
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  redisdata:
+  caddydata:
+  caddyconfig:
+  caddylogs:

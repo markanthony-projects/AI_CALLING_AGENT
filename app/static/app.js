@@ -13,8 +13,9 @@ const statusText = document.getElementById('statusText');
 const pulseRing = document.getElementById('pulseRing');
 
 const urlParams = new URLSearchParams(window.location.search);
-const campaignId = urlParams.get('campaign_id') || 'demo';
-let callSid = urlParams.get('call_sid'); // We'll generate it on click if not present
+const campaignId = urlParams.get('campaign_id');
+const callToken = urlParams.get('token');
+let callSid = urlParams.get('call_sid');
 
 function muLawToLinear(muLawByte) {
     muLawByte = ~muLawByte;
@@ -29,10 +30,14 @@ function muLawToLinear(muLawByte) {
 statusText.innerText = "Ready to connect";
 
 startBtn.onclick = async () => {
-    if (!urlParams.get('call_sid')) {
-        callSid = 'test-' + Math.random().toString(36).substr(2, 9);
+    if (!campaignId) {
+        statusText.innerText = "Missing campaign_id in the URL.";
+        return;
     }
-    
+    if (!callSid) {
+        callSid = 'test-' + Math.random().toString(36).slice(2, 11);
+    }
+
     startBtn.style.display = 'none';
     hangupBtn.style.display = 'flex';
     statusText.innerText = "Calling...";
@@ -54,7 +59,8 @@ startBtn.onclick = async () => {
     // Ensure it connects to the Uvicorn backend (8000) even if opened via VS Code Live Server or file:///
     const host = (window.location.host && window.location.port === "8000") ? window.location.host : "127.0.0.1:8000";
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${host}/ws/browser/${campaignId}/${callSid}`;
+    const query = callToken ? `?token=${encodeURIComponent(callToken)}` : '';
+    const wsUrl = `${protocol}//${host}/ws/browser/${campaignId}/${callSid}${query}`;
     ws = new WebSocket(wsUrl);
     
     ws.onopen = async () => {
