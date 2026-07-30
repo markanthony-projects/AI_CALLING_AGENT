@@ -11,7 +11,8 @@ Internet
    │
    ▼  HTTPS (port 443)
 ┌──────────────── Droplet (BLR1) ─────────────────┐
-│  caddy    TLS + reverse proxy                    │
+│  nginx    TLS + reverse proxy                    │
+│  certbot  certificate renew karta rehta hai      │
 │  api      calls uthata hai, agent chalata hai    │
 │  worker   lead extract karta hai                 │
 │  redis    cache + job queue + counters           │
@@ -108,8 +109,9 @@ nslookup ai-calls.homebble.in
 
 Jab droplet ka IP dikhne lage, tabhi aage badhiye. **5–30 minute lag sakte hain.**
 
-> Ye step Caddy se pehle hona zaroori hai. Caddy certificate lene ke liye is naam ko check
-> karta hai. DNS nahi phaila to certificate fail hoga.
+> Ye step certificate lene se pehle hona **zaroori** hai. Let's Encrypt is naam par HTTP
+> request bhejkar check karta hai ki server aapka hai. DNS nahi phaila to certificate fail
+> hoga, aur production CA mein **ek ghante mein sirf 5 failed attempts** allowed hain.
 
 ---
 
@@ -131,8 +133,10 @@ Name: `homebble-voice-fw`
 
 Neeche **Apply to Droplets** mein apna droplet chunein. Create dabaiye.
 
-**Port 80 kyun khula?** Caddy certificate renew karne ke liye use karta hai, aur HTTP se
-HTTPS par redirect karta hai. Port 8000 kahin nahi khulega — wo sirf container ke andar hai.
+**Port 80 kyun khula?** Let's Encrypt certificate issue aur renew karne ke liye port 80 par
+challenge file maangta hai, aur nginx HTTP se HTTPS par redirect karta hai. Port 8000 kahin
+nahi khulega — wo `expose` hai, `ports` nahi, matlab sirf container network ke andar dikhta
+hai. Firewall galat hone par bhi internet se uspar route nahi hai.
 
 ---
 
@@ -386,28 +390,74 @@ ls -l .env      # -rw------- dikhna chahiye
 
 ## 10. Stack start kijiye
 
+### 10a. Pehle app containers start kijiye (nginx ke bina)
+
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml up -d --build redis migrate api worker
 ```
 
-Pehli baar 3–6 minute lagenge (Docker image ban raha hai). Phir:
+Pehli baar 3–6 minute lagenge (Docker image ban raha hai).
 
 ```bash
 docker compose -f docker-compose.prod.yml ps
 ```
 
-Aisa dikhna chahiye:
+| Service | State |
+|---|---|
+| `redis` | Up (healthy) |
+| `migrate` | **Exited (0)** ← ye sahi hai |
+| `api` | Up |
+| `worker` | Up |
+
+> `migrate` ka `Exited (0)` **success** hai. Usne DB migration chala kar kaam khatam kiya.
+> `Exited (1)` ho to migration fail hui — `docker compose -f docker-compose.prod.yml logs migrate`
+
+### 10b. TLS certificate lijiye
+
+Nginx bina certificate ke start nahi hota, aur certbot ko certificate lene ke liye nginx
+chahiye. Ye murgi-anda problem ek script solve karti hai — wo pehle ek nakli certificate
+rakhti hai, nginx start karti hai, phir asli certificate laakar nakli hata deti hai.
+
+**Pehle staging par test kijiye** (production CA mein ghanta bhar mein sirf 5 galtiyaan
+allowed hain):
+
+```bash
+STAGING=1 LETSENCRYPT_EMAIL=you@homebble.in ./scripts/init_letsencrypt.sh
+```
+
+Script pehle check karti hai ki `ai-calls.homebble.in` isi droplet par point karta hai. Agar
+DNS galat hai to wo wahin ruk jaayegi — ye jaan-boojh kar hai, warna aap rate limit mein
+phas jaate.
+
+`curl -k https://ai-calls.homebble.in/health` chale to staging kaam kar gaya. Ab asli
+certificate lijiye:
+
+```bash
+rm -rf ./certbot/conf/live ./certbot/conf/archive ./certbot/conf/renewal
+LETSENCRYPT_EMAIL=you@homebble.in ./scripts/init_letsencrypt.sh
+```
+
+### 10c. Poora stack start kijiye
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml ps
+```
+
+Ab saat services mein se ye dikhni chahiye:
 
 | Service | State |
 |---|---|
 | `redis` | Up (healthy) |
-| `migrate` | **Exited (0)** ← ye sahi hai, ye ek baar chal ke band hota hai |
+| `migrate` | Exited (0) |
 | `api` | Up |
 | `worker` | Up |
-| `caddy` | Up |
+| `nginx` | Up |
+| `certbot` | Up |
 
-> `migrate` ka `Exited (0)` **success** hai. Usne DB migration chala kar apna kaam khatam
-> kiya. Agar `Exited (1)` ho to migration fail hui — `docker compose -f docker-compose.prod.yml logs migrate` dekhiye.
+`certbot` background mein chalta rehta hai — har 12 ghante jaagta hai aur 30 din se kam
+bache certificate ko renew karta hai. Nginx har 6 ghante khud reload karta hai, to naya
+certificate apne aap uth jaata hai.
 
 ---
 
@@ -428,9 +478,17 @@ Expected:
 ```
 
 - `"auth":"enabled"` — auth chalu hai ✅
-- Browser mein padlock dikhna chahiye (Caddy ne certificate le liya)
+- Browser mein padlock dikhna chahiye
 
-Agar certificate nahi mila to: `docker compose -f docker-compose.prod.yml logs caddy`
+Agar certificate ka problem ho to:
+
+```bash
+docker compose -f docker-compose.prod.yml logs nginx
+docker compose -f docker-compose.prod.yml exec nginx nginx -t
+docker compose -f docker-compose.prod.yml run --rm --entrypoint "certbot certificates" certbot
+```
+
+Aakhri command batayegi ki certificate kis din expire hoga.
 
 ### 11b. Docs band hain
 
@@ -539,7 +597,8 @@ cd ~/app
 # Logs
 docker compose -f docker-compose.prod.yml logs -f api
 docker compose -f docker-compose.prod.yml logs -f worker
-docker compose -f docker-compose.prod.yml logs --tail 100 caddy
+docker compose -f docker-compose.prod.yml logs --tail 100 nginx
+docker compose -f docker-compose.prod.yml logs --tail 50 certbot
 
 # Restart
 docker compose -f docker-compose.prod.yml restart api
@@ -585,8 +644,10 @@ Projects aur campaigns bache rahenge — agent unhi se pitch karta hai.
 
 | Problem | Kya karein |
 |---|---|
-| `curl /health` timeout | Cloud firewall mein 443 khula hai? `docker compose ... ps` mein caddy Up hai? |
-| Certificate nahi mila | `nslookup ai-calls.homebble.in` sahi IP de raha hai? Port 80 khula hai? `logs caddy` |
+| `curl /health` timeout | Cloud firewall mein 443 khula hai? `docker compose ... ps` mein nginx Up hai? |
+| Certificate nahi mila | `nslookup` sahi IP de raha hai? Port 80 khula hai? `logs certbot` |
+| Deploy ke baad `502 Bad Gateway` | `logs nginx` dekhiye. Config mein resolver hai to apne aap theek ho jaata hai 10s mein; warna `restart nginx` |
+| `nginx: [emerg] cannot load certificate` | certificate nahi bana. Step 10b dobara chalaiye |
 | `migrate` Exited (1) | `logs migrate` — 99% cases mein `DATABASE_URL` galat hai ya trusted source add nahi hua |
 | DB connection refused | Step 7a: droplet trusted sources mein hai? Private host use kiya? |
 | `401` sahi key ke saath bhi | header `X-API-Key` hai (case matter karta hai)? `.env` mein extra space? |

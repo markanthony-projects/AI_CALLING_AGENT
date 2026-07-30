@@ -19,4 +19,19 @@ __pycache__/
 htmlcov/
 Dockerfile
 docker-compose.yml
+docker-compose.prod.yml
 .dockerignore
+
+# Once certbot has run on the droplet this holds the TLS private key and the Let's Encrypt
+# account key. Every `docker build` uploads the build context to the daemon, so leaving it
+# out of the ignore list ships both keys into the build cache on every rebuild.
+certbot/
+
+# Not copied by the Dockerfile; excluded so they stay out of the build context entirely.
+nginx/
+tests/
+.github/
+pytest.ini
+requirements-dev.txt
+*.md
+.env.backup*

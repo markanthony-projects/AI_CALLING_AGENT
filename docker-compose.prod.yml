@@ -1,4 +1,5 @@
-# Droplet deployment: DigitalOcean managed Postgres (BLR), Redis local to the box.
+# Droplet deployment: DigitalOcean managed Postgres (BLR), Redis local to the box,
+# Nginx terminating TLS with certificates from Let's Encrypt via certbot.
 #
 # Redis runs here rather than as a managed service — same host, no network hop, no extra
 # bill. It is not only a cache: arq's job queue lives in it, and the API and worker are
@@ -7,12 +8,16 @@
 # Postgres is absent on purpose. DATABASE_URL points at the managed cluster, so the only
 # database credentials on this box are in the env file.
 #
-#   docker compose -f docker-compose.prod.yml up -d --build
+# First run needs certificates before nginx can start:
+#     LETSENCRYPT_EMAIL=you@homebble.in ./scripts/init_letsencrypt.sh
+# After that:
+#     docker compose -f docker-compose.prod.yml up -d --build
 
 services:
   redis:
     image: redis:7-alpine
     # appendonly survives a droplet reboot; without it a restart loses queued extractions.
+    # noeviction stops Redis treating a queued job as a cache entry it may discard.
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes:
       - redisdata:/data
@@ -38,6 +43,8 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
+    # Never published to the host: nginx reaches it over the compose network, so port 8000
+    # has no route from the internet even if the firewall were misconfigured.
     expose:
       - "8000"
     depends_on:
@@ -62,24 +69,44 @@ services:
       disable: true
     restart: unless-stopped
 
-  # Terminates TLS and obtains its own certificate. The API key travels in a header on every
-  # request, so plaintext transport would expose it to anyone on the path.
-  caddy:
-    image: caddy:2-alpine
+  # Terminates TLS. The API key travels in a header on every request, so plaintext
+  # transport would expose it to anyone on the path.
+  nginx:
+    image: nginx:1.27-alpine
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddydata:/data
-      - caddyconfig:/config
-      - caddylogs:/var/log/caddy
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    # No volume on /var/log/nginx on purpose: the official image symlinks access.log to
+    # /dev/stdout, and mounting over it would replace those symlinks with real files — so
+    # `docker compose logs nginx` would silently show nothing. Docker's own rotation below
+    # handles retention instead.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+    # Reloads every 6h so a renewed certificate is picked up without a manual restart.
+    command: >
+      /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
     depends_on:
       - api
     restart: unless-stopped
 
+  # Wakes twice a day and renews anything inside 30 days of expiry. Let's Encrypt
+  # certificates last 90 days, so a missed renewal window would take the site down.
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
 volumes:
   redisdata:
-  caddydata:
-  caddyconfig:
-  caddylogs:

@@ -32,3 +32,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Let's Encrypt account key, private keys and certificates
+certbot/
