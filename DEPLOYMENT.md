@@ -536,16 +536,26 @@ The last command shows the expiry date.
 
 ### 11b. The API schema is not public
 
+From the droplet (bash):
+
+```bash
+curl -o /dev/null -s -w "%{http_code}
+" https://ai-calls.homebble.in/docs
+```
+
+From your laptop (PowerShell), `/dev/null` becomes `NUL`:
+
 ```powershell
-curl -o NUL -w "%{http_code}" https://ai-calls.homebble.in/docs
+curl -o NUL -s -w "%{http_code}" https://ai-calls.homebble.in/docs
 ```
 
 Expected: **404**
 
 ### 11c. Requests without a key are rejected
 
-```powershell
-curl -o NUL -w "%{http_code}" -X POST https://ai-calls.homebble.in/api/v1/campaigns/
+```bash
+curl -o /dev/null -s -w "%{http_code}
+" -X POST https://ai-calls.homebble.in/api/v1/campaigns/
 ```
 
 Expected: **401**
@@ -597,12 +607,46 @@ The application appends the `?token=...` itself when placing a call — you do n
 
 Call your own number, not a customer's.
 
+First find a campaign ID:
+
+```bash
+docker compose -f docker-compose.prod.yml exec api python -c "
+import asyncio
+from sqlalchemy import select
+from app.core.database import AsyncSessionLocal
+from app.models.db import Campaign
+async def main():
+    async with AsyncSessionLocal() as db:
+        for c in (await db.execute(select(Campaign))).scalars().all():
+            print(c.id, '|', c.name)
+asyncio.run(main())
+"
+```
+
+**On the droplet (bash)** — reads the key straight out of `.env`, so there is nothing to
+mistype:
+
+```bash
+curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/<CAMPAIGN_ID>/dial/vobiz" \
+  -H "X-API-Key: $(grep '^API_KEY=' .env | cut -d= -f2-)" \
+  -H "Content-Type: application/json" \
+  -d '{"phone_numbers":["+919604100447"]}'
+```
+
+**From your laptop (PowerShell)** — note the different line-continuation character and the
+escaped quotes:
+
 ```powershell
 curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/<CAMPAIGN_ID>/dial/vobiz" `
   -H "X-API-Key: <your API_KEY>" `
   -H "Content-Type: application/json" `
   -d '{\"phone_numbers\":[\"+919604100447\"]}'
 ```
+
+> **Do not mix the two.** In PowerShell a backtick continues the line; in bash a backtick
+> means "run this as a command", so a PowerShell-style command pasted into bash tries to
+> execute the header as a program and the request goes out with no key at all. Bash uses a
+> backslash. Inside bash single quotes, double quotes need no escaping.
 
 Watch the logs while it runs:
 
@@ -660,9 +704,8 @@ it publishes your full route list.
 **Test without spending Vobiz credit.** The browser test client runs the same voice agent
 through your browser's microphone instead of the phone network:
 
-```powershell
-curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/<CAMPAIGN_ID>/dial/browser" `
-  -H "X-API-Key: <your API_KEY>"
+```bash
+curl -X POST "https://ai-calls.homebble.in/api/v1/campaigns/<CAMPAIGN_ID>/dial/browser"   -H "X-API-Key: $(grep '^API_KEY=' .env | cut -d= -f2-)"
 ```
 
 It returns a link to open. Note that this still consumes Groq, Deepgram and Sarvam credit —
@@ -699,6 +742,9 @@ docker compose -f docker-compose.prod.yml logs --tail 100 nginx
 
 # Restart one service
 docker compose -f docker-compose.prod.yml restart api
+
+# Apply a change made to .env  ← NOT the same as restart
+docker compose -f docker-compose.prod.yml up -d --force-recreate api worker
 
 # Deploy new code
 git pull
@@ -741,7 +787,8 @@ rejecting the extra one.
 | `migrate` exited (1) | `logs migrate`. Nearly always a wrong `DATABASE_URL` or a missing Trusted Sources entry |
 | Database connection refused | Step 7a — is the droplet in Trusted Sources? Is `?ssl=require` present? |
 | `502 Bad Gateway` after deploying | `logs nginx`. Should self-correct within 10 seconds; if not, `restart nginx` |
-| `401` even with the right key | Header must be exactly `X-API-Key`. Check for stray spaces in `.env` |
+| `401` even with the right key | Did you change `.env` and only `restart`? Environment variables are read when a container is **created**, so a running container keeps the old values. Compare `docker compose … exec -T api printenv API_KEY` against `.env`, then `up -d --force-recreate api worker` |
+| `curl: (43) Failed sending HTTP POST request` | The header value contains a newline. Either `.env` has two `API_KEY=` lines, or it has Windows line endings. Check with `grep -c '^API_KEY=' .env` and `grep '^API_KEY=' .env \| cat -A` |
 | Call connects but there is no audio | `logs api` — look for Sarvam or Deepgram errors. Out of credit? |
 | No lead created | `logs worker`. Is `queued` climbing? Did the worker crash? |
 | Audio breaking up | `docker stats` — if CPU is saturated, lower `MAX_CONCURRENT_CALLS` or resize |

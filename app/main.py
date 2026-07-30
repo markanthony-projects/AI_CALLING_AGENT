@@ -40,11 +40,37 @@ class RedactCallTokenFilter(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(RedactCallTokenFilter())
 
+
+class DropHealthCheckFilter(logging.Filter):
+    """Keep the container healthcheck out of the access log.
+
+    Docker probes /health every 30s. At two lines per probe that is roughly 5,700 lines a
+    day of noise, which is enough to hide the one line that matters when a call fails.
+    Requests from anywhere other than loopback still appear, so an external probe is
+    unaffected.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            client, path = args[0], args[2]
+            if isinstance(client, str) and isinstance(path, str):
+                return not (client.startswith("127.0.0.1") and path.startswith("/health"))
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(DropHealthCheckFilter())
+
+
 class ASGILoggingMiddleware:
+    # /health is probed by Docker every 30 seconds; logging it buries real traffic.
+    _QUIET_PATHS = frozenset({"/health"})
+
     def __init__(self, app):
         self.app = app
+
     async def __call__(self, scope, receive, send):
-        if scope["type"] in ("http", "websocket"):
+        if scope["type"] in ("http", "websocket") and scope.get("path") not in self._QUIET_PATHS:
             logger.info(f"ASGI Request: {scope['type']} {scope.get('path')}")
         await self.app(scope, receive, send)
 
