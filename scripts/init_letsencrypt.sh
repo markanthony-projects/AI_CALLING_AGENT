@@ -43,16 +43,7 @@ if [ -n "$public" ] && [ "$resolved" != "$public" ]; then
 fi
 echo "    $DOMAIN -> $resolved (matches this droplet)"
 
-echo "==> Fetching recommended TLS settings"
 mkdir -p "$CONF" "./certbot/www"
-if [ ! -e "$CONF/options-ssl-nginx.conf" ]; then
-	curl -fsS https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
-		-o "$CONF/options-ssl-nginx.conf"
-fi
-if [ ! -e "$CONF/ssl-dhparams.pem" ]; then
-	curl -fsS https://raw.githubusercontent.com/certbot/certbot/master/certbot/certbot/ssl-dhparams.pem \
-		-o "$CONF/ssl-dhparams.pem"
-fi
 
 echo "==> Placing a throwaway certificate so nginx can boot"
 mkdir -p "$LIVE"
