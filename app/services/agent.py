@@ -18,6 +18,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregator,
     LLMUserAggregatorParams,
 )
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from app.core.config import settings
 from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
@@ -257,7 +259,19 @@ async def run_voice_agent(
     # Pass the dummy function so Pipecat parses the docstring into a ToolSchema
     context = LLMContext(messages=messages, tools=[end_call])
     
-    user_agg = LLMUserAggregator(context=context, params=LLMUserAggregatorParams(vad_analyzer=vad_analyzer))
+    # Replaces the default start strategies rather than joining them. The defaults are
+    # [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy] and any one of them
+    # firing starts the turn — so leaving VAD in place would keep barging in on the first
+    # syllable and this would change nothing. Stop strategies are untouched.
+    user_agg = LLMUserAggregator(
+        context=context,
+        params=LLMUserAggregatorParams(
+            vad_analyzer=vad_analyzer,
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=settings.INTERRUPT_MIN_WORDS)]
+            ),
+        ),
+    )
     assistant_agg = LLMAssistantAggregator(context=context)
 
     pipeline = Pipeline([
@@ -276,7 +290,9 @@ async def run_voice_agent(
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,
+            # allow_interruptions is not a field on PipelineParams in Pipecat 1.5 and was
+            # being dropped silently — interruptions are governed by the turn strategies on
+            # the user aggregator below.
             enable_metrics=True,
             enable_usage_metrics=True,
         ),

@@ -44,30 +44,47 @@ class RedactCallTokenFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(RedactCallTokenFilter())
 
 
-class DropHealthCheckFilter(logging.Filter):
-    """Keep the container healthcheck out of the access log.
+class DropRoutinePollingFilter(logging.Filter):
+    """Keep the two endpoints nothing ever reads out of the access log.
 
-    Docker probes /health every 30s. At two lines per probe that is roughly 5,700 lines a
-    day of noise, which is enough to hide the one line that matters when a call fails.
-    Requests from anywhere other than loopback still appear, so an external probe is
-    unaffected.
+    Docker probes /health every 30s, and every open dashboard tab asks /dashboard/live
+    every 5s. Together that is tens of thousands of lines a day, enough to bury the one
+    line that matters when a call fails — a 40-minute capture of a real call was already
+    mostly live polls.
+
+    Both are narrowed rather than blanket-dropped. /health is only dropped from loopback,
+    so an external probe still appears. The live poll is only dropped when it succeeded: a
+    401 or a 500 there is the interesting case and stays.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
-        if isinstance(args, tuple) and len(args) >= 3:
-            client, path = args[0], args[2]
-            if isinstance(client, str) and isinstance(path, str):
-                return not (client.startswith("127.0.0.1") and path.startswith("/health"))
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+
+        client, path = args[0], args[2]
+        if not isinstance(client, str) or not isinstance(path, str):
+            return True
+
+        if client.startswith("127.0.0.1") and path.startswith("/health"):
+            return False
+
+        status = args[4] if len(args) >= 5 else None
+        if path.startswith("/api/v1/dashboard/live") and status == 200:
+            return False
+
         return True
 
 
-logging.getLogger("uvicorn.access").addFilter(DropHealthCheckFilter())
+logging.getLogger("uvicorn.access").addFilter(DropRoutinePollingFilter())
 
 
 class ASGILoggingMiddleware:
-    # /health is probed by Docker every 30 seconds; logging it buries real traffic.
-    _QUIET_PATHS = frozenset({"/health"})
+    # /health is probed by Docker every 30 seconds; logging it buries real traffic. The
+    # dashboard's live panel polls harder still — every open tab asks every 5 seconds, and
+    # at two lines a request that is tens of thousands of lines a day. A 40-minute log
+    # capture of one real call was already mostly this.
+    _QUIET_PATHS = frozenset({"/health", "/api/v1/dashboard/live"})
 
     def __init__(self, app):
         self.app = app

@@ -113,6 +113,14 @@ class Settings(BaseSettings):
     # for them is user_turn_stop_timeout on LLMUserAggregatorParams, not this.
     VAD_STOP_SECS: float = 0.2
 
+    # Words the prospect must say to cut the agent off while it is speaking. VAD alone
+    # treated the "Hello?" on pickup as a barge-in and killed the opening line 0.7s in, so
+    # the prospect never heard who was calling and asked "who are you?" two turns later.
+    # Below this the agent keeps talking, which is also what should happen for "haan",
+    # "hmm" and "achha" — those are the prospect listening, not interrupting. Once the
+    # agent stops speaking a single word starts their turn, so replies stay instant.
+    INTERRUPT_MIN_WORDS: int = Field(default=3, ge=1)
+
     DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379/0"
 
