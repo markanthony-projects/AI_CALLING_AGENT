@@ -32,6 +32,8 @@ os.environ.update(
     }
 )
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.api.dependencies import get_db
@@ -39,17 +41,56 @@ from app.core.config import settings
 from app.main import app
 
 
+class StubResult:
+    """An empty result set — every lookup misses, so routes take their not-found path."""
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return None
+
+    def all(self):
+        return []
+
+    def one_or_none(self):
+        return None
+
+
+class StubUser:
+    """The signed-in row require_session re-reads on every request.
+
+    Role comes from here rather than the cookie because the guard re-reads it, so a
+    demotion takes effect immediately instead of at token expiry.
+    """
+
+    def __init__(self, role="ADMIN", is_active=True, user_id="user-id", email="ops@example.com"):
+        self.id = user_id
+        self.email = email
+        self.full_name = None
+        self.role = SimpleNamespace(value=role)
+        self.is_active = is_active
+
+
 class StubSession:
     """Stands in for AsyncSession where a route only needs a lookup to miss."""
 
-    def __init__(self, get_result=None):
+    def __init__(self, get_result=None, user=None):
         self._get_result = get_result
+        self._user = user
 
-    async def get(self, *args, **kwargs):
+    async def get(self, model=None, *args, **kwargs):
+        # Only the session guard's own lookup resolves; every other get() still misses, so
+        # routes keep taking their not-found path.
+        if self._user is not None and getattr(model, "__name__", "") == "DashboardUser":
+            return self._user
         return self._get_result
 
     async def scalar(self, *args, **kwargs):
         return None
+
+    async def execute(self, *args, **kwargs):
+        return StubResult()
 
     def add(self, *args, **kwargs):
         pass
@@ -65,12 +106,17 @@ class StubSession:
 def client():
     from starlette.testclient import TestClient
 
+    # Mutable so a test can change who is signed in before it makes its request.
+    session_user = {"user": StubUser()}
+
     async def stub_db():
-        yield StubSession()
+        yield StubSession(user=session_user["user"])
 
     app.dependency_overrides[get_db] = stub_db
     # No context manager: lifespan would demand a live Redis.
-    yield TestClient(app)
+    test_client = TestClient(app)
+    test_client.session_user = session_user
+    yield test_client
     app.dependency_overrides.clear()
 
 
@@ -88,3 +134,14 @@ def auth_disabled():
     settings.AUTH_ENABLED = False
     yield
     settings.AUTH_ENABLED = original
+
+
+@pytest.fixture
+def dashboard_enabled():
+    """Turn the dashboard on for one test. An empty secret disables it entirely."""
+    from app.core.config import settings
+
+    original = settings.DASHBOARD_SESSION_SECRET
+    settings.DASHBOARD_SESSION_SECRET = "test-dashboard-secret-at-least-32-chars"
+    yield
+    settings.DASHBOARD_SESSION_SECRET = original

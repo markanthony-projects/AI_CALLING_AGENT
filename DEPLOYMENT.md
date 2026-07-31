@@ -10,13 +10,13 @@ is marked clearly.
 Internet
    │
    ▼  HTTPS :443
-┌──────────── Droplet (BLR1, 2 vCPU / 4 GB) ────────────┐
-│  nginx     terminates TLS, proxies to api             │
-│  certbot   renews the certificate in the background   │
-│  api       answers calls, runs the voice agent        │
-│  worker    extracts leads after each call             │
-│  redis     cache + job queue + dial counters          │
-│  migrate   runs once at startup, then exits           │
+┌──────────── Droplet (BLR1, 2 vCPU / 4 GB) ─────────────┐
+│  nginx      terminates TLS, proxies to api             │
+│  certbot    renews the certificate in the background   │
+│  api        answers calls, runs the voice agent        │
+│  worker     extracts leads after each call             │
+│  redis      cache + job queue + dial counters          │
+│  migrate    runs once at startup, then exits           │
 └────────────────────────────────────────────────────────┘
    │  TLS over the public internet, restricted by Trusted Sources
    ▼
@@ -356,6 +356,31 @@ cd app
 
 Type `yes` at the host key prompt.
 
+### 8b. The dashboard is not deployed here
+
+The operations dashboard is a separate repository deployed to **Vercel**. Nothing about it
+is built or served on this droplet — this box runs the backend only.
+
+What the backend owes it is one setting: `DASHBOARD_CORS_ORIGINS` naming the dashboard's
+origin, covered in Step 9.
+
+**Where you host it on Vercel matters more than it looks.** The login session is a cookie
+set by `ai-calls.homebble.in`, and whether the browser will send that cookie back depends on
+whether the dashboard is the same *site*:
+
+| Dashboard URL | Relationship | Result |
+|---|---|---|
+| `dashboard.homebble.in` (Vercel custom domain) | same site | Works everywhere. Keep `DASHBOARD_COOKIE_SAMESITE=lax` |
+| `your-app.vercel.app` (default Vercel domain) | cross site | Needs `SameSite=None`, which makes the session a **third-party cookie** |
+
+Safari and Firefox **block third-party cookies by default today**, and Chrome is heading the
+same way. On the default `.vercel.app` domain, sign-in will simply not persist for those
+users — the request succeeds, the cookie is discarded, and every call after it is anonymous.
+
+**Add a custom domain in Vercel** (project → Settings → Domains → `dashboard.homebble.in`,
+then the CNAME they give you at your registrar). Both hosts are then under `homebble.in`,
+the cookie is first-party, and nothing has to be weakened.
+
 ---
 
 ## 9. Create the `.env` file
@@ -387,6 +412,20 @@ API_KEY=<first line from gen_secrets.py>
 CALL_TOKEN_SECRET=<second line from gen_secrets.py>
 CALL_TOKEN_TTL_SECONDS=900
 DOCS_ENABLED=false
+
+# ---- Operations dashboard ----
+# Signs dashboard login sessions. Generate a THIRD secret, distinct from the two above:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+# Leave empty to disable the dashboard — /api/v1/auth and /api/v1/dashboard then return 503.
+DASHBOARD_SESSION_SECRET=<a third, different secret>
+DASHBOARD_SESSION_TTL_SECONDS=43200
+# The Vercel origin, exactly — scheme included, no trailing slash. Credentialed CORS
+# forbids "*", so a wrong value here silently blocks every dashboard request.
+DASHBOARD_CORS_ORIGINS=https://dashboard.homebble.in
+DASHBOARD_COOKIE_SECURE=true
+# lax if the dashboard is on a homebble.in subdomain (recommended). none only if it stays
+# on a .vercel.app URL — and then Safari and Firefox will discard the session. See Step 8b.
+DASHBOARD_COOKIE_SAMESITE=lax
 
 # ---- Database (from Step 7c) ----
 DATABASE_URL=postgresql://doadmin:<PASSWORD>@<your-db-host>:25060/<DBNAME>?ssl=require
@@ -603,6 +642,50 @@ The application appends the `?token=...` itself when placing a call — you do n
 
 ---
 
+## 12b. Create a dashboard login
+
+There is no sign-up page: this dashboard reads every prospect's phone number and every call
+transcript, so accounts are provisioned here.
+
+```bash
+docker compose -f docker-compose.prod.yml exec api \
+  python scripts/manage_dashboard_users.py create you@homebble.in --role ADMIN
+```
+
+It prompts for a password twice and never echoes it. Minimum 12 characters. Do **not** pass
+it as an argument — argv lands in shell history and in the process list.
+
+| Role | Can do |
+|---|---|
+| `VIEWER` | Read everything; reclassify a lead's temperature |
+| `ADMIN` | The above, plus pause/resume campaigns and start dialing runs |
+
+Give sales `VIEWER`. `ADMIN` can spend money, so keep it to the people who own the budget.
+
+Other commands:
+
+```bash
+# ... exec api python scripts/manage_dashboard_users.py <command>
+list                       # who has access, and when they last signed in
+passwd you@homebble.in     # change a password
+deactivate ex@homebble.in  # revoke access — takes effect on their next page load
+```
+
+Now open **https://ai-calls.homebble.in** and sign in.
+
+> **Why not just use the API key?** Because it dials, and dialing costs money. A key pasted
+> into a browser lives in devtools, in history, and in every extension on the page. The
+> dashboard authenticates as a named person and carries a session in an httpOnly cookie that
+> page script cannot read.
+
+If the dashboard shows **503 "Dashboard is not configured"**, `DASHBOARD_SESSION_SECRET` is
+unset or shorter than 32 characters. Fix `.env`, then `up -d` (a restart does not reload it).
+
+If login appears to succeed but every page then says you are signed out, check
+`DASHBOARD_COOKIE_SECURE=true` and that you are on **https**, not http.
+
+---
+
 ## 13. Make a test call
 
 Call your own number, not a customer's.
@@ -793,6 +876,13 @@ rejecting the extra one.
 | No lead created | `logs worker`. Is `queued` climbing? Did the worker crash? |
 | Audio breaking up | `docker stats` — if CPU is saturated, lower `MAX_CONCURRENT_CALLS` or resize |
 | Locked out of SSH | Use the DigitalOcean browser console, then `fail2ban-client set sshd unbanip YOUR.IP` |
+| Dashboard returns 503 | `DASHBOARD_SESSION_SECRET` is unset or under 32 chars. Fix `.env` then `up -d` — a `restart` does not reload it |
+| Dashboard login works, then every page says signed out | The cookie is `Secure`; you must be on **https**. Confirm `DASHBOARD_COOKIE_SECURE=true` and that you are not on `http://` |
+| Dashboard 403 "Cross-origin request rejected" | The dashboard is on a different origin than the API without `DASHBOARD_CORS_ORIGINS` naming it. Same-host deployments should leave that variable empty |
+| Dashboard shows the API's JSON instead of the UI | nginx routed the path to `api`. The API owns only `/api`, `/vobiz`, `/static`, `/health`, `/docs` — check the `location` regex in `nginx/conf.d/app.conf` |
+| Dashboard login succeeds but every later request is 401 | The session cookie is being discarded. On a `.vercel.app` URL it is a third-party cookie and Safari/Firefox drop it — move the dashboard to a `homebble.in` subdomain (Step 8b). Also check `DASHBOARD_COOKIE_SECURE=true`, since a Secure cookie is never stored over plain HTTP |
+| Dashboard requests blocked by CORS in the browser console | `DASHBOARD_CORS_ORIGINS` must match the dashboard's origin exactly — scheme included, no trailing slash |
+| "Live now" shows 0 during a real call | `active_calls` is counted per API process. With one `api` replica it is exact; the dial-quota meters beside it come from Redis and hold across replicas |
 
 To capture logs for sharing:
 

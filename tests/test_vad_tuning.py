@@ -29,15 +29,23 @@ def test_confidence_is_at_least_pipecat_default():
     assert settings.VAD_CONFIDENCE >= VAD_CONFIDENCE
 
 
-def test_stop_secs_survives_a_mid_sentence_pause():
-    """At 0.2s "Yeah sure. Sunday works for me." split into two turns 328ms apart, running
-    two LLM inferences: one asked the time, the other hung up. Measured pauses ran 234-708ms."""
-    assert settings.VAD_STOP_SECS >= 0.5
+def test_stop_secs_leaves_the_stt_wait_window_open():
+    """Pipecat waits max(0, stt_p99 - stop_secs) for transcripts before its turn analyzer
+    rules on the turn. Running at 0.6 against Deepgram's 0.35 collapsed that to zero, and
+    Pipecat logged a warning saying so on every call."""
+    from pipecat.services.deepgram.stt import DEEPGRAM_TTFS_P99
+
+    assert settings.VAD_STOP_SECS < DEEPGRAM_TTFS_P99, (
+        f"stop_secs {settings.VAD_STOP_SECS} >= STT p99 {DEEPGRAM_TTFS_P99}; "
+        "the transcript wait window collapses to 0 and turn detection runs blind"
+    )
 
 
-def test_stop_secs_does_not_swallow_the_latency_budget():
-    """This is added wait on every turn, on top of a ~730ms voice-to-voice p50."""
-    assert settings.VAD_STOP_SECS <= 0.8
+def test_stop_secs_matches_what_pipecat_is_calibrated_for():
+    """Its built-in latency figures assume the default; departing from it warns at runtime."""
+    from pipecat.audio.vad.vad_analyzer import VAD_STOP_SECS
+
+    assert settings.VAD_STOP_SECS == VAD_STOP_SECS
 
 
 def test_vad_settings_remain_a_valid_vadparams():

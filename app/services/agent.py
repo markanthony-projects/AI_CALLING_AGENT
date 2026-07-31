@@ -96,6 +96,24 @@ def closing_line(spoken: Optional[str]) -> str:
 # a prospect who just said goodbye to repeat themselves.
 FUNCTION_CALL_FAILURE = "failed to call a function"
 
+# Provider strings meaning "out of budget", not "that request went wrong". Retrying inside
+# the call cannot help — Groq's daily-token 429 said "try again in 28m37s" — so the generic
+# recovery path made a caller repeat a sentence we had heard perfectly well, then hung up on
+# them anyway. Matched case-insensitively against the provider's own message.
+LLM_QUOTA_MARKERS = (
+    "rate limit reached",
+    "rate_limit_exceeded",
+    "insufficient_quota",
+    "exceeded your current quota",
+    "tokens per day",
+)
+
+
+def is_quota_error(message: Optional[str]) -> bool:
+    """True when the provider is refusing on budget rather than on this particular request."""
+    text = (message or "").lower()
+    return any(marker in text for marker in LLM_QUOTA_MARKERS)
+
 
 @dataclass(frozen=True)
 class CallResult:
@@ -116,6 +134,7 @@ def session_error(
     llm_failures: int,
     idle_timed_out: bool = False,
     tts_failures: int = 0,
+    llm_quota_exhausted: bool = False,
 ) -> Optional[str]:
     """Decide whether a finished session counts as failed, and why.
 
@@ -124,6 +143,10 @@ def session_error(
     """
     if pipeline_error:
         return pipeline_error
+    if llm_quota_exhausted:
+        # Distinct from a turn failure: nothing is wrong with the code or the call, the
+        # provider account is out of budget. Reads differently in the logs on purpose.
+        return "llm quota exhausted: top up the provider account"
     if tts_failures >= MAX_TTS_FAILURES:
         return "tts unavailable: caller heard only silence"
     if llm_failures >= MAX_LLM_TURN_FAILURES:
@@ -267,6 +290,7 @@ async def run_voice_agent(
     _user_has_spoken: bool = False
     _startup_task = None
     _llm_failures: int = 0
+    _llm_quota_exhausted: bool = False
     _tts_failures: int = 0
     _empty_user_turns: int = 0
     _idle_timed_out: bool = False
@@ -355,6 +379,19 @@ async def run_voice_agent(
             await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndFrame()])
             return
 
+        # Out of budget, not a bad request. LLM_RECOVERY_LINE asks the caller to repeat
+        # themselves, which blames them for our billing and buys nothing — the next turn
+        # fails identically. Close cleanly instead.
+        if is_quota_error(error.error):
+            nonlocal _llm_quota_exhausted
+            _llm_quota_exhausted = True
+            logger.error(
+                f"[{call_sid}] LLM quota exhausted; signing off without asking the caller "
+                f"to repeat. Provider said: {error.error}"
+            )
+            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndFrame()])
+            return
+
         _llm_failures += 1
         logger.warning(
             f"[{call_sid}] LLM turn failed ({_llm_failures}/{MAX_LLM_TURN_FAILURES}): {error.error}"
@@ -418,6 +455,8 @@ async def run_voice_agent(
 
     return CallResult(
         transcript=transcript_str.strip(),
-        error=session_error(error, _llm_failures, _idle_timed_out, _tts_failures),
+        error=session_error(
+            error, _llm_failures, _idle_timed_out, _tts_failures, _llm_quota_exhausted
+        ),
         latency=latency.log_summary(),
     )

@@ -1,7 +1,10 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.api.routes.webhook import router as webhook_router
 from app.api.routes.campaign import router as campaign_router
+from app.api.routes.auth import router as auth_router
+from app.api.routes.dashboard import router as dashboard_router
 from app.core.config import settings
 from sqlalchemy import text
 
@@ -83,6 +86,11 @@ async def lifespan(app: FastAPI):
         logger.warning("Anyone who can reach this host can place calls at your expense.")
         logger.warning("Never run this way on a public host. Unset AUTH_ENABLED for production.")
         logger.warning("=" * 78)
+    if not settings.dashboard_enabled:
+        logger.info(
+            "Dashboard disabled: DASHBOARD_SESSION_SECRET is unset. /api/v1/auth and "
+            "/api/v1/dashboard will return 503."
+        )
     # Alembic owns the schema. create_all here would build tables it has no record of, so a
     # fresh database would then fail its first migration. Verify connectivity and that
     # migrations have actually been applied instead.
@@ -118,12 +126,29 @@ app = FastAPI(
 )
 app.add_middleware(ASGILoggingMiddleware)
 
+# Only when the dashboard is served from its own origin. Same-origin deployments — nginx
+# serving the SPA and proxying /api on one host — need no CORS at all, and adding it there
+# would only widen the surface. allow_credentials is required because the session travels
+# in a cookie, and it is precisely why the origin list can never be "*".
+if settings.dashboard_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.dashboard_cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Content-Type"],
+        max_age=600,
+    )
+    logger.info(f"CORS enabled for dashboard origins: {settings.dashboard_cors_origins}")
+
 # Mount static files for the web test client
 os.makedirs("app/static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 app.include_router(webhook_router)
 app.include_router(campaign_router)
+app.include_router(auth_router)
+app.include_router(dashboard_router)
 
 @app.get("/health")
 async def health_check():

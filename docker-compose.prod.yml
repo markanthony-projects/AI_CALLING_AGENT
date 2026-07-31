@@ -43,6 +43,12 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      # uvicorn trusts X-Forwarded-* only from 127.0.0.1 by default, and nginx reaches this
+      # container over the compose network — so without this every request looked like it
+      # came from nginx. The login throttle keys on the client IP and the audit log records
+      # it. Safe to widen here because port 8000 is `expose`, never published: nothing
+      # outside the compose network can reach it to forge a header.
+      FORWARDED_ALLOW_IPS: "*"
     # Never published to the host: nginx reaches it over the compose network, so port 8000
     # has no route from the internet even if the firewall were misconfigured.
     expose:
@@ -69,6 +75,10 @@ services:
       disable: true
     restart: unless-stopped
 
+  # No dashboard service here on purpose: the operations UI lives in its own repo and is
+  # deployed to Vercel. This box runs the backend only. What the dashboard needs from it is
+  # DASHBOARD_CORS_ORIGINS naming the Vercel origin, and nothing else.
+  #
   # Terminates TLS. The API key travels in a header on every request, so plaintext
   # transport would expose it to anyone on the path.
   nginx:

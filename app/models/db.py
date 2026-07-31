@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, Numeric, Enum, ForeignKey, text
+from sqlalchemy import Boolean, Column, String, Text, DateTime, Numeric, Enum, ForeignKey, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 import uuid
@@ -21,6 +21,46 @@ class CallStatus(str, enum.Enum):
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+class DashboardRole(str, enum.Enum):
+    # Sales works leads and reads calls. Only an admin may spend money by dialing or
+    # change a campaign's state, so the destructive surface has a named holder.
+    VIEWER = "VIEWER"
+    ADMIN = "ADMIN"
+
+
+class DashboardUser(Base):
+    """A person who signs in to the dashboard.
+
+    Separate from API_KEY on purpose: that key is a bearer secret that dials, and handing
+    it to a browser would put a spend-capable credential in devtools, in the URL bar's
+    history, and in every extension on the page.
+    """
+
+    __tablename__ = "dashboard_users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String, unique=True, index=True, nullable=False)
+    full_name = Column(String)
+    # scrypt digest, never the password. Format is documented in app.core.passwords.
+    password_hash = Column(String, nullable=False)
+    role = Column(
+        Enum(DashboardRole),
+        default=DashboardRole.VIEWER,
+        server_default=text("'VIEWER'"),
+        nullable=False,
+    )
+    # Deactivating beats deleting: leads and campaigns are not owned by a user, but an
+    # audit trail that references a vanished row reads as corruption.
+    is_active = Column(Boolean, default=True, server_default=text("true"), nullable=False)
+    last_login_at = Column(DateTime, nullable=True)
+    created_at = Column(
+        DateTime,
+        default=utc_now,
+        server_default=text("(now() at time zone 'utc')"),
+        nullable=False,
+    )
+
 
 class Project(Base):
     __tablename__ = "projects"
@@ -79,12 +119,14 @@ class Lead(Base):
         default=LeadStatus.WARM,
         server_default=text("'WARM'"),
         nullable=False,
+        index=True,
     )
     created_at = Column(
         DateTime,
         default=utc_now,
         server_default=text("(now() at time zone 'utc')"),
         nullable=False,
+        index=True,
     )
 
     calls = relationship("Call", back_populates="lead")
@@ -99,8 +141,9 @@ class Call(Base):
     # E.164 number actually dialled. Recorded here so a call can be traced to a person even
     # when extraction produces no lead.
     phone_number = Column(String, index=True)
-    status = Column(Enum(CallStatus), default=CallStatus.IN_PROGRESS)
-    started_at = Column(DateTime, default=utc_now)
+    # Indexed for the dashboard's call list, which filters on status and sorts on time.
+    status = Column(Enum(CallStatus), default=CallStatus.IN_PROGRESS, index=True)
+    started_at = Column(DateTime, default=utc_now, index=True)
     ended_at = Column(DateTime, nullable=True)
     # Bounded precision: an unbounded NUMERIC stored 54.51915999999999939973349682986736
     duration_seconds = Column(Numeric(10, 2), nullable=True)

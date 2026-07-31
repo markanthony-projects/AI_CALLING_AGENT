@@ -1,7 +1,6 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import AsyncGenerator
-from app.core.database import AsyncSessionLocal
+# get_db lives in app.core.database so that app.core.security can depend on it without
+# core importing from the api layer. Re-exported here because the routes import it from
+# this module and there is no value in churning every one of them.
+from app.core.database import get_db
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session
+__all__ = ["get_db"]
