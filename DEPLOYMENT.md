@@ -671,7 +671,7 @@ passwd you@homebble.in     # change a password
 deactivate ex@homebble.in  # revoke access — takes effect on their next page load
 ```
 
-Now open **https://ai-calls.homebble.in** and sign in.
+Now open the **dashboard** URL from Step 8b — not this API host — and sign in.
 
 > **Why not just use the API key?** Because it dials, and dialing costs money. A key pasted
 > into a browser lives in devtools, in history, and in every extension on the page. The
