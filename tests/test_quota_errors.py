@@ -151,7 +151,13 @@ def test_no_counted_branch_falls_through_to_the_quota_check():
 
 def test_the_quota_guard_has_no_extra_conditions():
     """Position in the file is not enough: an added conjunction leaves the branch in place
-    but makes it unreachable, and the quota falls through to the retry path anyway."""
+    but makes it unreachable, and the quota falls through to the retry path anyway.
+
+    Checked as "the test is a single call, with no boolean operator" rather than by exact
+    string. The guard legitimately takes a second argument now — the delay the provider sent
+    in its Retry-After header, which is the only thing distinguishing a Cerebras hiccup from
+    a Cerebras dead end, since its message carries no number at all.
+    """
     tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
     handler = next(
         n for n in ast.walk(tree)
@@ -161,9 +167,11 @@ def test_the_quota_guard_has_no_extra_conditions():
         n for n in ast.walk(handler)
         if isinstance(n, ast.If) and "is_quota_error" in ast.unparse(n.test)
     )
-    assert ast.unparse(guard.test) == "is_quota_error(error.error)", (
-        f"guard is {ast.unparse(guard.test)!r}; anything else can gate it shut"
+    assert isinstance(guard.test, ast.Call), (
+        f"guard is {ast.unparse(guard.test)!r}; a conjunction here can gate it shut"
     )
+    assert getattr(guard.test.func, "id", None) == "is_quota_error"
+    assert not any(isinstance(n, ast.BoolOp) for n in ast.walk(guard.test))
 
 
 def test_the_two_spoken_lines_stay_distinct():

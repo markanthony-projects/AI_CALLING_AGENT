@@ -1,17 +1,23 @@
-"""What is left of the LLM's per-minute token allowance, shared across the process.
+"""What is left of the LLM's per-minute allowance, shared across the process.
 
-Every Groq response carries the answer in its headers, but only the call that received it
-could see them. So the dialer had no idea it was about to start a conversation the account
-could not pay for — and on a throttled account the very first thing that stalls is the
-opening line, before the prospect has heard who is calling.
+Every response carries the answer in its headers, but only the call that received it could
+see them. So the dialer had no idea it was about to start a conversation the account could
+not pay for — and on a throttled account the very first thing that stalls is the opening
+line, before the prospect has heard who is calling.
 
-The budget refills continuously, so a reading goes stale within seconds. It is stored with
-the moment it was taken and extrapolated forward at the provider's own refill rate rather
-than trusted as-is; treating a snapshot as current would refuse dials for a minute after
-one busy call.
+Both ceilings are tracked because providers bind on different ones. Groq's free tier runs
+out of tokens (12,000/minute against a 3,400-token request); Cerebras's runs out of
+requests first (5/minute, against a call that needs six to ten). Watching only tokens would
+have declared Cerebras healthy right up until the greeting stalled.
+
+The allowance refills continuously, so a reading goes stale within seconds. It is stored
+with the moment it was taken and extrapolated forward at the provider's own refill rate
+rather than trusted as-is; treating a snapshot as current would refuse dials for a minute
+after one busy call.
 """
 
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 from loguru import logger
@@ -25,33 +31,59 @@ _KEY = "llm:budget"
 # the dial, which is the right default: we only ever had this information by accident.
 _TTL = 300
 
+_REDIS_FAULTS = (RedisError, RuntimeError, OSError, AttributeError)
 
-async def record_budget(remaining: int, limit: int) -> None:
+
+@dataclass(frozen=True)
+class Headroom:
+    """Estimated room left this minute. None on a field means the provider does not report it."""
+
+    tokens: Optional[float]
+    requests: Optional[float]
+
+
+async def record_budget(
+    tokens: int,
+    token_limit: int,
+    requests: Optional[int] = None,
+    request_limit: Optional[int] = None,
+) -> None:
     """Publish a rate-limit reading. Never raises — this runs inside a live call."""
+    payload = {"tokens": tokens, "token_limit": token_limit, "at": time.time()}
+    if requests is not None and request_limit:
+        payload["requests"] = requests
+        payload["request_limit"] = request_limit
     try:
         redis = get_arq_pool()
-        await redis.hset(_KEY, mapping={"remaining": remaining, "limit": limit, "at": time.time()})
+        await redis.hset(_KEY, mapping=payload)
         await redis.expire(_KEY, _TTL)
-    except (RedisError, RuntimeError, OSError, AttributeError) as exc:
+    except _REDIS_FAULTS as exc:
         logger.debug(f"Could not publish the LLM budget ({exc}); dialing will not gate on it")
 
 
-async def tokens_available() -> Optional[float]:
-    """Best estimate of the tokens left this minute, or None when we do not know.
+def _refill(remaining: Optional[float], limit: Optional[float], elapsed: float) -> Optional[float]:
+    """Carry a reading forward at the provider's own per-minute refill rate."""
+    if remaining is None or not limit:
+        return None
+    return min(limit, remaining + max(0.0, elapsed) * (limit / 60.0))
+
+
+async def headroom() -> Headroom:
+    """Best estimate of what is left this minute.
 
     None is not zero. No reading means no basis to refuse, and refusing to dial on missing
     telemetry would take the whole campaign down the first time Redis blinked.
     """
     try:
         raw = await get_arq_pool().hgetall(_KEY)
-    except (RedisError, RuntimeError, OSError, AttributeError) as exc:
+    except _REDIS_FAULTS as exc:
         logger.debug(f"LLM budget unreadable ({exc}); dialing without it")
-        return None
+        return Headroom(None, None)
     if not raw:
-        return None
+        return Headroom(None, None)
 
     def _get(key: str) -> Optional[float]:
-        value = raw.get(key) or raw.get(key.encode())
+        value = raw.get(key) if key in raw else raw.get(key.encode())
         if value is None:
             return None
         try:
@@ -59,11 +91,16 @@ async def tokens_available() -> Optional[float]:
         except (TypeError, ValueError):
             return None
 
-    remaining, limit, at = _get("remaining"), _get("limit"), _get("at")
-    if remaining is None or limit is None or at is None or limit <= 0:
-        return None
+    at = _get("at")
+    if at is None:
+        return Headroom(None, None)
+    elapsed = time.time() - at
+    return Headroom(
+        tokens=_refill(_get("tokens"), _get("token_limit"), elapsed),
+        requests=_refill(_get("requests"), _get("request_limit"), elapsed),
+    )
 
-    # The provider's bucket refills at limit/60 per second. Without this the reading only
-    # ever falls, and one busy call would block dialing until the key expired.
-    refilled = remaining + max(0.0, time.time() - at) * (limit / 60.0)
-    return min(limit, refilled)
+
+async def tokens_available() -> Optional[float]:
+    """Kept as its own name because that is the question the dial gate asks first."""
+    return (await headroom()).tokens

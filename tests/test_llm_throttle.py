@@ -32,9 +32,19 @@ from app.services.llm_provider import (
     LLMEndpoint,
     ResilientLLMService,
     build_llm_service,
+    fallback_endpoint,
     is_transient_throttle,
+    primary_endpoint,
+    retry_after_header,
     retry_after_seconds,
+    throttle_delay,
 )
+
+GROQ = LLMEndpoint(name="groq", api_key="k", base_url="https://api.groq.com/openai/v1", model="m")
+
+
+def _service(**kw):
+    return ResilientLLMService(call_sid="t", endpoint=GROQ, **kw)
 
 # Verbatim shapes from Groq. The two differ only in the unit of the limit and the size of
 # the number — which is exactly the problem.
@@ -146,7 +156,7 @@ def test_an_unparseable_rate_limit_is_treated_as_terminal():
 def test_the_sdk_does_not_retry_behind_our_back():
     """The single most important line in the module. Two silent retries honouring
     Retry-After is precisely how a 429 reached the logs as groq=14605ms."""
-    assert ResilientLLMService(call_sid="t", api_key="k")._client.max_retries == 0
+    assert _service()._client.max_retries == 0
 
 
 def test_the_processor_still_logs_itself_as_groq():
@@ -154,7 +164,7 @@ def test_the_processor_still_logs_itself_as_groq():
     latency line to `resilientllm=` and break continuity with every call log so far."""
     from app.utils.latency import _short
 
-    assert _short(ResilientLLMService(call_sid="t", api_key="k").name + "#0") == "groq"
+    assert _short(_service().name + "#0") == "groq"
 
 
 # --- the budget watcher -------------------------------------------------------------
@@ -215,14 +225,14 @@ def test_a_response_without_the_headers_is_ignored():
 
 def test_the_fallback_is_off_until_it_is_fully_configured():
     """Half-configured insurance fails at the one moment it is needed."""
-    assert build_llm_service("sid", "m", _settings())._fallback is None
-    assert build_llm_service("sid", "m", _settings(LLM_FALLBACK_API_KEY="k"))._fallback is None
-    assert build_llm_service("sid", "m", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini"))._fallback is None
+    assert build_llm_service("sid", _settings())._fallback is None
+    assert build_llm_service("sid", _settings(LLM_FALLBACK_API_KEY="k"))._fallback is None
+    assert build_llm_service("sid", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini"))._fallback is None
 
 
 def test_a_fully_configured_fallback_is_wired():
     svc = build_llm_service(
-        "sid", "m", _settings(LLM_FALLBACK_API_KEY="k", LLM_FALLBACK_MODEL="gpt-4o-mini")
+        "sid", _settings(LLM_FALLBACK_API_KEY="k", LLM_FALLBACK_MODEL="gpt-4o-mini")
     )
     assert isinstance(svc._fallback, LLMEndpoint)
     assert svc._fallback.model == "gpt-4o-mini"
@@ -239,7 +249,7 @@ def test_the_fallback_carries_the_tools_over():
         """Hangs up."""
 
     svc = build_llm_service(
-        "sid", "m", _settings(LLM_FALLBACK_API_KEY="k", LLM_FALLBACK_MODEL="gpt-4o-mini")
+        "sid", _settings(LLM_FALLBACK_API_KEY="k", LLM_FALLBACK_MODEL="gpt-4o-mini")
     )
     sent = {}
 
@@ -382,3 +392,183 @@ def test_the_events_relied_on_actually_exist(event, owner):
 
     cls = LLMUserAggregator if owner == "user_agg" else LLMAssistantAggregator
     assert f'"{event}"' in inspect.getsource(cls), f"{cls.__name__} registers no {event}"
+
+
+# --- providers agree on the concepts and on none of the spellings --------------------
+#
+# Measured against both live APIs on 2026-08-03:
+#
+#   Groq      x-ratelimit-remaining-tokens: 8038
+#             body: "...Please try again in 3.5s."          no Retry-After header
+#   Cerebras  x-ratelimit-remaining-tokens-minute: 10538
+#             x-ratelimit-limit-requests-minute: 5
+#             body: "Tokens per minute limit exceeded - too many tokens processed."
+#             Retry-After: 56                                no number in the body at all
+#
+# Reading only Groq's spellings meant the budget warning and the dial gate would have gone
+# silently blind on Cerebras, and a 429 there would have fallen past both the throttle and
+# the quota branch into "Sorry, I missed that. Could you say it once more?"
+
+CEREBRAS_429 = "Error code: 429 - {'message': 'Tokens per minute limit exceeded - too many tokens processed.', 'type': 'too_many_requests_error', 'code': 'request_quota_exceeded'}"
+
+
+class _Headers(dict):
+    """httpx headers are case-insensitive; a plain dict is not, and the real ones arrive
+    lowercased. Both spellings are exercised so neither is assumed."""
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        ({"retry-after": "56"}, 56.0),
+        ({"Retry-After": "3"}, 3.0),
+        ({"retry-after": "not a number"}, None),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_the_standard_retry_after_header_is_read(header, expected):
+    assert retry_after_header(header) == expected
+
+
+def test_the_header_wins_over_the_prose():
+    """Both can be present. The header is the HTTP standard and unambiguous; the prose is a
+    fallback for providers that send nothing else."""
+    assert throttle_delay("try again in 3.5s", {"retry-after": "56"}) == 56.0
+
+
+def test_prose_is_used_when_there_is_no_header():
+    assert throttle_delay("Please try again in 3.5s.", {}) == pytest.approx(3.5)
+
+
+def test_cerebras_429_carries_no_number_in_its_body():
+    """Which is why the header had to be read at all — on the words alone this message
+    yields nothing to classify on."""
+    assert retry_after_seconds(CEREBRAS_429) is None
+
+
+def test_a_long_cerebras_throttle_signs_off_rather_than_blaming_the_caller():
+    """56 seconds is a dead account as far as the person on the line is concerned. Without
+    the delay, none of LLM_QUOTA_MARKERS appears in this message either, so it would reach
+    the generic path and ask them to repeat themselves twice before hanging up anyway."""
+    assert not any(m in CEREBRAS_429.lower() for m in agent.LLM_QUOTA_MARKERS), (
+        "if this message ever starts matching a marker, this test is no longer the guard"
+    )
+    assert not is_transient_throttle(CEREBRAS_429, 56.0)
+    assert is_quota_error(CEREBRAS_429, 56.0)
+
+
+def test_a_short_cerebras_throttle_keeps_the_call():
+    assert is_transient_throttle(CEREBRAS_429, 2.0)
+    assert not is_quota_error(CEREBRAS_429, 2.0)
+
+
+@pytest.mark.parametrize(
+    "headers,tokens",
+    [
+        ({"x-ratelimit-remaining-tokens": "500", "x-ratelimit-limit-tokens": "12000"}, 500),
+        ({"x-ratelimit-remaining-tokens-minute": "500", "x-ratelimit-limit-tokens-minute": "30000"}, 500),
+    ],
+)
+def test_both_providers_spellings_of_the_token_headers_are_read(headers, tokens):
+    """Groq on the left, Cerebras on the right. One name only would have gone blind."""
+    class R:
+        pass
+
+    r = R()
+    r.headers = headers
+    assert len(_warnings_from_response(r)) == 1
+
+
+def _warnings_from_response(response):
+    from loguru import logger
+
+    seen = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        asyncio.run(BudgetWatcher("sid", warn_below=4000)(response))
+    finally:
+        logger.remove(sink)
+    return [w for w in seen if "budget low" in w]
+
+
+def test_groqs_request_header_is_not_read_as_a_per_minute_figure():
+    """Groq's x-ratelimit-limit-requests is a DAILY figure (1000 on the free tier);
+    Cerebras's -minute suffix means what it says (5). Treating Groq's as per-minute would
+    let the dial gate believe there were a thousand requests of headroom every minute."""
+    from app.services.llm_provider import _LIMIT_REQUESTS, _REMAINING_REQUESTS
+
+    assert all(n.endswith("-minute") for n in _REMAINING_REQUESTS + _LIMIT_REQUESTS), (
+        "only the explicitly per-minute spelling may be used for RPM"
+    )
+
+
+# --- the provider is configuration, not a class name ---------------------------------
+
+
+def test_the_default_is_still_groq_so_an_existing_deployment_does_not_move():
+    endpoint = primary_endpoint(_settings())
+    assert "groq.com" in endpoint.base_url
+    assert endpoint.model
+
+
+def test_the_primary_key_falls_back_to_groq_api_key():
+    """An existing .env sets GROQ_API_KEY and nothing else. It must keep working."""
+    assert primary_endpoint(_settings(GROQ_API_KEY="from-groq")).api_key == "from-groq"
+    assert primary_endpoint(
+        _settings(GROQ_API_KEY="from-groq", LLM_API_KEY="explicit")
+    ).api_key == "explicit"
+
+
+def test_switching_provider_is_configuration_only():
+    """The point of the whole exercise: Groq deprecated the model this agent was built on
+    with six weeks' notice, and the next such notice should cost an env change."""
+    endpoint = primary_endpoint(
+        _settings(
+            LLM_PROVIDER_NAME="cerebras",
+            LLM_BASE_URL="https://api.cerebras.ai/v1",
+            LLM_API_KEY="csk-x",
+            LLM_MODEL="gemma-4-31b",
+        )
+    )
+    assert (endpoint.base_url, endpoint.model, endpoint.api_key) == (
+        "https://api.cerebras.ai/v1", "gemma-4-31b", "csk-x"
+    )
+    assert str(endpoint) == "cerebras/gemma-4-31b"
+
+
+def test_the_service_talks_to_the_endpoint_it_was_given():
+    cerebras = LLMEndpoint(
+        name="cerebras", api_key="csk-x", base_url="https://api.cerebras.ai/v1", model="gemma-4-31b"
+    )
+    svc = ResilientLLMService(call_sid="t", endpoint=cerebras)
+    assert str(svc._client.base_url).rstrip("/") == "https://api.cerebras.ai/v1"
+    assert svc.endpoint.model == "gemma-4-31b"
+
+
+def test_no_provider_class_is_hardcoded_in_the_agent():
+    """A GroqLLMService constructed anywhere restores both the SDK's silent retries and a
+    base URL that configuration can no longer move."""
+    tree = ast.parse(inspect.getsource(agent))
+    built = {getattr(n.func, "id", None) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    imported = {
+        a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names
+    }
+    assert "GroqLLMService" not in built and "GroqLLMService" not in imported
+
+
+def test_the_delay_is_cleared_after_a_good_turn():
+    """Otherwise a throttle from turn 2 explains an unrelated failure on turn 7, and the
+    call signs off for a reason that is no longer true."""
+    src = inspect.getsource(ResilientLLMService.get_chat_completions)
+    assert "_last_throttle_delay = None" in src
+
+
+def test_the_error_handler_uses_the_delay_the_provider_sent():
+    """The pipeline hands an error handler only a string, and Cerebras puts the number in a
+    header. Without reading it back off the service there is nothing to classify on."""
+    src = inspect.getsource(agent.run_voice_agent)
+    handler = src[src.index("async def on_llm_error"):]
+    assert "last_throttle_delay" in handler
+    assert "is_transient_throttle(error.error, throttled_for)" in handler
+    assert "is_quota_error(error.error, throttled_for)" in handler

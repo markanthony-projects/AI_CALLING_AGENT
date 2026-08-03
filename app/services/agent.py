@@ -40,7 +40,12 @@ class GreetingOnlyMinWords(MinWordsUserTurnStartStrategy):
     def relax(self) -> None:
         self._min_words = 1
 from app.core.config import settings
-from app.services.llm_provider import build_llm_service, is_transient_throttle, retry_after_seconds
+from app.services.llm_provider import (
+    MAX_THROTTLE_WAIT_SECS,
+    build_llm_service,
+    is_transient_throttle,
+    primary_endpoint,
+)
 from app.utils.answering_machine import is_answering_machine, machine_phrases
 from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
@@ -53,9 +58,10 @@ from loguru import logger
 logger.remove()
 logger.add(sys.stderr, level="INFO")
 
-# llama3-70b-8192 was decommissioned by Groq on 2026-07-15.
-# llama-3.3-70b-versatile is the official recommended replacement.
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Which model serves calls is configuration now, not a constant here: Groq gave six
+# weeks' notice on llama-3.3-70b-versatile, and the next such notice should cost an
+# env change rather than a release. See LLM_MODEL in app/core/config.py.
+GROQ_MODEL = settings.LLM_MODEL
 
 # Groq rejects a malformed tool call server-side ("Failed to call a function"), which ends
 # the turn with no speech at all. Left unhandled the caller just hears silence until they
@@ -154,8 +160,18 @@ LLM_QUOTA_MARKERS = (
 )
 
 
-def is_quota_error(message: Optional[str]) -> bool:
-    """True when the provider is refusing on budget rather than on this particular request."""
+def is_quota_error(message: Optional[str], delay: Optional[float] = None) -> bool:
+    """True when the provider is refusing on budget rather than on this particular request.
+
+    A throttle longer than a caller will wait counts too. Cerebras answers an exhausted
+    per-minute allowance with "Requests per minute limit exceeded" and Retry-After: 56 —
+    no phrase in LLM_QUOTA_MARKERS appears anywhere in it, so on the words alone this would
+    fall through to the generic path and ask the caller to repeat a sentence into an account
+    that cannot answer for another minute. From their end, a 56-second wait and a dead
+    account are the same event.
+    """
+    if delay is not None and delay > MAX_THROTTLE_WAIT_SECS:
+        return True
     text = (message or "").lower()
     return any(marker in text for marker in LLM_QUOTA_MARKERS)
 
@@ -215,7 +231,7 @@ async def run_voice_agent(
 ):
     logger.info(
         f"[{call_sid}] Voice agent starting | client={client_type} | project='{project_name}' "
-        f"| lead={customer_name or 'unnamed'} | model={GROQ_MODEL}"
+        f"| lead={customer_name or 'unnamed'} | llm={primary_endpoint(settings)}"
     )
 
     vad_analyzer = SileroVADAnalyzer(
@@ -243,7 +259,7 @@ async def run_voice_agent(
     # Not GroqLLMService directly: the SDK's default two silent retries honour Retry-After
     # inside the same await, so a 429 reached the logs as `groq=14605ms` with no error and
     # the caller sat through all fourteen seconds of it. See app/services/llm_provider.py.
-    llm = build_llm_service(call_sid, GROQ_MODEL, settings)
+    llm = build_llm_service(call_sid, settings)
     stt = DeepgramSTTService(
         api_key=settings.DEEPGRAM_API_KEY,
         sample_rate=16000,
@@ -531,18 +547,24 @@ async def run_voice_agent(
             await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndFrame()])
             return
 
+        # How long the provider asked us to wait, taken from its Retry-After header where it
+        # sent one. This is the only signal that separates a hiccup from a dead account, and
+        # providers disagree on where to put it: Groq writes it into English prose in the
+        # body, Cerebras sends only the header and a message with no number in it at all.
+        # Reading the header here means neither has to be special-cased below.
+        throttled_for = service.last_throttle_delay
+
         # A per-minute throttle, not an exhausted account. These reach us only now that the
         # SDK no longer swallows them, and is_quota_error() cannot tell the two apart —
-        # Groq words them identically apart from the number of seconds it asks for. Falling
-        # through to the quota branch would hang up on a caller over a three-second wait,
-        # which is a worse bug than the silence this change removes.
-        if is_transient_throttle(error.error):
+        # Groq words them identically apart from the number of seconds. Falling through to
+        # the quota branch would hang up on a caller over a three-second wait, which is a
+        # worse bug than the silence this change removes.
+        if is_transient_throttle(error.error, throttled_for):
             _llm_failures += 1
-            waited = retry_after_seconds(error.error) or 0.0
             logger.warning(
                 f"[{call_sid}] LLM throttled ({_llm_failures}/{MAX_LLM_TURN_FAILURES}); "
-                f"provider asked for {waited:.1f}s. Configure LLM_FALLBACK_API_KEY to ride "
-                f"these out instead of losing the turn."
+                f"provider asked for {throttled_for or 0.0:.1f}s. Configure LLM_FALLBACK_API_KEY "
+                f"to ride these out instead of losing the turn."
             )
             if _llm_failures >= MAX_LLM_TURN_FAILURES:
                 await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndFrame()])
@@ -550,10 +572,11 @@ async def run_voice_agent(
                 await task.queue_frames([TTSSpeakFrame(LLM_BUSY_LINE)])
             return
 
-        # Out of budget, not a bad request. LLM_RECOVERY_LINE asks the caller to repeat
-        # themselves, which blames them for our billing and buys nothing — the next turn
-        # fails identically. Close cleanly instead.
-        if is_quota_error(error.error):
+        # Out of budget, or throttled for longer than the caller will stay on the line —
+        # which amounts to the same thing from their end. LLM_RECOVERY_LINE asks them to
+        # repeat themselves, which blames them for our billing and buys nothing, because
+        # the next turn fails identically. Close cleanly instead.
+        if is_quota_error(error.error, throttled_for):
             nonlocal _llm_quota_exhausted
             _llm_quota_exhausted = True
             logger.error(

@@ -428,7 +428,7 @@ def test_a_reading_is_refilled_forward_to_now(monkeypatch):
     for a minute after one busy call."""
     from app.core.llm_budget import tokens_available
 
-    _with_redis(monkeypatch, {"remaining": "0", "limit": "12000", "at": str(time.time() - 30)})
+    _with_redis(monkeypatch, {"tokens": "0", "token_limit": "12000", "at": str(time.time() - 30)})
     available = asyncio.run(tokens_available())
     assert 5000 < available < 7000, f"30s at 12000/min should be about 6000, got {available}"
 
@@ -436,14 +436,14 @@ def test_a_reading_is_refilled_forward_to_now(monkeypatch):
 def test_the_refill_never_exceeds_the_limit(monkeypatch):
     from app.core.llm_budget import tokens_available
 
-    _with_redis(monkeypatch, {"remaining": "9000", "limit": "12000", "at": str(time.time() - 600)})
+    _with_redis(monkeypatch, {"tokens": "9000", "token_limit": "12000", "at": str(time.time() - 600)})
     assert asyncio.run(tokens_available()) == 12000
 
 
 def test_a_malformed_reading_reads_as_unknown(monkeypatch):
     from app.core.llm_budget import tokens_available
 
-    _with_redis(monkeypatch, {"remaining": "lots", "limit": "12000", "at": str(time.time())})
+    _with_redis(monkeypatch, {"tokens": "lots", "token_limit": "12000", "at": str(time.time())})
     assert asyncio.run(tokens_available()) is None
 
 
@@ -455,9 +455,9 @@ def test_the_dial_is_refused_when_the_first_turn_cannot_be_answered(monkeypatch)
     from app.core import ratelimit
 
     async def empty():
-        return 10.0
+        return ratelimit.Headroom(tokens=10.0, requests=None)
 
-    monkeypatch.setattr(ratelimit, "tokens_available", empty)
+    monkeypatch.setattr(ratelimit, "headroom", empty)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(ratelimit.reserve_llm_headroom())
     assert exc.value.status_code == 429
@@ -468,9 +468,9 @@ def test_a_healthy_budget_dials(monkeypatch):
     from app.core import ratelimit
 
     async def plenty():
-        return 11_000.0
+        return ratelimit.Headroom(tokens=11_000.0, requests=4.0)
 
-    monkeypatch.setattr(ratelimit, "tokens_available", plenty)
+    monkeypatch.setattr(ratelimit, "headroom", plenty)
     asyncio.run(ratelimit.reserve_llm_headroom())  # must not raise
 
 
@@ -480,9 +480,9 @@ def test_the_gate_can_be_turned_off(monkeypatch):
     from app.core import ratelimit
 
     async def empty():
-        return 0.0
+        return ratelimit.Headroom(tokens=0.0, requests=0.0)
 
-    monkeypatch.setattr(ratelimit, "tokens_available", empty)
+    monkeypatch.setattr(ratelimit, "headroom", empty)
     monkeypatch.setattr(ratelimit.settings, "LLM_MIN_TOKENS_TO_DIAL", 0)
     asyncio.run(ratelimit.reserve_llm_headroom())  # must not raise
 
@@ -509,3 +509,91 @@ def test_publishing_the_budget_cannot_break_a_live_call():
     )
     guarded = src[src.index("record_budget") - 200 : src.index("record_budget") + 200]
     assert "try:" in guarded and "except" in guarded
+
+
+# --- providers run out of different things -------------------------------------------
+#
+# Measured on 2026-08-03. Groq's free tier binds on tokens: 12,000/minute against a
+# 3,400-token request. Cerebras binds on requests first — x-ratelimit-limit-requests-minute
+# is 5, against a call that needs six to ten. Watching only tokens would have declared
+# Cerebras healthy (29,999 tokens left!) right up until the greeting stalled.
+
+
+def _headroom(**kw):
+    from app.core.llm_budget import Headroom
+
+    return Headroom(tokens=kw.get("tokens"), requests=kw.get("requests"))
+
+
+def _gate(monkeypatch, room):
+    from app.core import ratelimit
+
+    async def _read():
+        return room
+
+    monkeypatch.setattr(ratelimit, "headroom", _read)
+    return ratelimit
+
+
+def test_no_requests_left_refuses_the_dial_even_with_tokens_to_spare(monkeypatch):
+    """Cerebras exactly: 29,999 tokens and 0 requests. On tokens alone this dials, bills the
+    carrier leg, rings a real person and then stalls on the opening line."""
+    from fastapi import HTTPException
+
+    ratelimit = _gate(monkeypatch, _headroom(tokens=29_999.0, requests=0.0))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ratelimit.reserve_llm_headroom())
+    assert exc.value.status_code == 429
+    assert "request" in exc.value.detail.lower()
+
+
+def test_requests_left_dials(monkeypatch):
+    ratelimit = _gate(monkeypatch, _headroom(tokens=29_999.0, requests=3.0))
+    asyncio.run(ratelimit.reserve_llm_headroom())  # must not raise
+
+
+def test_a_provider_that_reports_no_rpm_is_not_blocked(monkeypatch):
+    """Groq sends no per-minute request header at all. Absent must mean "unknown", never
+    "zero", or Groq would never dial again."""
+    ratelimit = _gate(monkeypatch, _headroom(tokens=11_000.0, requests=None))
+    asyncio.run(ratelimit.reserve_llm_headroom())  # must not raise
+
+
+def test_the_token_ceiling_is_still_checked_first(monkeypatch):
+    """Both are real; the token message is the more actionable one when both are empty."""
+    from fastapi import HTTPException
+
+    ratelimit = _gate(monkeypatch, _headroom(tokens=10.0, requests=0.0))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ratelimit.reserve_llm_headroom())
+    assert "token" in exc.value.detail.lower()
+
+
+def test_the_rpm_refusal_says_how_long_to_wait(monkeypatch):
+    from fastapi import HTTPException
+
+    ratelimit = _gate(monkeypatch, _headroom(tokens=29_999.0, requests=0.0))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ratelimit.reserve_llm_headroom())
+    assert int(exc.value.headers["Retry-After"]) >= 1
+
+
+def test_requests_are_refilled_forward_like_tokens(monkeypatch):
+    """5 RPM refills at one request every 12 seconds. A snapshot taken 30s ago that read 0
+    is worth about 2.5 requests now, and refusing on it would idle the dialer for a minute
+    after every busy call."""
+    import time as _t
+
+    from app.core import llm_budget
+
+    class _R:
+        async def hgetall(self, key):
+            return {
+                "tokens": "0", "token_limit": "30000",
+                "requests": "0", "request_limit": "5",
+                "at": str(_t.time() - 30),
+            }
+
+    monkeypatch.setattr(llm_budget, "get_arq_pool", lambda: _R())
+    room = asyncio.run(llm_budget.headroom())
+    assert 2.0 < room.requests < 3.0, f"expected ~2.5 requests refilled, got {room.requests}"

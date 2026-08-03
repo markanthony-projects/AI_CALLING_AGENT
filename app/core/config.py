@@ -141,6 +141,19 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     DEEPGRAM_API_KEY: str = ""
 
+    # Which provider serves the calls. Deliberately configuration and not a class name:
+    # Groq deprecated the model this agent was built on with six weeks' notice, and the
+    # next such notice should cost an env change rather than a release. Any endpoint
+    # speaking the OpenAI wire format works.
+    #   Groq:     https://api.groq.com/openai/v1      llama-3.3-70b-versatile
+    #   Cerebras: https://api.cerebras.ai/v1          gemma-4-31b
+    #   OpenAI:   https://api.openai.com/v1           gpt-4o-mini
+    LLM_PROVIDER_NAME: str = "groq"
+    LLM_BASE_URL: str = "https://api.groq.com/openai/v1"
+    # Falls back to GROQ_API_KEY so an existing deployment keeps working untouched.
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "llama-3.3-70b-versatile"
+
     # A second OpenAI-wire-format provider to finish a turn Groq refuses on a rate limit.
     # Off unless both the key and the model are set: a half-configured fallback looks like
     # insurance and fails at the one moment it is needed. Defaults to OpenAI's endpoint,

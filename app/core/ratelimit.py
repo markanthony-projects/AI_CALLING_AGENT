@@ -19,7 +19,7 @@ from loguru import logger
 from redis.exceptions import RedisError
 
 from app.core.config import settings
-from app.core.llm_budget import tokens_available
+from app.core.llm_budget import Headroom, headroom
 from app.core.queue import get_arq_pool
 from app.utils.timeutils import to_ist, utc_now
 
@@ -115,16 +115,29 @@ async def reserve_llm_headroom() -> None:
     if floor <= 0:
         return
 
-    available = await tokens_available()
-    if available is None or available >= floor:
-        return
+    left = await headroom()
 
-    limit_per_min = max(floor, 1)
-    wait = max(1, int((floor - available) / (limit_per_min / 60.0)))
-    reason = (
-        f"LLM token budget too low to start a call "
-        f"({int(available)} left, {floor} needed for the first turn)"
-    )
+    # Both ceilings, because providers bind on different ones. Groq's free tier runs out of
+    # tokens (12,000/minute against a 3,400-token request); Cerebras's runs out of requests
+    # first (5/minute, against a call that needs six to ten). Checking only tokens would
+    # have called Cerebras healthy right up until the greeting stalled.
+    if left.tokens is not None and left.tokens < floor:
+        reason = (
+            f"LLM token budget too low to start a call "
+            f"({int(left.tokens)} left, {floor} needed for the first turn)"
+        )
+        _refuse(reason, deficit=floor - left.tokens, per_minute=floor)
+    if left.requests is not None and left.requests < 1:
+        _refuse(
+            "LLM request budget exhausted; the greeting itself would be throttled",
+            deficit=1 - left.requests,
+            per_minute=1,
+        )
+
+
+def _refuse(reason: str, deficit: float, per_minute: float) -> None:
+    """Reject the dial, telling the caller how long the shortfall takes to refill."""
+    wait = max(1, int(deficit / (max(per_minute, 1) / 60.0)))
     logger.warning(f"Dial rejected: {reason}")
     raise HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
