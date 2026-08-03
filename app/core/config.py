@@ -141,18 +141,62 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     DEEPGRAM_API_KEY: str = ""
 
+    CEREBRAS_API_KEY: str = ""
+
     # Which provider serves the calls. Deliberately configuration and not a class name:
-    # Groq deprecated the model this agent was built on with six weeks' notice, and the
-    # next such notice should cost an env change rather than a release. Any endpoint
-    # speaking the OpenAI wire format works.
-    #   Groq:     https://api.groq.com/openai/v1      llama-3.3-70b-versatile
-    #   Cerebras: https://api.cerebras.ai/v1          gemma-4-31b
-    #   OpenAI:   https://api.openai.com/v1           gpt-4o-mini
-    LLM_PROVIDER_NAME: str = "groq"
-    LLM_BASE_URL: str = "https://api.groq.com/openai/v1"
-    # Falls back to GROQ_API_KEY so an existing deployment keeps working untouched.
+    # Groq deprecated llama-3.3-70b-versatile with six weeks' notice and closed its
+    # self-serve paid tier, so the next such notice should cost an env change rather than a
+    # release. Any endpoint speaking the OpenAI wire format works.
+    #
+    # gemma-4-31b on Cerebras was chosen by replaying a real call against every candidate
+    # and scoring the rules live calls had actually broken, not by tokens per second:
+    #
+    #   gemma-4-31b    503ms TTFB   end_call via the tool channel   name in 6 replies of 6
+    #   gpt-oss-120b   559ms        tool                            5/6, and it ran a turn
+    #                                                               behind on the opening
+    #   zai-glm-4.7   1446ms        tool                            5/6, 5.8s worst case
+    #
+    # For comparison, Groq's llama-3.3 ran at 400ms but wrote end_call into its spoken text
+    # on essentially every call, and its free tier allows 12,000 tokens/minute against a
+    # 3,400-token request — under three turns a minute for a conversation that needs ten.
+    LLM_PROVIDER_NAME: str = "cerebras"
+    LLM_BASE_URL: str = "https://api.cerebras.ai/v1"
+    # Blank resolves to the provider's own key below, so a deployment that predates this
+    # setting keeps working on whichever key it already had.
     LLM_API_KEY: str = ""
-    LLM_MODEL: str = "llama-3.3-70b-versatile"
+    LLM_MODEL: str = "gemma-4-31b"
+
+    @property
+    def llm_api_key(self) -> str:
+        """The key for whichever provider LLM_BASE_URL points at.
+
+        Resolved per provider rather than by a single fallback: a blanket
+        `LLM_API_KEY or GROQ_API_KEY` would send a Groq key to Cerebras the moment the
+        default endpoint changed, and the failure would arrive as a dropped call rather
+        than as a configuration error.
+        """
+        if self.LLM_API_KEY:
+            return self.LLM_API_KEY
+        if "cerebras.ai" in self.LLM_BASE_URL:
+            return self.CEREBRAS_API_KEY
+        if "groq.com" in self.LLM_BASE_URL:
+            return self.GROQ_API_KEY
+        if "openai.com" in self.LLM_BASE_URL:
+            return self.OPENAI_API_KEY
+        return ""
+
+    @model_validator(mode="after")
+    def the_llm_has_a_key(self) -> "Settings":
+        # Without this the first symptom is a caller hearing silence: the greeting is
+        # queued, the completion 401s, and the recovery path apologises on our behalf.
+        # A process that cannot make an LLM call should not accept a websocket.
+        if not self.llm_api_key:
+            raise ValueError(
+                f"No API key for the configured LLM at {self.LLM_BASE_URL}. "
+                f"Set LLM_API_KEY, or the provider's own key "
+                f"(CEREBRAS_API_KEY / GROQ_API_KEY / OPENAI_API_KEY)."
+            )
+        return self
 
     # A second OpenAI-wire-format provider to finish a turn Groq refuses on a rate limit.
     # Off unless both the key and the model are set: a half-configured fallback looks like

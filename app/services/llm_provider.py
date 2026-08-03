@@ -328,14 +328,14 @@ class ResilientLLMService(OpenAILLMService):
 
 
 def primary_endpoint(settings) -> LLMEndpoint:
-    """Where the agent's turns go by default.
+    """Where the agent's turns go.
 
-    LLM_API_KEY falls back to GROQ_API_KEY so an existing deployment keeps working across
-    this change without touching its env file.
+    The key is resolved per provider by Settings.llm_api_key, so pointing LLM_BASE_URL at a
+    different vendor cannot silently send it the previous vendor's credential.
     """
     return LLMEndpoint(
         name=settings.LLM_PROVIDER_NAME,
-        api_key=settings.LLM_API_KEY or settings.GROQ_API_KEY,
+        api_key=settings.llm_api_key,
         base_url=settings.LLM_BASE_URL,
         model=settings.LLM_MODEL,
     )

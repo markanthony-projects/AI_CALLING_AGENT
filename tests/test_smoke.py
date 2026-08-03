@@ -102,6 +102,9 @@ def test_auth_defaults_to_enabled():
         DATABASE_URL="postgresql+asyncpg://u:p@h/d",
         OPENAI_API_KEY="x",
         SARVAM_API_KEY="x",
+        # Settings refuses to construct without a key for the configured LLM:
+        # a process that cannot make a completion should not accept a websocket.
+        CEREBRAS_API_KEY="csk-test",
     )
     assert fresh.AUTH_ENABLED is True
 
@@ -127,6 +130,9 @@ def test_database_url_is_coerced_to_asyncpg():
         DATABASE_URL="postgresql://u:p@h/d",
         OPENAI_API_KEY="x",
         SARVAM_API_KEY="x",
+        # Settings refuses to construct without a key for the configured LLM:
+        # a process that cannot make a completion should not accept a websocket.
+        CEREBRAS_API_KEY="csk-test",
     )
     assert s.DATABASE_URL.startswith("postgresql+asyncpg://")
 

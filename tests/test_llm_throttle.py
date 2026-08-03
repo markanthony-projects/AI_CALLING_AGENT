@@ -67,6 +67,10 @@ BASE = dict(
     DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
     OPENAI_API_KEY="x",
     SARVAM_API_KEY="x",
+    # Settings now refuses to construct without a key for the configured provider, so this
+    # has to be supplied rather than leaked in from the developer's own .env.
+    CEREBRAS_API_KEY="csk-test",
+    GROQ_API_KEY="gsk-test",
 )
 
 
@@ -79,9 +83,13 @@ def _settings(**over):
     """
     import os
 
-    for key in ("LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL", "TURN_SETTLE_SECS"):
+    for key in (
+        "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL", "TURN_SETTLE_SECS",
+        "LLM_PROVIDER_NAME", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL",
+        "CEREBRAS_API_KEY", "GROQ_API_KEY",
+    ):
         os.environ.pop(key, None)
-    return Settings(**BASE, **over, _env_file=None)
+    return Settings(**{**BASE, **over}, _env_file=None)
 
 
 # --- reading the delay --------------------------------------------------------------
@@ -506,18 +514,51 @@ def test_groqs_request_header_is_not_read_as_a_per_minute_figure():
 # --- the provider is configuration, not a class name ---------------------------------
 
 
-def test_the_default_is_still_groq_so_an_existing_deployment_does_not_move():
+def test_the_default_is_the_model_that_was_measured():
+    """Chosen by replaying a real call against every candidate and scoring the rules live
+    calls had broken — 503ms, end_call through the tool channel, the prospect's name in six
+    replies out of six — not by tokens per second."""
     endpoint = primary_endpoint(_settings())
-    assert "groq.com" in endpoint.base_url
-    assert endpoint.model
+    assert "cerebras.ai" in endpoint.base_url
+    assert endpoint.model == "gemma-4-31b"
 
 
-def test_the_primary_key_falls_back_to_groq_api_key():
-    """An existing .env sets GROQ_API_KEY and nothing else. It must keep working."""
-    assert primary_endpoint(_settings(GROQ_API_KEY="from-groq")).api_key == "from-groq"
+def test_the_key_follows_the_provider_not_a_single_fallback():
+    """The failure this prevents: a blanket `LLM_API_KEY or GROQ_API_KEY` sends the Groq
+    credential to Cerebras the moment the default endpoint moves, and it arrives as a
+    dropped call rather than as a configuration error."""
+    assert primary_endpoint(_settings()).api_key == "csk-test"
+    groq = _settings(
+        LLM_PROVIDER_NAME="groq", LLM_BASE_URL="https://api.groq.com/openai/v1",
+        LLM_MODEL="llama-3.3-70b-versatile",
+    )
+    assert primary_endpoint(groq).api_key == "gsk-test"
+
+
+def test_an_explicit_key_always_wins():
+    assert primary_endpoint(_settings(LLM_API_KEY="explicit")).api_key == "explicit"
+
+
+def test_a_provider_with_no_key_is_refused_at_startup():
+    """Without this the first symptom is a caller hearing silence: the greeting is queued,
+    the completion 401s, and the recovery path apologises on our behalf. A process that
+    cannot make an LLM call should not accept a websocket."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="No API key"):
+        _settings(LLM_BASE_URL="https://api.cerebras.ai/v1", CEREBRAS_API_KEY="")
+
+
+def test_an_unrecognised_endpoint_needs_its_key_named_explicitly():
+    """A self-hosted or new vendor cannot be guessed at, and guessing would hand it
+    somebody else's credential."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="No API key"):
+        _settings(LLM_BASE_URL="https://llm.internal/v1")
     assert primary_endpoint(
-        _settings(GROQ_API_KEY="from-groq", LLM_API_KEY="explicit")
-    ).api_key == "explicit"
+        _settings(LLM_BASE_URL="https://llm.internal/v1", LLM_API_KEY="k")
+    ).api_key == "k"
 
 
 def test_switching_provider_is_configuration_only():
