@@ -96,3 +96,57 @@ def test_tts_settings_use_no_unvalidated_tuning_values():
         "min_buffer_size=25 was rejected by Sarvam and silenced the agent; "
         "leave it at the default until a value is verified against their API"
     )
+
+
+# --- tone, and why it regressed -----------------------------------------------------
+#
+# Compressing this prompt from 3,585 to 2,641 tokens dropped five delivery instructions
+# with it, and the next call came back robotic. Measured against the call before it:
+# the prospect's name went from 5 replies out of 5 to 0 out of 6, and the short sentences
+# stopped being warm acknowledgements ("That's great, Rahul.") and became verbless facts
+# ("Near Dommasandra Circle.", "Starting price 1.17 Crores."). Sarvam synthesises each
+# sentence separately, so a bare fragment gets a flat contour and the delivery goes
+# mechanical. These are asserted individually because they were lost individually.
+
+
+@pytest.mark.parametrize(
+    "phrase,lost",
+    [
+        ("Tone: warm, professional, confident", "the only line that names a tone at all"),
+        ("Use confident short pauses with commas", "pacing"),
+        ("Do NOT read a script", "the anti-robot instruction"),
+        ("real, dynamic conversation", "its other half"),
+        ("Use their first name in most replies", "the name vanished from every reply"),
+        ('"That works well, Chandan."', "a worked example; the bare rule was ignored"),
+        ("Speak in complete sentences", "verbless fragments read flat through TTS"),
+        ("NEVER jump straight to the next question", "the imperative behind ACKNOWLEDGE"),
+    ],
+)
+def test_delivery_instructions_survive(phrase, lost):
+    assert phrase in PROMPT, f"lost the rule guarding: {lost}"
+
+
+def test_the_word_limits_are_not_read_as_targets():
+    """The model hit 15 words by dropping verbs. The cap has to say it is a ceiling."""
+    assert "ceilings, not targets" in PROMPT
+    assert "never drop a verb" in PROMPT
+
+
+@pytest.mark.parametrize("judgement", ["tight budget", "small budget", "good budget"])
+def test_the_prompt_forbids_labelling_a_budget(judgement):
+    """Told "Below 60 lakhs", the agent replied "That is a tight budget." — on the path
+    whose entire purpose is capturing a requirement for a colleague to call back about."""
+    assert "NEVER JUDGE THE PROSPECT" in PROMPT
+    assert judgement in PROMPT, "the exact phrasing to avoid is not named"
+
+
+def test_a_rejection_gets_an_acknowledgement_too():
+    """"No, I'm not interested" was answered with a bare question and nothing else."""
+    assert "they say no or are not interested" in PROMPT
+
+
+def test_bhk_spacing_says_why():
+    """The rule was in the prompt and ignored on two consecutive calls; a bare
+    instruction with no reason is the first thing a compressing model drops."""
+    assert "3 B H K" in PROMPT
+    assert "pronounce it as a word" in PROMPT

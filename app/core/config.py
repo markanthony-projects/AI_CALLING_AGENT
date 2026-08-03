@@ -124,11 +124,40 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # How long after the prospect stops making sound their turn stays open for them to
+    # carry on. VAD_STOP_SECS cannot do this job — it must stay under the STT's p99 or turn
+    # detection runs blind, so at 0.2s a normal mid-sentence breath ended the turn. "Maybe
+    # around in 2" and "months." arrived as two turns, each costing a full LLM request, and
+    # the agent answered half a sentence. Both observed gaps were under 0.75s.
+    #
+    # This is a straight trade: it adds its own value to every turn's response time, and
+    # buys back a duplicate request plus an answer to half a question. Lower it only with
+    # call logs showing turns are no longer splitting.
+    TURN_SETTLE_SECS: float = Field(default=0.8, gt=0)
+
     OPENAI_API_KEY: str
     SARVAM_API_KEY: str
     SARVAM_VOICE_ID: str = "simran"
     GROQ_API_KEY: str = ""
     DEEPGRAM_API_KEY: str = ""
+
+    # A second OpenAI-wire-format provider to finish a turn Groq refuses on a rate limit.
+    # Off unless both the key and the model are set: a half-configured fallback looks like
+    # insurance and fails at the one moment it is needed. Defaults to OpenAI's endpoint,
+    # so LLM_FALLBACK_API_KEY plus LLM_FALLBACK_MODEL=gpt-4o-mini is enough to enable it.
+    # Roughly one request's worth of tokens. Below this the account cannot answer the
+    # opening turn, so a dial placed now bills for the carrier leg and rings a real person
+    # who then hears silence. Set to 0 to dial regardless of the LLM budget.
+    LLM_MIN_TOKENS_TO_DIAL: int = Field(default=4000, ge=0)
+
+    LLM_FALLBACK_NAME: str = "openai"
+    LLM_FALLBACK_API_KEY: str = ""
+    LLM_FALLBACK_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_FALLBACK_MODEL: str = ""
+
+    @property
+    def llm_fallback_enabled(self) -> bool:
+        return bool(self.LLM_FALLBACK_API_KEY and self.LLM_FALLBACK_MODEL)
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

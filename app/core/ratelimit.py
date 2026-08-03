@@ -19,6 +19,7 @@ from loguru import logger
 from redis.exceptions import RedisError
 
 from app.core.config import settings
+from app.core.llm_budget import tokens_available
 from app.core.queue import get_arq_pool
 from app.utils.timeutils import to_ist, utc_now
 
@@ -95,4 +96,38 @@ async def reserve_dial_quota(count: int) -> None:
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         detail=reason,
         headers={"Retry-After": str(retry_after)},
+    )
+
+
+async def reserve_llm_headroom() -> None:
+    """Refuse to dial when the LLM cannot answer the first turn.
+
+    Distinct from the ceilings above, which exist to stop us spending money. This one stops
+    us spending it badly: a dial placed with an empty token bucket still bills for the
+    carrier leg, still rings a real person, and then stalls on the greeting while they
+    listen to nothing. Better to place that call a minute later.
+
+    Deliberately checks for one request's worth, not a whole conversation's. The bucket
+    refills throughout a call, so requiring the full amount up front would refuse every dial
+    on a small plan — including the ones that go on to complete perfectly well.
+    """
+    floor = settings.LLM_MIN_TOKENS_TO_DIAL
+    if floor <= 0:
+        return
+
+    available = await tokens_available()
+    if available is None or available >= floor:
+        return
+
+    limit_per_min = max(floor, 1)
+    wait = max(1, int((floor - available) / (limit_per_min / 60.0)))
+    reason = (
+        f"LLM token budget too low to start a call "
+        f"({int(available)} left, {floor} needed for the first turn)"
+    )
+    logger.warning(f"Dial rejected: {reason}")
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=reason,
+        headers={"Retry-After": str(wait)},
     )

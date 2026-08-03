@@ -9,7 +9,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.security import issue_call_token, require_call_token, require_call_token_ws
 from app.models.db import Call, CallStatus, Transcript
 from app.services.agent import run_voice_agent
-from app.services.call_context import recall_dialed_number
+from app.services.call_context import recall_customer_name, recall_dialed_number
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
 from app.utils.context_builder import build_campaign_context
@@ -132,10 +132,15 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             call_sid,
             client_type=client_type,
             project_name=project["name"],
+            customer_name=await recall_customer_name(call_sid),
         )
         transcript = result.transcript
         if result.error:
             logger.error(f"[{call_sid}] Voice session ended in error: {result.error}")
+        elif result.answering_machine:
+            # Not COMPLETED: recording a voicemail as a connect flatters the campaign's
+            # answer rate in the dashboard, and the number still deserves a retry.
+            status = CallStatus.MACHINE
         else:
             status = CallStatus.COMPLETED
     except WebSocketDisconnect:
@@ -183,5 +188,10 @@ async def _finalize_call(
         f"[{call_sid}] Call finalised | status={status.value} | duration={duration:.1f}s | active={ACTIVE_CALLS}"
     )
     # A failed session still yields a partial transcript worth extracting a lead from.
+    # A voicemail does not: the transcript is somebody's outgoing greeting, and running it
+    # through the extractor costs an OpenAI call to learn that the person was not home.
+    if status is CallStatus.MACHINE:
+        logger.info(f"[{call_sid}] Answering machine; skipping extraction")
+        return
     if transcript_stored:
         await enqueue_extraction(call_sid)

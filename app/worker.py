@@ -11,6 +11,7 @@ from app.core.database import AsyncSessionLocal, engine
 from app.core.queue import redis_settings
 from app.models.db import Call, Campaign, Lead, LeadStatus, Project, Transcript
 from app.models.schemas import LeadExtraction
+from app.utils.attribution import budget_is_grounded, phrase_is_grounded
 from app.utils.timeutils import is_within_business_hours, resolve_appointment, to_ist, utc_now
 
 EXTRACTION_MODEL = "gpt-4o-mini"
@@ -41,8 +42,15 @@ def _build_system_prompt(reference_time: datetime) -> str:
         "Before filling any field, find the 'Prospect:' line it came from. If it only appears on an 'Agent:' line, the value is null.\n"
         "- budget: only a figure the Prospect named as their own spend. 'Our 3 BHK is priced at 1.8 Crores' and "
         "'most buyers look in the 1 to 3.5 Crores range' are the Agent quoting the ASKING PRICE — never record either as the budget. "
+        "So is 'starting at 1.2 Crores', 'prices start from 90 Lakhs', 'this one is 1.8 Crores' and every other figure that follows "
+        "the Agent describing what is on sale. A Prospect answering 'yes', 'okay' or 'sounds good' to any of those has agreed to keep "
+        "listening — they have NOT told you their budget, and budget stays null.\n"
+        "TEST BEFORE YOU FILL budget: can you point to the Prospect line where they said the number themselves? If not, it is null. "
+        "A wrong budget is worse than none: sales calls the person back believing they can spend money they never mentioned.\n"
         "Asking what something costs is not having that budget. Agreeing to a site visit is not agreeing to a price. "
         "If the Prospect dodged the budget question or answered without naming a figure, budget is null.\n"
+        "- preferred_unit_type: only a configuration the PROSPECT asked about or chose. 'We have 2 BHK, 3 BHK and villaments' is the "
+        "Agent listing stock — picking one out of that list is inventing a preference. Null unless the Prospect named one themselves.\n"
         "- preferred_location: only a locality the Prospect named. Never copy one out of the Agent's pitch.\n"
         "CRITICAL RULE FOR transliterated_transcript: You MUST transliterate the entire conversation transcript into English/Latin script (e.g. convert 'कौन सा प्रोजेक्ट' to 'Kaun sa project'). "
         "This applies to EVERY non-Latin word including names — 'कुमार' becomes 'Kumar', 'प्रिया' becomes 'Priya'. "
@@ -90,6 +98,45 @@ def _normalise(value: str) -> str:
     return "".join(ch for ch in value.lower() if ch.isalnum())
 
 
+# What a prospect can want that this project does not sell. Asked "what kind of property
+# are you looking for?" one answered "plots"; it matched none of the project's BHK configs
+# and was stored as null, throwing away the single most useful fact on the record. That
+# question is only ever asked on the path where the pitch has already failed, so the answer
+# is by definition about some other project — matching it against this one's stock is
+# backwards.
+_GENERIC_UNIT_TYPES = {
+    "plot": "Plot",
+    "plots": "Plot",
+    "site": "Plot",
+    "land": "Plot",
+    "villa": "Villa",
+    "villas": "Villa",
+    "villament": "Villament",
+    "rowhouse": "Row House",
+    "independenthouse": "Independent House",
+    "apartment": "Apartment",
+    "apartments": "Apartment",
+    "flat": "Apartment",
+    "flats": "Apartment",
+    "penthouse": "Penthouse",
+    "studio": "Studio",
+    "commercial": "Commercial",
+    "office": "Commercial",
+}
+
+
+def _generic_unit_type(spoken: str) -> Optional[str]:
+    """Map free text onto a property type that exists outside this project's stock."""
+    key = _normalise(spoken)
+    if key in _GENERIC_UNIT_TYPES:
+        return _GENERIC_UNIT_TYPES[key]
+    # "looking for plots" / "a villa maybe" — the answer is rarely just the noun.
+    for word, canonical in _GENERIC_UNIT_TYPES.items():
+        if word in key:
+            return canonical
+    return None
+
+
 async def _match_unit_type(db, campaign_id, spoken: Optional[str], call_sid: str) -> Optional[str]:
     """Map what the prospect said onto a unit the project actually sells.
 
@@ -121,8 +168,17 @@ async def _match_unit_type(db, campaign_id, spoken: Optional[str], call_sid: str
         if key and (key in target or target in key):
             return unit
 
+    generic = _generic_unit_type(spoken)
+    if generic:
+        logger.info(
+            f"[{call_sid}] Unit type {spoken!r} is not in this project's stock; "
+            f"recording it as {generic!r} for the portfolio"
+        )
+        return generic
+
     logger.warning(
-        f"[{call_sid}] Unit type {spoken!r} matches none of {known or 'this project'}; storing null"
+        f"[{call_sid}] Unit type {spoken!r} matches none of {known or 'this project'} "
+        f"and is not a property type we recognise; storing null"
     )
     return None
 
@@ -144,6 +200,34 @@ def _resolve(reference, weekday, in_days, time_of_day, call_sid: str, label: str
     if not is_within_business_hours(resolved):
         logger.warning(f"[{call_sid}] {label.capitalize()} falls outside business hours: {resolved:%H:%M}")
     return resolved
+
+
+def _drop_ungrounded(lead_data: LeadExtraction, transcript: str, call_sid: str) -> LeadExtraction:
+    """Null any prospect-owned field the prospect is not on record as having said.
+
+    The extraction prompt already forbids copying from the agent's pitch, in capitals, with
+    worked examples. It was ignored twice — once recording the asking price as the caller's
+    budget, once recording the project's own locality as the area they wanted. A wrong
+    value here is worse than a missing one: sales dials someone believing facts about them
+    that came out of our own script.
+
+    Only fields the prospect owns are checked. customer_name is not one of them — the
+    dial list supplies it and the prospect never has to repeat it.
+    """
+    checks = (
+        ("budget", budget_is_grounded(lead_data.budget, transcript), lead_data.budget),
+        ("preferred_location", phrase_is_grounded(lead_data.preferred_location, transcript), lead_data.preferred_location),
+        ("preferred_unit_type", phrase_is_grounded(lead_data.preferred_unit_type, transcript), lead_data.preferred_unit_type),
+    )
+    dropped = {}
+    for field, grounded, value in checks:
+        if not grounded:
+            dropped[field] = None
+            logger.warning(
+                f"[{call_sid}] Dropping {field}={value!r}: no Prospect line says it. "
+                f"This is the agent's own pitch being read back as the caller's requirement."
+            )
+    return lead_data.model_copy(update=dropped) if dropped else lead_data
 
 
 async def process_extraction(ctx: dict, call_sid: str) -> None:
@@ -168,6 +252,15 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
         reference_time = to_ist(call_record.started_at or utc_now())
         lead_data = await _extract_lead(transcript_record.full_text, reference_time, call_sid)
 
+        # Grounded against the transliterated text where we have it: the extracted values
+        # come back in Latin script, so checking them against a Devanagari transcript would
+        # find nothing and discard everything the prospect said in Hindi.
+        lead_data = _drop_ungrounded(
+            lead_data,
+            lead_data.transliterated_transcript or transcript_record.full_text,
+            call_sid,
+        )
+
         if lead_data.transliterated_transcript:
             transcript_record.full_text = lead_data.transliterated_transcript
         # Silent until now: the model romanises customer_name but has left Devanagari in the
@@ -190,7 +283,9 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
                 db, call_record.campaign_id, lead_data.preferred_unit_type, call_sid
             ),
             budget=lead_data.budget,
+            purpose=lead_data.purpose,
             timeline=lead_data.timeline,
+            timeline_months=lead_data.timeline_months,
             status=lead_data.status,
             # leads.* are TIMESTAMP WITHOUT TIME ZONE holding IST wall-clock time, which is
             # what sales actually dials against.
@@ -226,7 +321,9 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
 
         logger.success(
             f"[{call_sid}] Lead extracted | name={lead.customer_name} | budget={lead.budget} "
-            f"| timeline={lead.timeline} | unit={lead.preferred_unit_type} | phone={lead.phone_number} | status={lead.status} "
+            f"| purpose={lead.purpose} | timeline={lead.timeline_months}mo ({lead.timeline}) "
+            f"| unit={lead.preferred_unit_type} | area={lead.preferred_location} "
+            f"| phone={lead.phone_number} | status={lead.status} "
             f"| site_visit={lead.site_visit_time} | callback={lead.callback_time}"
         )
 

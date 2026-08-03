@@ -47,6 +47,32 @@ def _price_range(project: dict) -> Optional[str]:
     return f"{_format_crores(min(bounds))} to {_format_crores(max(bounds))}"
 
 
+# possession_status is free text typed by whoever created the project ("Pre Launch",
+# "Under Construction", "Ready to Move"). The agent's opening line differs between a
+# project that is launching and one that has launched, so the wording is resolved here
+# rather than left to the model to infer from prose.
+_PRE_LAUNCH_MARKERS = ("pre launch", "pre-launch", "prelaunch", "upcoming", "coming soon", "eoi")
+
+
+def _launch_stage(project: dict) -> str:
+    status = str(project.get("possession_status") or "").lower()
+    return "PRE_LAUNCH" if any(m in status for m in _PRE_LAUNCH_MARKERS) else "LAUNCHED"
+
+
+def _readable(value) -> str:
+    """Flatten one nearby_facilities value into something speakable.
+
+    Accepts a string, a list of strings, or the list of {name, drive_time, distance}
+    objects that project data commonly arrives as.
+    """
+    if isinstance(value, dict):
+        parts = [str(value[k]) for k in ("name", "drive_time", "distance") if value.get(k)]
+        return ", ".join(parts) if parts else ""
+    if isinstance(value, list):
+        return ", ".join(p for p in (_readable(v) for v in value) if p)
+    return str(value)
+
+
 def build_campaign_context(project: dict) -> str:
     """
     Parses the Redis project dictionary and builds a comprehensive LLM context string.
@@ -56,6 +82,7 @@ def build_campaign_context(project: dict) -> str:
     
     context_lines.append(f"Project Name: {project.get('name')}")
     context_lines.append(f"Location: {project.get('locality')}")
+    context_lines.append(f"Launch Stage: {_launch_stage(project)}")
     
     price_range = _price_range(project)
     if price_range:
@@ -75,7 +102,11 @@ def build_campaign_context(project: dict) -> str:
         
     nearby = project.get('nearby_facilities')
     if nearby and isinstance(nearby, dict):
-        nearby_strs = [f"{k}: {', '.join(v) if isinstance(v, list) else v}" for k, v in nearby.items()]
+        # Coerced rather than assumed. This column is hand-filled per project, and a list of
+        # objects — the shape every scraped source produces — made ', '.join raise TypeError
+        # inside the call handler, which kills the call before the agent says a word. One
+        # awkward landmark is worth more than a dropped call.
+        nearby_strs = [f"{k}: {_readable(v)}" for k, v in nearby.items()]
         context_lines.append(f"Nearby Facilities: {' | '.join(nearby_strs)}")
         
     config = project.get('config_json')

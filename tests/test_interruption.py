@@ -120,7 +120,7 @@ def test_the_strategy_replaces_the_defaults_rather_than_joining_them():
     )
     assert isinstance(start, ast.List), "start must be an explicit list, not the defaults"
     assert len(start.elts) == 1, "another start strategy would fire on its own and defeat this"
-    assert getattr(start.elts[0].func, "id", None) == "MinWordsUserTurnStartStrategy"
+    assert ast.unparse(start.elts[0]) == "greeting_gate"
 
 
 def test_vad_is_not_reintroduced_as_a_start_strategy():
@@ -141,7 +141,7 @@ def test_the_word_count_is_configurable():
     """Tunable against real calls without a redeploy, like the VAD thresholds beside it."""
     min_words = next(
         kw.value
-        for kw in _call_named("MinWordsUserTurnStartStrategy").keywords
+        for kw in _call_named("GreetingOnlyMinWords").keywords
         if kw.arg == "min_words"
     )
     assert ast.unparse(min_words) == "settings.INTERRUPT_MIN_WORDS"
@@ -189,3 +189,61 @@ def test_the_strategy_is_the_one_the_installed_pipecat_ships():
     """Guards an upgrade quietly changing the semantics this whole fix rests on."""
     source = inspect.getsource(MinWordsUserTurnStartStrategy._handle_transcription)
     assert "self._min_words if self._bot_speaking else 1" in source
+
+
+# --- the gate lifts once the greeting is out ----------------------------------------
+#
+# A flat word gate cost a live caller 37 seconds of silence. "Yeah sure." answering
+# "Would you like to visit the site?" is two words, so while the bot's audio was still
+# playing it was discarded outright — not deferred, discarded — and Mark said "Hello"
+# twice before the agent responded at all.
+
+
+def _gate():
+    from app.services.agent import GreetingOnlyMinWords
+
+    return GreetingOnlyMinWords(min_words=3)
+
+
+@pytest.mark.parametrize("said", ["Yeah sure.", "Yeah,", "Hello?", "Yes please", "Okay"])
+def test_while_the_greeting_plays_a_short_reply_still_does_not_interrupt(said):
+    gate = _gate()
+    assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.CONTINUE]
+
+
+@pytest.mark.parametrize("said", ["Yeah sure.", "Yeah,", "Hello?", "Yes please", "Okay"])
+def test_after_the_greeting_the_same_reply_gets_through(said):
+    """The exact replies people give to a closing question. Dropping these is worse than
+    any barge-in the gate was protecting against."""
+    gate = _gate()
+    gate.relax()
+    assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.STOP]
+
+
+def test_relaxing_is_permanent():
+    """It guards one line. Re-arming it mid-call would bring the dead air back."""
+    gate = _gate()
+    gate.relax()
+    asyncio.run(_feed(gate, "Yeah.", bot_speaking=False))
+    assert asyncio.run(_feed(gate, "Yeah.", bot_speaking=True)) == [ProcessFrameResult.STOP]
+
+
+def test_the_gate_is_relaxed_when_an_assistant_turn_finishes():
+    """Wiring, not behaviour: a gate that is never relaxed is the original bug."""
+    tree = ast.parse(AGENT_SRC)
+    handler = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "on_assistant_turn_stopped"
+    )
+    assert "greeting_gate.relax()" in ast.unparse(handler)
+
+
+def test_the_gate_is_relaxed_when_the_prospect_speaks_first():
+    """Then there is no greeting at all, so nothing is being protected — but the gate would
+    stay armed for the whole call and eat every short answer."""
+    tree = ast.parse(AGENT_SRC)
+    handler = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "startup_greeting"
+    )
+    assert "greeting_gate.relax()" in ast.unparse(handler)

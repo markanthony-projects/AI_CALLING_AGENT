@@ -1,0 +1,384 @@
+"""Rate limits, and why a call spent fourteen seconds in silence.
+
+From a live call, five consecutive turns:
+
+    LATENCY turn 5:  2792ms  |  groq=2579ms   sarvam=206ms
+    LATENCY turn 6:  5793ms  |  groq=5500ms   sarvam=285ms
+    LATENCY turn 7:  7891ms  |  groq=7650ms   sarvam=228ms
+    LATENCY turn 8: 13776ms  |  groq=13506ms  sarvam=248ms
+    LATENCY turn 9: 14861ms  |  groq=14605ms  sarvam=249ms
+
+No errors. Sarvam flat throughout. Turn 4 had run at groq=376ms, so nothing was slow — the
+account's per-minute token ceiling had been reached (12,000/min measured against a request
+that cost 4,121 tokens, i.e. under three turns a minute). Groq answered 429 with
+"try again in Ns" and the OpenAI SDK, which defaults to max_retries=2 and honours
+Retry-After inside the same await, slept and retried. Pipecat's TTFB timer starts before
+that await, so every second of waiting was billed to the model and no error was ever
+raised. The caller said "Hello?" twice into the silence.
+"""
+
+import ast
+import asyncio
+import inspect
+
+import pytest
+
+from app.core.config import Settings
+from app.services import agent
+from app.services.agent import LLM_BUSY_LINE, LLM_RECOVERY_LINE, is_quota_error
+from app.services.llm_provider import (
+    MAX_THROTTLE_WAIT_SECS,
+    BudgetWatcher,
+    LLMEndpoint,
+    ResilientLLMService,
+    build_llm_service,
+    is_transient_throttle,
+    retry_after_seconds,
+)
+
+# Verbatim shapes from Groq. The two differ only in the unit of the limit and the size of
+# the number — which is exactly the problem.
+TPM = (
+    "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+    "`llama-3.3-70b-versatile` in organization `org_01k` service tier `on_demand` on tokens "
+    "per minute (TPM): Limit 12000, Used 11500, Requested 4200. Please try again in 3.5s.', "
+    "'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+)
+TPD = (
+    "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+    "`llama-3.3-70b-versatile` in organization `org_01k` service tier `on_demand` on tokens "
+    "per day (TPD): Limit 100000, Used 98928, Requested 3060. Please try again in "
+    "28m37.631999999s.', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+)
+
+BASE = dict(
+    API_KEY="k" * 32,
+    CALL_TOKEN_SECRET="s" * 32,
+    DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
+    OPENAI_API_KEY="x",
+    SARVAM_API_KEY="x",
+)
+
+
+def _settings(**over):
+    """A Settings built from arguments alone.
+
+    load_dotenv() has already pushed .env into os.environ by the time this module is
+    imported, so both the env vars and the env file have to be shut out or these assert
+    against whatever is on the machine.
+    """
+    import os
+
+    for key in ("LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL", "TURN_SETTLE_SECS"):
+        os.environ.pop(key, None)
+    return Settings(**BASE, **over, _env_file=None)
+
+
+# --- reading the delay --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("Please try again in 3.5s.", 3.5),
+        ("Please try again in 28m37.631999999s.", 28 * 60 + 37.631999999),
+        ("please try again in 1h2m3s", 3723.0),
+        ("Please try again in 500ms", 0.5),
+        ("Please try again in 45s", 45.0),
+    ],
+)
+def test_the_provider_delay_is_read_out_of_the_message(message, expected):
+    assert retry_after_seconds(message) == pytest.approx(expected)
+
+
+def test_milliseconds_are_not_read_as_minutes():
+    """Without the lookahead "500ms" parses as 500 minutes — 30,000x too long, and the call
+    gets hung up on rather than waiting half a second."""
+    assert retry_after_seconds("try again in 500ms") < 1.0
+
+
+@pytest.mark.parametrize("message", [None, "", "Connection reset by peer", "Error code: 500"])
+def test_a_message_with_no_delay_reads_as_none(message):
+    assert retry_after_seconds(message) is None
+
+
+# --- the distinction the whole change rests on --------------------------------------
+
+
+def test_a_per_minute_throttle_is_transient():
+    assert is_transient_throttle(TPM)
+
+
+def test_an_exhausted_daily_allowance_is_not():
+    assert not is_transient_throttle(TPD)
+
+
+def test_both_look_identical_to_the_quota_check():
+    """The reason is_transient_throttle has to exist at all.
+
+    is_quota_error matches on "rate limit reached", which Groq puts in front of both. While
+    the SDK swallowed 429s this never mattered; with max_retries=0 they surface, and without
+    this distinction the first per-minute throttle would hang up on the caller with
+    "I'm having some trouble on this line" over a three-second wait.
+    """
+    assert is_quota_error(TPM) and is_quota_error(TPD), "both trip the quota check"
+    assert is_transient_throttle(TPM) != is_transient_throttle(TPD), "yet only one is fatal"
+
+
+@pytest.mark.parametrize(
+    "delay,transient",
+    [(0.5, True), (MAX_THROTTLE_WAIT_SECS - 0.1, True), (MAX_THROTTLE_WAIT_SECS, True),
+     (MAX_THROTTLE_WAIT_SECS + 0.1, False), (60.0, False)],
+)
+def test_the_boundary_is_how_long_a_caller_will_wait(delay, transient):
+    assert is_transient_throttle(f"try again in {delay}s") is transient
+
+
+def test_an_unparseable_rate_limit_is_treated_as_terminal():
+    """Conservative on purpose: staying on a line we cannot serve is worse than a clean
+    sign-off, and a provider that will not say how long has not promised it is short."""
+    assert not is_transient_throttle("Error code: 429 - rate_limit_exceeded")
+
+
+# --- the client ---------------------------------------------------------------------
+
+
+def test_the_sdk_does_not_retry_behind_our_back():
+    """The single most important line in the module. Two silent retries honouring
+    Retry-After is precisely how a 429 reached the logs as groq=14605ms."""
+    assert ResilientLLMService(call_sid="t", api_key="k")._client.max_retries == 0
+
+
+def test_the_processor_still_logs_itself_as_groq():
+    """LatencyObserver prints the processor name. A subclass would silently rename every
+    latency line to `resilientllm=` and break continuity with every call log so far."""
+    from app.utils.latency import _short
+
+    assert _short(ResilientLLMService(call_sid="t", api_key="k").name + "#0") == "groq"
+
+
+# --- the budget watcher -------------------------------------------------------------
+
+
+class _Response:
+    def __init__(self, remaining):
+        self.headers = {
+            "x-ratelimit-remaining-tokens": str(remaining),
+            "x-ratelimit-limit-tokens": "12000",
+            "x-ratelimit-reset-tokens": "4.2s",
+        }
+
+
+def _warnings_from(watcher, *remainings):
+    from loguru import logger
+
+    seen = []
+    sink = logger.add(lambda m: seen.append(m), level="WARNING")
+    try:
+        for r in remainings:
+            asyncio.run(watcher(_Response(r)))
+    finally:
+        logger.remove(sink)
+    return seen
+
+
+def test_the_approaching_ceiling_is_reported():
+    """These headers were on every response for the whole call and nothing read them, so
+    the account crossed its limit mid-conversation with no warning anywhere."""
+    assert len(_warnings_from(BudgetWatcher("sid", warn_below=4000), 500)) == 1
+
+
+def test_a_healthy_budget_says_nothing():
+    assert _warnings_from(BudgetWatcher("sid", warn_below=4000), 11000) == []
+
+
+def test_it_does_not_repeat_itself_every_turn():
+    """One warning per excursion. Once per request would bury the call's own log lines."""
+    assert len(_warnings_from(BudgetWatcher("sid", warn_below=4000), 500, 400, 300)) == 1
+
+
+def test_it_re_arms_after_the_budget_recovers():
+    """The bucket refills between turns, so a second excursion is a second real event."""
+    assert len(_warnings_from(BudgetWatcher("sid", warn_below=4000), 500, 9000, 400)) == 2
+
+
+def test_a_response_without_the_headers_is_ignored():
+    class Bare:
+        headers = {}
+
+    assert _warnings_from(BudgetWatcher("sid", warn_below=4000), *[]) == []
+    asyncio.run(BudgetWatcher("sid", warn_below=4000)(Bare()))  # must not raise
+
+
+# --- the fallback -------------------------------------------------------------------
+
+
+def test_the_fallback_is_off_until_it_is_fully_configured():
+    """Half-configured insurance fails at the one moment it is needed."""
+    assert build_llm_service("sid", "m", _settings())._fallback is None
+    assert build_llm_service("sid", "m", _settings(LLM_FALLBACK_API_KEY="k"))._fallback is None
+    assert build_llm_service("sid", "m", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini"))._fallback is None
+
+
+def test_a_fully_configured_fallback_is_wired():
+    svc = build_llm_service(
+        "sid", "m", _settings(LLM_FALLBACK_API_KEY="k", LLM_FALLBACK_MODEL="gpt-4o-mini")
+    )
+    assert isinstance(svc._fallback, LLMEndpoint)
+    assert svc._fallback.model == "gpt-4o-mini"
+    assert svc._fallback_client is not None
+    assert svc._fallback_client.max_retries == 0, "the fallback must not stall either"
+
+
+def test_the_fallback_carries_the_tools_over():
+    """A fallback that drops end_call would rescue the turn and then strand the call with
+    no way to hang up. Built through the service's own adapter for exactly this reason."""
+    from pipecat.processors.aggregators.llm_context import LLMContext
+
+    async def end_call(params: dict, closing_line: str):
+        """Hangs up."""
+
+    svc = build_llm_service(
+        "sid", "m", _settings(LLM_FALLBACK_API_KEY="k", LLM_FALLBACK_MODEL="gpt-4o-mini")
+    )
+    sent = {}
+
+    class _Completions:
+        async def create(self, **params):
+            sent.update(params)
+
+    svc._fallback_client.chat.completions = _Completions()
+    ctx = LLMContext(messages=[{"role": "system", "content": "x"}], tools=[end_call])
+    asyncio.run(svc._complete_on_fallback(ctx))
+
+    assert sent["model"] == "gpt-4o-mini", "the fallback's own model, not Groq's"
+    assert [t["function"]["name"] for t in sent["tools"]] == ["end_call"]
+    assert sent["messages"][0]["content"] == "x"
+
+
+# --- how the agent reacts -----------------------------------------------------------
+
+
+def _handler_src(name: str) -> str:
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    node = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == name
+    )
+    return ast.unparse(node)
+
+
+def test_a_throttle_does_not_ask_the_caller_to_repeat_themselves():
+    """They said nothing wrong. LLM_RECOVERY_LINE blames them for our rate limit."""
+    src = _handler_src("on_llm_error")
+    branch = src[src.index("is_transient_throttle"):]
+    head = branch.split("is_quota_error")[0]
+    assert "LLM_BUSY_LINE" in head
+    assert "LLM_RECOVERY_LINE" not in head
+
+
+def test_the_throttle_branch_is_checked_before_the_quota_branch():
+    """The other way round and every per-minute throttle ends the call, because
+    is_quota_error matches the throttle message too."""
+    src = _handler_src("on_llm_error")
+    assert src.index("is_transient_throttle") < src.index("is_quota_error")
+
+
+def test_the_busy_line_is_its_own_line():
+    assert LLM_BUSY_LINE != LLM_RECOVERY_LINE
+    assert LLM_BUSY_LINE.strip()
+
+
+def test_the_agent_builds_the_resilient_service_not_a_bare_groq_one():
+    """Constructing GroqLLMService directly restores the SDK default of two silent retries,
+    which is the whole bug."""
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    built = {getattr(n.func, "id", None) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "build_llm_service" in built
+    assert "GroqLLMService" not in built
+
+    # Checked against the parsed module too: leaving the import in place is the one step
+    # between this passing and someone reinstating the bare service.
+    module = ast.parse(inspect.getsource(agent))
+    imported = {
+        alias.name
+        for n in ast.walk(module)
+        if isinstance(n, ast.ImportFrom)
+        for alias in n.names
+    }
+    assert "GroqLLMService" not in imported
+
+
+# --- turn fragmentation -------------------------------------------------------------
+
+
+def test_the_turn_stop_strategy_is_named_rather_than_defaulted():
+    """Pipecat's default is a Smart Turn ONNX model. On PSTN it ruled "Maybe around in 2" a
+    finished turn, so "months." arrived as a second turn and each half cost a full request."""
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    call = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "UserTurnStrategies"
+    )
+    stop = next(kw.value for kw in call.keywords if kw.arg == "stop")
+    assert isinstance(stop, ast.List) and len(stop.elts) == 1
+
+
+def test_the_settle_window_is_configurable():
+    src = inspect.getsource(agent.run_voice_agent)
+    start = src.index("SpeechTimeoutUserTurnStopStrategy(")
+    assert "settings.TURN_SETTLE_SECS" in src[start : src.index(")", start)]
+
+
+def test_the_settle_window_covers_the_splits_that_were_observed():
+    """The two real ones were ~50ms and ~739ms apart. A window under either is no fix."""
+    assert _settings().TURN_SETTLE_SECS >= 0.75
+
+
+def test_vad_stop_secs_was_not_used_for_this():
+    """It cannot be. Pipecat waits max(0, stt_p99 - stop_secs) for transcripts, so raising
+    it past Deepgram's 0.35 collapses that window and turn detection runs blind — which is
+    what running at 0.6 did, and why the settle window lives on the stop strategy instead."""
+    from pipecat.services.deepgram.stt import DEEPGRAM_TTFS_P99
+
+    assert _settings().VAD_STOP_SECS < DEEPGRAM_TTFS_P99
+
+
+# --- abandoning a superseded turn ---------------------------------------------------
+
+
+def test_a_resumed_prospect_abandons_the_inflight_turn():
+    """Both halves finishing is how a caller heard a stale "What time on Sunday?" followed
+    straight by the goodbye."""
+    src = _handler_src("on_user_turn_started")
+    assert "_llm_in_flight" in src
+    assert "InterruptionWorkerFrame" in src
+
+
+def test_the_flag_is_cleared_once_the_answer_starts_arriving():
+    """Otherwise an ordinary barge-in during playback would raise a second interruption on
+    top of the one Pipecat already raises."""
+    assert "_llm_in_flight = False" in _handler_src("on_assistant_turn_started")
+
+
+def test_the_flag_is_set_when_inference_is_triggered():
+    assert "_llm_in_flight = True" in _handler_src("on_user_turn_inference_triggered")
+
+
+@pytest.mark.parametrize(
+    "event,owner",
+    [
+        ("on_user_turn_inference_triggered", "user_agg"),
+        ("on_assistant_turn_started", "assistant_agg"),
+    ],
+)
+def test_the_events_relied_on_actually_exist(event, owner):
+    """A misspelled event name registers a handler that is never called, and the guard
+    silently does nothing for the rest of the call."""
+    from pipecat.processors.aggregators.llm_response_universal import (
+        LLMAssistantAggregator,
+        LLMUserAggregator,
+    )
+
+    cls = LLMUserAggregator if owner == "user_agg" else LLMAssistantAggregator
+    assert f'"{event}"' in inspect.getsource(cls), f"{cls.__name__} registers no {event}"

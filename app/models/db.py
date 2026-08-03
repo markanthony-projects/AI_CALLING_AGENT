@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, String, Text, DateTime, Numeric, Enum, ForeignKey, text
+from sqlalchemy import Boolean, Column, String, Text, DateTime, Integer, Numeric, Enum, ForeignKey, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 import uuid
@@ -12,6 +12,17 @@ class LeadStatus(str, enum.Enum):
     WARM = "WARM"
     COLD = "COLD"
 
+class Purpose(str, enum.Enum):
+    """Why they are buying.
+
+    Asked on nearly every call — "for yourself, or for investment?" — answered plainly, and
+    until now thrown away, because there was nowhere to put it. It decides which project a
+    colleague pitches next and how they pitch it.
+    """
+
+    SELF_USE = "SELF_USE"
+    INVESTMENT = "INVESTMENT"
+
 class CampaignStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
     PAUSED = "PAUSED"
@@ -21,6 +32,11 @@ class CallStatus(str, enum.Enum):
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    # An answering machine picked up. Distinct from COMPLETED, which a voicemail was being
+    # recorded as: it inflated the connect rate on the dashboard, and it sent a recording of
+    # someone else's outgoing message to the extractor as though it were a conversation.
+    # Distinct from FAILED too — nothing went wrong, the person simply was not there.
+    MACHINE = "MACHINE"
 
 class DashboardRole(str, enum.Enum):
     # Sales works leads and reads calls. Only an admin may spend money by dialing or
@@ -109,7 +125,14 @@ class Lead(Base):
     # so "2bhk"/"2 BHK"/"two bedroom" all land on the same value a rep can filter by.
     preferred_unit_type = Column(String)
     budget = Column(Numeric(14, 2))
+    # Asked on nearly every call and, until now, discarded — there was nowhere to put it.
+    # It decides which project a colleague pitches next and how.
+    purpose = Column(Enum(Purpose), index=True)
+    # The prospect's own words, kept because a rep reads them before dialling.
     timeline = Column(String)
+    # ...and the same thing as a number, because 'Maybe around in 2 months.' cannot be
+    # sorted, filtered or used to decide who to call first.
+    timeline_months = Column(Integer, index=True)
     callback_time = Column(DateTime)
     site_visit_time = Column(DateTime)
     # A null status hides the lead from every filter sales works from, so the column carries

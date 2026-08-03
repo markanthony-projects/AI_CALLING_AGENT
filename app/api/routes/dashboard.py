@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
 from app.api.routes.campaign import MAX_DIAL_BATCH, DialRequest
-from app.core.ratelimit import reserve_dial_quota, window_keys
+from app.core.ratelimit import reserve_dial_quota, reserve_llm_headroom, window_keys
 from app.core.security import SessionClaims, require_admin, require_session
 from app.models.db import (
     Call,
@@ -42,7 +42,7 @@ from app.models.db import (
     Project,
     Transcript,
 )
-from app.services.call_context import remember_dialed_number
+from app.services.call_context import remember_customer_name, remember_dialed_number
 from app.services.dialer import trigger_vobiz_call
 from app.services.discovery import invalidate_project_cache
 from app.utils.timeutils import IST, to_ist, utc_now
@@ -930,13 +930,17 @@ async def dial_campaign(
         )
 
     await reserve_dial_quota(len(req.phone_numbers))
+    # Money is already committed by the line above; this asks the separate question
+    # of whether the LLM can answer the greeting once the phone is picked up.
+    await reserve_llm_headroom()
 
     call_sids = []
-    for number in req.phone_numbers:
+    for target in req.phone_numbers:
         call_sid = str(uuid.uuid4())
         call_sids.append(call_sid)
-        await remember_dialed_number(call_sid, number)
-        background_tasks.add_task(trigger_vobiz_call, number, str(campaign_id), call_sid)
+        await remember_dialed_number(call_sid, target.number)
+        await remember_customer_name(call_sid, target.name)
+        background_tasks.add_task(trigger_vobiz_call, target.number, str(campaign_id), call_sid)
 
     campaign.total_leads_dialed = (campaign.total_leads_dialed or 0) + len(call_sids)
     await db.commit()

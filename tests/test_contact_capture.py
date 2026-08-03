@@ -85,10 +85,28 @@ async def test_spoken_unit_maps_onto_the_project_configuration(spoken, expected)
     assert await _match_unit_type(_Session(), "cid", spoken, "sid") == expected
 
 
-@pytest.mark.parametrize("spoken", [None, "", "penthouse", "5 BHK"])
+@pytest.mark.parametrize("spoken", [None, "", "5 BHK", "something nice", "whatever you have"])
 async def test_unknown_units_are_dropped_not_stored(spoken):
-    """Storing a unit the project does not sell is worse than storing nothing."""
+    """Storing a unit the project does not sell is worse than storing nothing.
+
+    "5 BHK" stays here on purpose even though the project has BHKs: a bedroom count is this
+    project's own vocabulary, and one it does not offer is the model rounding off rather
+    than the prospect naming something else.
+    """
     assert await _match_unit_type(_Session(), "cid", spoken, "sid") is None
+
+
+@pytest.mark.parametrize(
+    "spoken,expected",
+    [("penthouse", "Penthouse"), ("plots", "Plot"), ("a villa maybe", "Villa")],
+)
+async def test_a_property_type_this_project_lacks_is_kept_for_the_portfolio(spoken, expected):
+    """Asked "what kind of property are you looking for?" a prospect answered "plots". It
+    matched none of the project's BHK configurations and was stored as null — discarding
+    the one fact a colleague needed to call him back about something else. That question is
+    only ever asked once this project has already been ruled out.
+    """
+    assert await _match_unit_type(_Session(), "cid", spoken, "sid") == expected
 
 
 async def test_missing_project_does_not_crash_extraction():

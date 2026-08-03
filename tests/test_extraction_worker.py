@@ -12,6 +12,7 @@ import pytest
 
 from app import worker
 from app.models.db import Call, CallStatus, Lead, LeadStatus, Transcript
+from app.models.db import Purpose
 from app.models.schemas import LeadExtraction, Weekday
 
 MONDAY_CALL = datetime(2026, 7, 27, 11, 11)  # 16:41 IST
@@ -58,11 +59,16 @@ class FakeSession:
 def run_worker(monkeypatch):
     """Drive process_extraction with the DB and the LLM stubbed out."""
 
-    async def _run(extraction: LeadExtraction) -> Lead:
+    async def _run(
+        extraction: LeadExtraction, transcript: str = "Agent: hi\nProspect: hello"
+    ) -> Lead:
+        # The transcript is a real input now, not a placeholder: prospect-owned fields are
+        # checked against it and dropped when no Prospect line says them. A test that wants
+        # a budget or a locality to survive has to supply a caller who named one.
         call = Call(call_sid="sid", status=CallStatus.COMPLETED, started_at=MONDAY_CALL)
         call.id = "call-id"
         call.lead_id = None
-        session = FakeSession(call, Transcript(call_id="call-id", full_text="Agent: hi\nProspect: hello"))
+        session = FakeSession(call, Transcript(call_id="call-id", full_text=transcript))
 
         @asynccontextmanager
         async def factory():
@@ -134,7 +140,11 @@ async def test_scalar_fields_are_carried_through(run_worker):
         LeadExtraction(
             is_prospect=True, customer_name="Kundan", preferred_location="Whitefield",
             budget=15000000.0, timeline="3 months", status=LeadStatus.WARM,
-        )
+        ),
+        transcript=(
+            "Agent: Which area are you looking in?\n"
+            "Prospect: Whitefield, and my budget is 1.5 Crores.\n"
+        ),
     )
     assert (lead.customer_name, lead.preferred_location) == ("Kundan", "Whitefield")
     assert float(lead.budget) == 15000000.0
@@ -163,3 +173,94 @@ def test_extraction_prompt_forbids_inventing_appointments():
     prompt = worker._build_system_prompt(datetime(2026, 7, 27, 16, 41))
     assert "NEVER invent an appointment" in prompt
     assert "Do NOT calculate any dates" in prompt
+
+
+# --- the agent's pitch must not come back as the caller's requirements ---------------
+#
+# From a live call, verbatim:
+#
+#     Agent:    ...starting at 1.17 Crores.
+#     Prospect: Yeah, that lie in my budget.
+#
+# The lead was written with budget=11700000 and preferred_location='Varthur - Sarjapur
+# Road'. The prospect named neither. Sales then rings someone back believing they can spend
+# money they never mentioned, about an area they were only told about. The extraction
+# prompt forbids this in capitals with worked examples and gpt-4o-mini did it anyway, so
+# the rule is enforced after the model rather than asked of it.
+
+FABRICATION = (
+    "Agent: We are launching a new project in Varthur - Sarjapur Road, near Dommasandra Circle.\n"
+    "Prospect: Yeah, I was very much looking for that.\n"
+    "Agent: Our project has 2, 3, 3.5 and 4.5 BHK configurations, starting at 1.17 Crores.\n"
+    "Prospect: Yeah, that lie in my budget.\n"
+)
+
+
+async def test_the_asking_price_does_not_become_the_callers_budget(run_worker):
+    lead = await run_worker(
+        LeadExtraction(
+            is_prospect=True, customer_name="Rahul", budget=11700000.0,
+            status=LeadStatus.WARM,
+        ),
+        transcript=FABRICATION,
+    )
+    assert lead.budget is None, "the caller never named a figure"
+
+
+async def test_the_projects_own_locality_does_not_become_a_preference(run_worker):
+    lead = await run_worker(
+        LeadExtraction(
+            is_prospect=True, customer_name="Rahul",
+            preferred_location="Varthur - Sarjapur Road", status=LeadStatus.WARM,
+        ),
+        transcript=FABRICATION,
+    )
+    assert lead.preferred_location is None
+
+
+async def test_a_unit_type_only_the_agent_listed_is_not_a_preference(run_worker):
+    """"We have 2, 3, 3.5 and 4.5 BHK" is stock being described. Picking one out of that
+    list is inventing a preference."""
+    lead = await run_worker(
+        LeadExtraction(
+            is_prospect=True, preferred_unit_type="3.5 BHK Presidential",
+            status=LeadStatus.WARM,
+        ),
+        transcript=FABRICATION,
+    )
+    assert lead.preferred_unit_type is None
+
+
+async def test_the_lead_is_still_created_when_fields_are_dropped(run_worker):
+    """Dropping a fabricated field must not throw the whole lead away — they are still a
+    prospect, and the call still happened."""
+    lead = await run_worker(
+        LeadExtraction(
+            is_prospect=True, customer_name="Rahul", budget=11700000.0,
+            preferred_location="Varthur - Sarjapur Road", status=LeadStatus.WARM,
+        ),
+        transcript=FABRICATION,
+    )
+    assert lead is not None and lead.customer_name == "Rahul"
+
+
+async def test_what_the_caller_really_said_survives(run_worker):
+    """The guard has to be a scalpel. If it dropped genuine answers too it would be a
+    worse bug than the one it replaces."""
+    lead = await run_worker(
+        LeadExtraction(
+            is_prospect=True, customer_name="Chandan", budget=6000000.0,
+            preferred_location="South Bengaluru", purpose=Purpose.INVESTMENT,
+            timeline="in 2 months", timeline_months=2, status=LeadStatus.WARM,
+        ),
+        transcript=(
+            "Agent: Which area are you looking in?\n"
+            "Prospect: I am looking South Bangalore, for investment.\n"
+            "Agent: What budget are you thinking of?\n"
+            "Prospect: Below 60 lakhs, in 2 months.\n"
+        ),
+    )
+    assert float(lead.budget) == 6000000.0
+    assert lead.preferred_location == "South Bengaluru"
+    assert lead.purpose is Purpose.INVESTMENT
+    assert lead.timeline_months == 2

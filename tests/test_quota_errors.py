@@ -118,10 +118,35 @@ def test_quota_signs_off_instead_of_asking_the_caller_to_repeat():
     )
 
 
-def test_quota_check_runs_before_the_failure_counter():
-    """Counting it first would let two quota errors look like two lost turns."""
-    src = _error_handler_source()
-    assert src.index("is_quota_error") < src.index("_llm_failures += 1")
+def test_no_counted_branch_falls_through_to_the_quota_check():
+    """Counting first would let two quota errors look like two lost turns.
+
+    Checked structurally rather than by position. A throttle branch was added above this
+    one that legitimately does count — a throttled turn really is a lost turn — so "no
+    increment appears earlier in the text" started failing on correct code. What actually
+    matters is that nothing which increments can then reach the quota branch, i.e. every
+    earlier increment sits in a branch that returns.
+    """
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    handler = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "on_llm_error"
+    )
+    quota = next(
+        n for n in handler.body
+        if isinstance(n, ast.If) and "is_quota_error" in ast.unparse(n.test)
+    )
+
+    for node in handler.body:
+        if node is quota:
+            break
+        if "_llm_failures += 1" not in ast.unparse(node):
+            continue
+        assert isinstance(node, ast.If), "an unconditional increment reaches the quota branch"
+        assert any(isinstance(s, ast.Return) for s in node.body), (
+            f"branch {ast.unparse(node.test)!r} increments the counter and then falls "
+            "through to the quota check, so one quota error is counted as two lost turns"
+        )
 
 
 def test_the_quota_guard_has_no_extra_conditions():
