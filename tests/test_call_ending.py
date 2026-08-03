@@ -69,9 +69,13 @@ def test_agent_speaks_before_hanging_up():
     assert batches, "end_call_handler queues no frames"
     frames = batches[0]
     assert "TTSSpeakFrame" in frames, "no farewell is spoken before the call ends"
-    assert "EndFrame" in frames
-    assert frames.index("TTSSpeakFrame") < frames.index("EndFrame"), (
-        "EndFrame must be queued behind the farewell or the line is cut off"
+    # EndWorkerFrame, not EndFrame. EndFrame stops the transport as soon as it is received
+    # in queue order, and on a live call that cut the goodbye off 425ms after the tool
+    # fired, for a sentence that takes about three seconds to speak.
+    assert "EndWorkerFrame" in frames, "the farewell is cut off unless the queue flushes first"
+    assert "EndFrame" not in frames
+    assert frames.index("TTSSpeakFrame") < frames.index("EndWorkerFrame"), (
+        "the terminator must be queued behind the farewell or the line is cut off"
     )
 
 

@@ -111,7 +111,9 @@ def test_quota_signs_off_instead_of_asking_the_caller_to_repeat():
     # Up to the next branch, the quota path must sign off and end.
     head = quota_branch.split("_llm_failures += 1")[0]
     assert "LLM_SIGNOFF_LINE" in head
-    assert "EndFrame" in head
+    # EndWorkerFrame rather than EndFrame: the sign-off is spoken first, and EndFrame
+    # stops the transport as soon as it is received in queue order, cutting it off.
+    assert "EndWorkerFrame" in head
     assert LLM_RECOVERY_LINE not in head
     assert "LLM_RECOVERY_LINE" not in head, (
         "asking a caller to repeat cannot help when the provider is out of budget"

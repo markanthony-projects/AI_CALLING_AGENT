@@ -5,7 +5,13 @@ from typing import Optional
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.worker import PipelineWorker, PipelineParams
-from pipecat.frames.frames import EndFrame, InterruptionWorkerFrame, TextFrame, TTSSpeakFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    EndWorkerFrame,
+    InterruptionWorkerFrame,
+    TextFrame,
+    TTSSpeakFrame,
+)
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
@@ -50,6 +56,7 @@ from app.utils.answering_machine import is_answering_machine, machine_phrases
 from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.spoken_text import ToolSyntaxFilter
+from app.utils.turn_gate import TurnFinalityGate
 from app.prompts.agent_prompts import get_system_prompt
 import sys
 from loguru import logger
@@ -320,8 +327,13 @@ async def run_voice_agent(
             # followed by the goodbye. The interruption discards whatever is still queued.
             # It completes its round-trip before the farewell leaves the push queue, so the
             # farewell itself survives. EndFrame sits behind it, or the line is cut off.
+            # EndWorkerFrame, not EndFrame. EndFrame stops the transport as soon as it is
+            # received in queue order, which cut the goodbye off: on a live call the tool
+            # fired at 17:37:46.471 and the pipeline was finished by 17:37:46.896, 425ms
+            # later, for a sentence that takes some three seconds to speak. EndWorkerFrame
+            # flushes what is queued ahead of it first.
             await task_ref[0].queue_frames(
-                [InterruptionWorkerFrame(), TTSSpeakFrame(line), EndFrame()]
+                [InterruptionWorkerFrame(), TTSSpeakFrame(line), EndWorkerFrame()]
             )
             
     llm.register_function("end_call", end_call_handler)
@@ -336,12 +348,15 @@ async def run_voice_agent(
             # The words before the markup were the goodbye. Speaking the leaked closing
             # line too would be two farewells in a row.
             logger.info(f"[{call_sid}] Ending call after leaked end_call syntax (goodbye already spoken)")
-            await task_ref[0].queue_frames([EndFrame()])
+            await task_ref[0].queue_frames([EndWorkerFrame()])
             return
         spoken = closing_line(line)
         logger.info(f"[{call_sid}] Ending call after leaked end_call syntax → \"{spoken}\"")
-        await task_ref[0].queue_frames([TTSSpeakFrame(spoken), EndFrame()])
+        await task_ref[0].queue_frames([TTSSpeakFrame(spoken), EndWorkerFrame()])
 
+    # Above the tool-syntax filter on purpose: a reply to half a sentence must not reach
+    # the leaked-end_call path either. See app/utils/turn_gate.py.
+    turn_gate = TurnFinalityGate(call_sid)
     tool_syntax_filter = ToolSyntaxFilter(call_sid, on_leaked_end_call=on_leaked_end_call)
     
     # Pass the dummy function so Pipecat parses the docstring into a ToolSchema
@@ -376,6 +391,9 @@ async def run_voice_agent(
         stt,
         user_agg,
         llm,
+        # Drops a reply generated while the prospect was still talking, before anything
+        # downstream can speak it or act on it.
+        turn_gate,
         # Between the LLM and the TTS on purpose: it is the last point at which leaked tool
         # syntax can be removed before it is spoken, and being upstream of the assistant
         # aggregator keeps the leak out of the context too.
@@ -470,6 +488,7 @@ async def run_voice_agent(
         #
         # Only fires before the answer starts arriving. Once it does, a new user turn is an
         # ordinary barge-in and Pipecat raises its own interruption for it.
+        turn_gate.user_turn_started()
         if _llm_in_flight:
             _llm_in_flight = False
             logger.info(f"[{call_sid}] Prospect resumed mid-inference; abandoning the stale turn")
@@ -485,6 +504,9 @@ async def run_voice_agent(
     @user_agg.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
         nonlocal _empty_user_turns, _user_has_spoken, _turns_heard, _answering_machine
+        # Releases a held reply, or drops it when a newer inference has superseded it. The
+        # strategy fires the inference event before this one, so the check is race-free.
+        await turn_gate.user_turn_stopped()
         transcript = (message.content or "").strip() if message and hasattr(message, "content") else ""
         total_turn_time = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
         if transcript:
@@ -519,6 +541,9 @@ async def run_voice_agent(
     async def on_user_turn_inference_triggered(aggregator, *_):
         nonlocal _llm_in_flight
         _llm_in_flight = True
+        # Pipecat fires this more than once in a turn when the prospect pauses and carries
+        # on. Each one makes the previous reply an answer to half a sentence.
+        turn_gate.inference_triggered()
 
     @assistant_agg.event_handler("on_assistant_turn_started")
     async def on_assistant_turn_started(aggregator, *_):
@@ -544,7 +569,7 @@ async def run_voice_agent(
         # A rejected tool call is the model trying to hang up, not a lost turn.
         if FUNCTION_CALL_FAILURE in (error.error or "").lower():
             logger.info(f"[{call_sid}] Tool call rejected upstream; closing the call as intended")
-            await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndFrame()])
+            await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndWorkerFrame()])
             return
 
         # How long the provider asked us to wait, taken from its Retry-After header where it
@@ -567,7 +592,7 @@ async def run_voice_agent(
                 f"to ride these out instead of losing the turn."
             )
             if _llm_failures >= MAX_LLM_TURN_FAILURES:
-                await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndFrame()])
+                await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame()])
             else:
                 await task.queue_frames([TTSSpeakFrame(LLM_BUSY_LINE)])
             return
@@ -583,7 +608,7 @@ async def run_voice_agent(
                 f"[{call_sid}] LLM quota exhausted; signing off without asking the caller "
                 f"to repeat. Provider said: {error.error}"
             )
-            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndFrame()])
+            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame()])
             return
 
         _llm_failures += 1
@@ -592,7 +617,7 @@ async def run_voice_agent(
         )
         if _llm_failures >= MAX_LLM_TURN_FAILURES:
             logger.error(f"[{call_sid}] LLM unrecoverable; signing off to avoid dead air")
-            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndFrame()])
+            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame()])
         else:
             await task.queue_frames([TTSSpeakFrame(LLM_RECOVERY_LINE)])
 

@@ -140,6 +140,9 @@ def _run_handler(arguments):
         "task_ref": [task],
         "TTSSpeakFrame": _Speak,
         "EndFrame": _Frame,
+        # The farewell is followed by EndWorkerFrame, not EndFrame: EndFrame stops the
+        # transport in queue order and cut a live goodbye off after 425ms.
+        "EndWorkerFrame": _Frame,
         "InterruptionWorkerFrame": _Frame,
     }
     exec(compile(ast.Module([_node("end_call_handler")], []), "<handler>", "exec"), ns)
@@ -190,6 +193,9 @@ def test_handler_survives_a_params_object_without_arguments():
         "task_ref": [task],
         "TTSSpeakFrame": _Speak,
         "EndFrame": _Frame,
+        # The farewell is followed by EndWorkerFrame, not EndFrame: EndFrame stops the
+        # transport in queue order and cut a live goodbye off after 425ms.
+        "EndWorkerFrame": _Frame,
         "InterruptionWorkerFrame": _Frame,
     }
     exec(compile(ast.Module([_node("end_call_handler")], []), "<handler>", "exec"), ns)
