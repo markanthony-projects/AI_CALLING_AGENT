@@ -63,3 +63,58 @@ def test_the_flag_is_set_only_on_a_non_empty_transcript():
 def test_greeting_still_checks_the_flag():
     src = ast.unparse(_node("startup_greeting"))
     assert "_user_has_spoken" in src, "the greeting would now talk over a prospect who spoke first"
+
+
+# --- how long the caller waits before hearing anything -------------------------------
+#
+# Measured on a live call, from the moment they picked up:
+#
+#     24.327  vobiz answer webhook (caller picked up)
+#     24.938  websocket opened                            +611ms
+#     25.027  voice agent starting                        + 89ms
+#     27.455  Vobiz "start" event received                +2428ms
+#     28.283  greeting queued to TTS                      + 828ms
+#             ...plus ~240ms of Sarvam TTFB
+#
+# Four seconds of silence after picking up. Most of it is Vobiz and the pipeline coming up,
+# but 200ms of it was ours: a sleep between the pipeline starting and the greeting being
+# queued.
+
+
+def test_the_greeting_is_not_delayed_by_a_sleep():
+    """The caller already waits about four seconds. Nothing of ours may be added to it.
+
+    The sleep was guarding against greeting somebody who spoke first; _user_has_spoken
+    checks that directly, and GreetingOnlyMinWords covers the rest of the opening line.
+    """
+    import ast
+    import inspect
+
+    from app.services import agent
+
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    greeting = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "startup_greeting"
+    )
+    for node in ast.walk(greeting):
+        if isinstance(node, ast.Call) and "sleep" in ast.unparse(node.func):
+            pytest.fail(f"{ast.unparse(node)} delays the first thing the caller hears")
+
+
+def test_the_greeting_is_still_skipped_when_the_prospect_speaks_first():
+    """Removing the sleep must not remove the check it sat in front of — otherwise the
+    agent talks over somebody who answered with "Hello?"."""
+    import ast
+    import inspect
+
+    from app.services import agent
+
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    greeting = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "startup_greeting"
+    )
+    src = ast.unparse(greeting)
+    assert "if not _user_has_spoken:" in src
+    assert "greeting_gate.relax()" in src, "the gate must still lift when they spoke first"

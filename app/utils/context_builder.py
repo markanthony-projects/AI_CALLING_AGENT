@@ -73,6 +73,49 @@ def _readable(value) -> str:
     return str(value)
 
 
+_BHK = re.compile(r"^\s*(?P<count>\d+(?:\.\d+)?)\s*BHK\b", re.I)
+
+
+def _spoken_unit(count: str) -> str:
+    """"3.5" -> "3.5 B H K". BHK written solid makes the voice engine try to say it as a word."""
+    return f"{count} B H K"
+
+
+def spoken_configurations(config) -> list:
+    """The configurations the project actually sells, in the words the agent should use.
+
+    Asked what was available in a project selling 2, 3, 3.5 and 4.5 BHK, the agent said
+    "We have 2, 3, and 4 B H K homes". There is no 4 BHK; the 4.5 was rounded down and the
+    3.5 was dropped. A prospect who books a site visit for a flat that does not exist finds
+    out at the site, and the rounding is not the model being loose with a number — it is
+    describing a product we cannot sell.
+
+    The prompt cannot be trusted with this on its own, because rounding does not feel to a
+    model like inventing a fact. So the exact list is computed here and handed over as a
+    sentence to say, rather than as six rows to summarise.
+
+    Variants collapse: "3 BHK Regular", "3 BHK Comfort" and "3 BHK Luxury" are one thing to
+    name on an opening call. The trim level matters once they are choosing, and the full
+    table is still in the context for that.
+    """
+    if not isinstance(config, list):
+        return []
+    seen, out = set(), []
+    for item in config:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("type", "")).strip()
+        if not raw:
+            continue
+        match = _BHK.match(raw)
+        # A villa, plot or villament has no BHK count to collapse on, so it is named whole.
+        label = _spoken_unit(match.group("count")) if match else raw
+        if label.lower() not in seen:
+            seen.add(label.lower())
+            out.append(label)
+    return out
+
+
 def build_campaign_context(project: dict) -> str:
     """
     Parses the Redis project dictionary and builds a comprehensive LLM context string.
@@ -110,6 +153,15 @@ def build_campaign_context(project: dict) -> str:
         context_lines.append(f"Nearby Facilities: {' | '.join(nearby_strs)}")
         
     config = project.get('config_json')
+    units = spoken_configurations(config)
+    if units:
+        # Given the table alone the agent summarised six rows as "2, 3, and 4 B H K" for a
+        # project that sells 2, 3, 3.5 and 4.5. Handing it the finished sentence removes the
+        # summarising step that produced the error.
+        context_lines.append(
+            f"Configurations to name — say EXACTLY this list, never round or drop one: "
+            f"{', '.join(units)}"
+        )
     if config and isinstance(config, list):
         context_lines.append("Available Configurations (Unit Types, Area, and Pricing):")
         for item in config:

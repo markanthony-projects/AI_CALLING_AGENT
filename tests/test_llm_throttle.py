@@ -348,9 +348,39 @@ def test_the_settle_window_is_configurable():
     assert "settings.TURN_SETTLE_SECS" in src[start : src.index(")", start)]
 
 
-def test_the_settle_window_covers_the_splits_that_were_observed():
-    """The two real ones were ~50ms and ~739ms apart. A window under either is no fix."""
-    assert _settings().TURN_SETTLE_SECS >= 0.75
+def test_the_settle_window_is_short_enough_to_be_worth_paying_on_every_turn():
+    """It used to need 0.75s to cover the two observed splits (~50ms and ~739ms apart),
+    because a split turn put two replies on the line. TurnFinalityGate holds the stale half
+    back now, so a split costs one extra inference and the caller hears nothing wrong — and
+    this window went back to being pure latency. It is silence on every single turn, and it
+    is invisible in the LATENCY log lines, which start counting after it has elapsed.
+    """
+    assert _settings().TURN_SETTLE_SECS <= 0.5
+
+
+def test_the_window_is_still_long_enough_for_a_breath():
+    """Zero would put us back to VAD_STOP_SECS behaviour, splitting on every pause and
+    paying for an inference on each half."""
+    assert _settings().TURN_SETTLE_SECS >= 0.3
+
+
+def test_lowering_it_is_only_safe_because_the_gate_exists():
+    """Names the dependency, so removing the gate cannot quietly leave a 0.4s window that
+    was only ever justified by it.
+
+    Checked by resolving the real class and confirming the agent constructs it, not by
+    looking for the name in the source: a stub assignment keeps the string and drops the
+    behaviour, which is exactly the regression this is here to catch.
+    """
+    from app.services import agent as agent_module
+    from app.utils.turn_gate import TurnFinalityGate
+
+    assert agent_module.TurnFinalityGate is TurnFinalityGate, (
+        "the agent is not using the real gate; a short settle window is unsafe without it"
+    )
+    tree = ast.parse(inspect.getsource(agent_module.run_voice_agent).lstrip())
+    built = {getattr(n.func, "id", None) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "TurnFinalityGate" in built, "the gate is imported but never constructed"
 
 
 def test_vad_stop_secs_was_not_used_for_this():

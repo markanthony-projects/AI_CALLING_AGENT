@@ -55,7 +55,9 @@ from app.services.llm_provider import (
 from app.utils.answering_machine import is_answering_machine, machine_phrases
 from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
+from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.spoken_text import ToolSyntaxFilter
+from app.utils.stt_witness import SttWitness
 from app.utils.turn_gate import TurnFinalityGate
 from app.prompts.agent_prompts import get_system_prompt
 import sys
@@ -357,6 +359,7 @@ async def run_voice_agent(
     # Above the tool-syntax filter on purpose: a reply to half a sentence must not reach
     # the leaked-end_call path either. See app/utils/turn_gate.py.
     turn_gate = TurnFinalityGate(call_sid)
+    stt_witness = SttWitness()
     tool_syntax_filter = ToolSyntaxFilter(call_sid, on_leaked_end_call=on_leaked_end_call)
     
     # Pass the dummy function so Pipecat parses the docstring into a ToolSchema
@@ -389,6 +392,10 @@ async def run_voice_agent(
     pipeline = Pipeline([
         transport.input(),
         stt,
+        # Pure pass-through. Sees exactly what the aggregator sees, so a turn that finalizes
+        # empty can say whether the STT sent nothing, sent silence, or sent interims whose
+        # final never arrived. See app/utils/stt_witness.py.
+        stt_witness,
         user_agg,
         llm,
         # Drops a reply generated while the prospect was still talking, before anything
@@ -433,6 +440,15 @@ async def run_voice_agent(
     # coming back. If the prospect speaks again inside that window, whatever is being
     # generated is an answer to half of what they said.
     _llm_in_flight: bool = False
+    # True from the moment a reply starts being spoken until its audio has finished. An
+    # empty user turn inside this window is a false barge-in on speech already in progress;
+    # one outside it is a prospect answering into silence.
+    _agent_speaking: bool = False
+    # The agent's last finalized reply, kept so its question can be asked again without an
+    # LLM round trip when the answer never reaches us.
+    _last_agent_line: str = ""
+    _dead_air_nudges: int = 0
+    _last_nudged: str = ""
     # Counted so the machine check only ever runs on the opening turn.
     _turns_heard: int = 0
     _answering_machine: bool = False
@@ -441,7 +457,12 @@ async def run_voice_agent(
     @task.event_handler("on_pipeline_started")
     async def on_pipeline_started(worker, frame):
         async def startup_greeting():
-            await asyncio.sleep(0.2)
+            # No delay before the opening line. A caller who picks up already waits about
+            # four seconds — 611ms for the answer webhook to become a websocket, 2.4s for
+            # Vobiz's start event, then the pipeline — and every one of those is silence on
+            # a sales call. The 200ms that used to sit here was guarding against greeting
+            # someone who spoke first, which _user_has_spoken checks on the line below and
+            # GreetingOnlyMinWords protects for the rest of the opening line anyway.
             if not _user_has_spoken:
                 opening_line = build_opening_line(project_name, customer_name)
                 context.add_message({"role": "assistant", "content": opening_line})
@@ -479,6 +500,7 @@ async def run_voice_agent(
         # until they said "Hello?" themselves. Only a real transcript counts as speech.
         nonlocal _turn_start_time, _llm_in_flight
         _turn_start_time = time.time()
+        stt_witness.reset()
 
         # The prospect has started talking again while we are still generating a reply to
         # what they said before. That reply answers a sentence they were not finished
@@ -504,6 +526,7 @@ async def run_voice_agent(
     @user_agg.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
         nonlocal _empty_user_turns, _user_has_spoken, _turns_heard, _answering_machine
+        nonlocal _dead_air_nudges, _last_nudged
         # Releases a held reply, or drops it when a newer inference has superseded it. The
         # strategy fires the inference event before this one, so the check is race-free.
         await turn_gate.user_turn_stopped()
@@ -526,14 +549,37 @@ async def run_voice_agent(
                 await task.queue_frames([EndFrame()])
             _turns_heard += 1
             return
-        # VAD heard speech but the STT produced nothing, so this turn was line noise that
-        # cut the agent off mid-sentence. Without this line a false barge-in leaves no
-        # trace at all, which is what made the interruptions look inexplicable.
+        # VAD heard speech but the STT produced nothing. Without this line a false barge-in
+        # leaves no trace at all, which is what made the interruptions look inexplicable.
+        # The witness distinguishes the harmless case from the one that costs a real answer.
         _empty_user_turns += 1
         logger.warning(
             f"[{call_sid}] VAD fired with no transcribable speech after {total_turn_time} "
-            f"— likely a false barge-in (count: {_empty_user_turns})"
+            f"(count: {_empty_user_turns}) — {stt_witness.report()}"
         )
+
+        # No transcript means no inference, which means the agent says nothing at all. If it
+        # had asked a question, the prospect has now answered into a line that went silent
+        # on them, and on a live call the only thing that restarted the conversation was
+        # them saying "Hello?" eleven seconds later. Ask again ourselves.
+        #
+        # Not while the agent is still talking: an empty turn during its own speech is the
+        # false barge-in this counter was built for, the question is already being asked,
+        # and repeating it over the top would be worse than the noise that triggered it.
+        if _agent_speaking or _llm_in_flight:
+            return
+        if _dead_air_nudges >= MAX_DEAD_AIR_NUDGES:
+            return
+        nudge = dead_air_nudge(_last_agent_line)
+        # None when the last turn asked nothing — a sign-off must never be said twice.
+        # Equal to the previous nudge when this is the same question going unanswered a
+        # second time, which is a line that cannot carry the call, not a prospect to badger.
+        if not nudge or nudge == _last_nudged:
+            return
+        _dead_air_nudges += 1
+        _last_nudged = nudge
+        logger.info(f"[{call_sid}] Nothing heard back; asking again → \"{nudge}\"")
+        await task.queue_frames([TTSSpeakFrame(nudge)])
 
     # The two edges of "a reply is being generated". Together they bound the window in
     # which a new user turn makes the in-flight inference worthless.
@@ -547,8 +593,9 @@ async def run_voice_agent(
 
     @assistant_agg.event_handler("on_assistant_turn_started")
     async def on_assistant_turn_started(aggregator, *_):
-        nonlocal _llm_in_flight
+        nonlocal _llm_in_flight, _agent_speaking
         _llm_in_flight = False
+        _agent_speaking = True
 
     # ─── Agent Generation Logging ──────────────────────────────────────────────
     # GroqLLMService is HTTP-based: it has no on_client_connected. on_completion_timeout
@@ -642,10 +689,15 @@ async def run_voice_agent(
     # every AGENT line was missing from the logs.
     @assistant_agg.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn_stopped(aggregator, message):
+        nonlocal _agent_speaking, _last_agent_line
+        _agent_speaking = False
         content = (getattr(message, "content", "") or "").strip()
         if content:
             suffix = " [interrupted]" if getattr(message, "interrupted", False) else ""
             logger.info(f"[{call_sid}] AGENT → \"{content}\"{suffix}")
+            # An interrupted reply is still what the prospect last heard us ask, so it is
+            # still the right thing to repeat if their answer then goes missing.
+            _last_agent_line = content
         # The greeting is the agent's first turn, so by the time any assistant turn has
         # finished the line it guards is already spoken. From here a single word starts the
         # prospect's turn, and a short answer can never be swallowed again.

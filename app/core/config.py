@@ -128,12 +128,19 @@ class Settings(BaseSettings):
     # carry on. VAD_STOP_SECS cannot do this job — it must stay under the STT's p99 or turn
     # detection runs blind, so at 0.2s a normal mid-sentence breath ended the turn. "Maybe
     # around in 2" and "months." arrived as two turns, each costing a full LLM request, and
-    # the agent answered half a sentence. Both observed gaps were under 0.75s.
+    # the agent answered half a sentence.
     #
-    # This is a straight trade: it adds its own value to every turn's response time, and
-    # buys back a duplicate request plus an answer to half a question. Lower it only with
-    # call logs showing turns are no longer splitting.
-    TURN_SETTLE_SECS: float = Field(default=0.8, gt=0)
+    # It ran at 0.8s while a split turn could put two replies on the line. TurnFinalityGate
+    # now holds a reply back until the turn it answers is over, so a split costs one extra
+    # inference and nothing else — the caller never hears the stale half. That turns this
+    # setting from a correctness guard into a cost one, and it can be spent on latency
+    # instead: every millisecond here is silence the prospect sits through on every single
+    # turn, and it does not appear in the LATENCY log lines, which start counting only once
+    # this window has already elapsed.
+    #
+    # Raise it if the extra inferences ever matter more than the wait. Do NOT raise it
+    # expecting better answers — the gate, not this timer, is what makes split turns safe.
+    TURN_SETTLE_SECS: float = Field(default=0.4, gt=0)
 
     OPENAI_API_KEY: str
     SARVAM_API_KEY: str

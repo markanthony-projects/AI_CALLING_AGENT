@@ -27,6 +27,37 @@ def test_closing_rules_survive(phrase, failure):
     assert phrase in PROMPT, f"lost the rule guarding: {failure}"
 
 
+def test_every_way_out_of_the_call_goes_through_the_tool():
+    """On call 5664ace6 the agent delivered its closing line and then just sat there. The
+    prospect waited eighteen seconds and hung up on us.
+
+    The prompt was the cause and it was self-contradictory: CALL FLOW step 5 said to close
+    warmly with a spoken sentence, while the TOOL section said the closing_line IS the
+    goodbye and never to say one in a normal reply. The model obeyed step 5, spoke the
+    goodbye, and had no reason left to call anything.
+
+    So every branch that finishes a call must name end_call. A close described only as
+    "close warmly" or "end the call" is the same trap again.
+    """
+    endings = [line for line in PROMPT.splitlines() if "clos" in line.lower()]
+    assert endings, "the prompt no longer describes how to close a call"
+    for line in endings:
+        # SITE VISIT AND THE CLOSE covers the run-up to a booking, not the hangup itself.
+        if "end_call" in line or "closing_line" in line:
+            continue
+        assert "close the call" not in line.lower() and "close warmly" not in line.lower(), (
+            f"this line tells the model to finish the call without the tool that hangs "
+            f"up: {line.strip()!r}"
+        )
+
+
+def test_the_prompt_says_what_happens_when_a_goodbye_is_merely_spoken():
+    """Naming end_call in each branch is not enough on its own — the model needs the reason,
+    because a spoken goodbye looks complete from where it sits."""
+    assert "ONLY WAY A CALL EVER ENDS" in PROMPT
+    assert "does not hang up" in PROMPT
+
+
 @pytest.mark.parametrize(
     "phrase",
     ["NEVER SPEAK ABOUT IT", "never hear you reasoning about them"],
