@@ -10,8 +10,10 @@ from sqlalchemy import text
 
 from app.core.database import engine
 from app.core.queue import init_arq_pool, close_arq_pool
+from app.services.stale_calls import SWEEP_EVERY_SECONDS, reap_stale_calls
 from contextlib import asynccontextmanager
 from loguru import logger
+import asyncio
 import os
 import logging
 import mimetypes
@@ -125,8 +127,23 @@ async def lifespan(app: FastAPI):
     await init_arq_pool()
     logger.info("Extraction queue connected.")
 
+    # A call whose process died never got to write its own ending, so the row says
+    # IN_PROGRESS for ever and the dashboard cannot tell it from a live call. Swept on a
+    # timer as well as at startup, because the process that should have cleaned up is
+    # usually the one that is gone. Failures here must never stop the app serving calls.
+    async def sweep_stale_calls():
+        while True:
+            try:
+                await reap_stale_calls()
+            except Exception as e:
+                logger.error(f"Stale call sweep failed: {e}")
+            await asyncio.sleep(SWEEP_EVERY_SECONDS)
+
+    sweeper = asyncio.create_task(sweep_stale_calls())
+
     yield
 
+    sweeper.cancel()
     await close_arq_pool()
     try:
         await engine.dispose()

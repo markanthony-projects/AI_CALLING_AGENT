@@ -55,6 +55,7 @@ from app.services.llm_provider import (
 from app.utils.answering_machine import is_answering_machine, machine_phrases
 from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
+from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.spoken_text import ToolSyntaxFilter
 from app.utils.stt_witness import SttWitness
@@ -79,6 +80,17 @@ GROQ_MODEL = settings.LLM_MODEL
 # and the pipeline then sits there holding one of the concurrency slots. Sixty seconds with
 # neither party speaking is dead air on a phone call, not a pause for thought.
 IDLE_TIMEOUT_SECS = 60.0
+
+# The idle timeout only fires when NEITHER party has spoken, so it cannot end a call whose
+# voice has died while the caller keeps asking "hello?" — every one of those resets it. On a
+# live call Sarvam ran out of credits, the pipeline wedged, and nothing ended it at all: the
+# websocket stayed open, so Vobiz kept the phone leg up and kept billing, and one of four
+# concurrency slots was held until the box was restarted by hand.
+#
+# Ten minutes is well past a qualifying call, which runs two to four. Deliberately not close
+# to the real distribution: this is a backstop against a broken pipeline, not a policy on how
+# long a prospect may talk, and cutting off a genuine conversation would be the worse failure.
+MAX_CALL_DURATION_SECS = 600.0
 
 MAX_LLM_TURN_FAILURES = 2
 
@@ -209,6 +221,7 @@ def session_error(
     idle_timed_out: bool = False,
     tts_failures: int = 0,
     llm_quota_exhausted: bool = False,
+    ran_too_long: bool = False,
 ) -> Optional[str]:
     """Decide whether a finished session counts as failed, and why.
 
@@ -225,6 +238,10 @@ def session_error(
         return "tts unavailable: caller heard only silence"
     if llm_failures >= MAX_LLM_TURN_FAILURES:
         return "llm turn failures exhausted"
+    # Below the specific causes on purpose. The cap only fires when nothing else ended the
+    # call, so if a named cause is also set that one is the story and this is its symptom.
+    if ran_too_long:
+        return "exceeded max call duration: the pipeline did not end on its own"
     if idle_timed_out:
         return "idle timeout: neither party spoke"
     return None
@@ -303,7 +320,15 @@ async def run_voice_agent(
     messages = [{"role": "system", "content": system_prompt}]
     
     task_ref = []
-    
+    # Raises the signal that the goodbye has actually been played out. Constructed here
+    # rather than beside the other processors because the end_call handler below closes
+    # over it. See app/utils/farewell.py.
+    farewell = FarewellGate()
+    # One hangup per call. Both end paths can fire for the same turn — the model can emit a
+    # structured tool call and leaked syntax together — and two farewells racing would
+    # interrupt each other, which is the failure this whole path exists to stop.
+    _ending = False
+
     # 1. Dummy function to generate the JSON schema via Pipecat's inspect logic
     async def end_call(params: dict, closing_line: str):
         """
@@ -318,43 +343,75 @@ async def run_voice_agent(
         """
         pass
 
+    async def say_goodbye_then_hang_up(line: str) -> None:
+        """Speak the closing line, wait for it to actually be heard, then end the call.
+
+        Written as three awaited steps rather than one queue_frames call because the frames
+        do not order the way the old one-liner assumed, and the caller heard the difference.
+
+        The interruption clears a stale reply from a split turn — one inference once asked
+        "What time on Sunday?" while another hung up, and the prospect heard the question
+        followed straight by the goodbye. But an InterruptionWorkerFrame only takes effect
+        after its own round trip to the sink and back, and the worker's push loop does not
+        wait for that before queueing the next frame. Queued together, the farewell could
+        enter the pipeline first and then be cancelled by the very interruption meant to
+        protect it. flush_pipeline waits for the lap to finish, so the order is not a guess.
+
+        Then the wait. EndWorkerFrame is not enough on its own: its round trip proves the
+        frames have travelled, and Sarvam's audio does not travel with them — run_tts sends
+        the text and returns, and the voice arrives afterwards on a receive task.
+        BotStoppedSpeakingFrame comes off the transport's audio clock once the turn has
+        actually been played out, so that is what is waited on, with a ceiling sized to the
+        sentence so a dead TTS cannot hold the carrier leg open.
+        """
+        await task_ref[0].queue_frames([InterruptionWorkerFrame()])
+        await task_ref[0].flush_pipeline(timeout=2.0)
+
+        farewell.arm()
+        await task_ref[0].queue_frames([TTSSpeakFrame(line)])
+        if not await farewell.wait_until_spoken(farewell_timeout(line)):
+            logger.warning(
+                f"[{call_sid}] Goodbye never finished playing; hanging up anyway so the "
+                f"carrier leg stops billing"
+            )
+        await task_ref[0].queue_frames([EndWorkerFrame()])
+
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
+        nonlocal _ending
         spoken = getattr(params, "arguments", None) or {}
         line = closing_line(spoken.get("closing_line") if isinstance(spoken, dict) else None)
         logger.info(f"[{call_sid}] AGENT initiated call end via tool → \"{line}\"")
-        if task_ref:
-            # A split user turn can run two inferences at once: one asked "What time on
-            # Sunday?" while the other hung up, and the caller heard the stale question
-            # followed by the goodbye. The interruption discards whatever is still queued.
-            # It completes its round-trip before the farewell leaves the push queue, so the
-            # farewell itself survives. EndFrame sits behind it, or the line is cut off.
-            # EndWorkerFrame, not EndFrame. EndFrame stops the transport as soon as it is
-            # received in queue order, which cut the goodbye off: on a live call the tool
-            # fired at 17:37:46.471 and the pipeline was finished by 17:37:46.896, 425ms
-            # later, for a sentence that takes some three seconds to speak. EndWorkerFrame
-            # flushes what is queued ahead of it first.
-            await task_ref[0].queue_frames(
-                [InterruptionWorkerFrame(), TTSSpeakFrame(line), EndWorkerFrame()]
-            )
-            
+        if not task_ref or _ending:
+            return
+        _ending = True
+        # Detached on purpose. This handler runs inside the LLM service's function-call
+        # machinery, which is waiting to push the tool result; holding it for the length of
+        # a spoken sentence would block the very pipeline that has to carry the audio.
+        asyncio.create_task(say_goodbye_then_hang_up(line))
+
     llm.register_function("end_call", end_call_handler)
 
     # 3. Same intent, wrong channel: the model wrote the tool call into its spoken text.
     # ToolSyntaxFilter has already stopped the caller hearing it, so all that is left is to
     # hang up the way the structured call would have.
     async def on_leaked_end_call(line: Optional[str], already_spoke: bool):
-        if not task_ref:
+        nonlocal _ending
+        if not task_ref or _ending:
             return
+        _ending = True
         if already_spoke:
-            # The words before the markup were the goodbye. Speaking the leaked closing
-            # line too would be two farewells in a row.
+            # The words before the markup were the goodbye, and they are on the wire now.
+            # Speaking the leaked closing line too would be two farewells in a row — but the
+            # first one still has to finish, so this waits on the same signal.
             logger.info(f"[{call_sid}] Ending call after leaked end_call syntax (goodbye already spoken)")
+            farewell.arm()
+            await farewell.wait_until_spoken(farewell_timeout(line or ""))
             await task_ref[0].queue_frames([EndWorkerFrame()])
             return
         spoken = closing_line(line)
         logger.info(f"[{call_sid}] Ending call after leaked end_call syntax → \"{spoken}\"")
-        await task_ref[0].queue_frames([TTSSpeakFrame(spoken), EndWorkerFrame()])
+        await say_goodbye_then_hang_up(spoken)
 
     # Above the tool-syntax filter on purpose: a reply to half a sentence must not reach
     # the leaked-end_call path either. See app/utils/turn_gate.py.
@@ -407,6 +464,10 @@ async def run_voice_agent(
         tool_syntax_filter,
         tts,
         transport.output(),
+        # After the output transport, never before it: BotStoppedSpeakingFrame is raised by
+        # the transport's audio clock once the turn has actually been played out at realtime
+        # pace, so upstream of here the signal does not exist yet.
+        farewell,
         assistant_agg,
     ])
 
@@ -436,6 +497,7 @@ async def run_voice_agent(
     _tts_failures: int = 0
     _empty_user_turns: int = 0
     _idle_timed_out: bool = False
+    _ran_too_long: bool = False
     # True between the moment a turn is sent for inference and the moment its answer starts
     # coming back. If the prospect speaks again inside that window, whatever is being
     # generated is an answer to half of what they said.
@@ -477,11 +539,66 @@ async def run_voice_agent(
         nonlocal _startup_task
         _startup_task = asyncio.create_task(startup_greeting())
 
+    async def abandon_call(reason: str) -> None:
+        """Tear the pipeline down now, without asking it to drain first.
+
+        EndFrame cannot do this job and a live call proved it. When Sarvam ran out of
+        credits the handler queued one, logged "abandoning call", and the pipeline carried
+        straight on — an assistant turn finalized 3.3 seconds later and neither "Pipeline
+        finished" nor "Call finalised" ever appeared. The websocket stayed open, so Vobiz
+        kept the phone leg up and kept billing for it, the Call row stayed IN_PROGRESS
+        forever, and one of only four concurrency slots was gone until the box was restarted.
+
+        The reason is the frame class. EndFrame is a ControlFrame, so it travels in queue
+        order and has to pass through the TTS to get anywhere — and the TTS is precisely
+        what is wedged, looping through reconnects to a service refusing us. CancelFrame is
+        a SystemFrame; it bypasses the ordered queue. task.cancel() queues one, which is the
+        same path Pipecat itself takes for a fatal error and the same path cancel_on_idle
+        _timeout already uses successfully on this pipeline.
+
+        Safe to call repeatedly: PipelineWorker.cancel() is guarded on both _finished and
+        _cancelled, which matters because the TTS error that triggers it arrives many times
+        a second.
+        """
+        logger.error(f"[{call_sid}] Abandoning call ({reason}); cancelling the pipeline")
+        try:
+            await task.cancel(reason=reason)
+        except Exception as e:
+            # Never let teardown raise out of an event handler. If cancel itself fails the
+            # duration cap below is the last line of defence, and it must still get to run.
+            logger.error(f"[{call_sid}] Pipeline cancel failed: {e}")
+
     # ─── Client Disconnected ───────────────────────────────────────────────────
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"[{call_sid}] Client disconnected — ending pipeline")
         await task.queue_frames([EndFrame()])
+
+    # ─── Hard Duration Cap ─────────────────────────────────────────────────────
+    async def enforce_max_duration():
+        """Last line of defence against a call that will not end by itself.
+
+        The idle timeout does not cover this. It fires only when NEITHER party has spoken,
+        so a caller who keeps saying "hello?" into a line whose voice has died resets it
+        forever, and every second of that is billed by Vobiz and holds a concurrency slot.
+        A wedged pipeline is the same shape from out here: nothing arrives to end it.
+
+        Sized well above a real conversation rather than near it. A sales call that has run
+        this long is not a call any more.
+        """
+        try:
+            await asyncio.sleep(MAX_CALL_DURATION_SECS)
+        except asyncio.CancelledError:
+            return
+        nonlocal _ran_too_long
+        _ran_too_long = True
+        logger.error(
+            f"[{call_sid}] Call has run {MAX_CALL_DURATION_SECS:.0f}s — past any real "
+            f"conversation. Cancelling so the carrier leg stops billing."
+        )
+        await abandon_call("exceeded the maximum call duration")
+
+    _duration_guard = asyncio.create_task(enforce_max_duration())
 
     # ─── Idle ──────────────────────────────────────────────────────────────────
     # Fires when the carrier dropped the phone leg but left the websocket open, which
@@ -676,13 +793,17 @@ async def run_voice_agent(
     async def on_tts_error(service, error):
         nonlocal _tts_failures
         if error.fatal:
+            # Pipecat already queues a CancelFrame for a fatal ErrorFrame, so counting this
+            # one would only race its own shutdown.
             return
         _tts_failures += 1
         if _tts_failures == 1:
             logger.error(f"[{call_sid}] TTS failing — caller is hearing silence: {error.error}")
-        if _tts_failures == MAX_TTS_FAILURES:
-            logger.error(f"[{call_sid}] TTS unavailable after {MAX_TTS_FAILURES} errors; abandoning call")
-            await task.queue_frames([EndFrame()])
+        # >=, not ==. This used to fire once and never again, so when the one attempt failed
+        # to take effect there was nothing behind it.
+        if _tts_failures >= MAX_TTS_FAILURES:
+            logger.error(f"[{call_sid}] TTS unavailable after {_tts_failures} errors; abandoning call")
+            await abandon_call("tts unavailable")
 
     # Log the assistant's finalized turn. Note the event is on_assistant_turn_stopped —
     # on_assistant_message_added is not an event this aggregator registers, which is why
@@ -710,6 +831,11 @@ async def run_voice_agent(
     except Exception as e:
         logger.error(f"[{call_sid}] Pipeline exception: {e}")
         error = f"pipeline: {e}"
+    finally:
+        # The guard outlives the pipeline otherwise, and a sleeping task holding this
+        # closure keeps the whole call's state alive for ten minutes after the caller has
+        # gone. On a box capped at four concurrent calls that is a leak worth closing.
+        _duration_guard.cancel()
 
     # Deliberately not in a finally block: returning from finally discards any in-flight
     # exception, which is how a crashed session used to be recorded as a clean one.
@@ -731,7 +857,12 @@ async def run_voice_agent(
     return CallResult(
         transcript=transcript_str.strip(),
         error=session_error(
-            error, _llm_failures, _idle_timed_out, _tts_failures, _llm_quota_exhausted
+            error,
+            _llm_failures,
+            _idle_timed_out,
+            _tts_failures,
+            _llm_quota_exhausted,
+            _ran_too_long,
         ),
         latency=latency.log_summary(),
         answering_machine=_answering_machine,

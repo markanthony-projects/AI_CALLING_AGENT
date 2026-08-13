@@ -77,14 +77,47 @@ def test_pipeline_error_still_outranks_tts():
 def test_handler_ends_the_call_without_trying_to_speak():
     """A farewell needs TTS. Queueing TTSSpeakFrame here would be a no-op that delays hangup."""
     src = ast.unparse(_handler("on_tts_error"))
-    assert "EndFrame" in src
     assert "TTSSpeakFrame" not in src, "cannot speak a goodbye when TTS is the thing that failed"
 
 
-def test_handler_fires_once_not_on_every_error():
-    """Sarvam emitted the same error ~15 times in 10s; queueing an EndFrame each time is noise."""
+def test_an_end_frame_cannot_end_a_call_whose_tts_is_wedged():
+    """This handler used to queue an EndFrame, and on call 9b405c1d that did nothing at all:
+
+        09:30:46.792  TTS unavailable after 3 errors; abandoning call
+        09:30:50.096  AGENT -> "I understand, Chandan. Please go ahead..."
+
+    An assistant turn finalized 3.3s after the abandon, and neither "Pipeline finished" nor
+    "Call finalised" ever appeared. EndFrame is a ControlFrame, so it travels in queue order
+    and has to pass through the very processor that is wedged. The websocket stayed open,
+    Vobiz kept billing the phone leg, and a concurrency slot was held until a manual restart.
+
+    CancelFrame is a SystemFrame and bypasses the queue; task.cancel() is what queues one.
+    """
     src = ast.unparse(_handler("on_tts_error"))
-    assert f"== MAX_TTS_FAILURES" in src, "must trigger on equality, not >=, to fire exactly once"
+    assert "EndFrame" not in src, "EndFrame drains through the dead TTS and never arrives"
+    assert "abandon_call" in src
+
+
+def test_abandon_call_cancels_rather_than_ending():
+    src = ast.unparse(_handler("abandon_call"))
+    assert "task.cancel" in src
+    assert "queue_frames" not in src, "queued frames wait behind whatever is wedged"
+
+
+def test_abandon_call_survives_its_own_failure():
+    """It runs inside an event handler that fires many times a second. An exception escaping
+    here would be raised over and over and would take the duration cap down with it."""
+    node = _handler("abandon_call")
+    assert any(isinstance(n, ast.Try) for n in ast.walk(node))
+
+
+def test_the_handler_keeps_trying_after_the_first_attempt():
+    """It used to fire on == MAX_TTS_FAILURES, exactly once, on the reasoning that repeating
+    it was noise. When that one attempt failed to take effect there was nothing behind it,
+    and Sarvam went on erroring many times a second with no further action taken."""
+    src = ast.unparse(_handler("on_tts_error"))
+    assert ">= MAX_TTS_FAILURES" in src
+    assert "== MAX_TTS_FAILURES" not in src
 
 
 def test_handler_ignores_fatal_errors():

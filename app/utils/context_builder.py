@@ -76,31 +76,45 @@ def _readable(value) -> str:
 _BHK = re.compile(r"^\s*(?P<count>\d+(?:\.\d+)?)\s*BHK\b", re.I)
 
 
-def _spoken_unit(count: str) -> str:
-    """"3.5" -> "3.5 B H K". BHK written solid makes the voice engine try to say it as a word."""
-    return f"{count} B H K"
+def _join(parts: list) -> str:
+    """"a", "b", "c" -> "a, b and c". No Oxford comma: it is one more pause to read."""
+    if len(parts) <= 1:
+        return "".join(parts)
+    return f"{', '.join(parts[:-1])} and {parts[-1]}"
 
 
-def spoken_configurations(config) -> list:
-    """The configurations the project actually sells, in the words the agent should use.
+def spoken_configurations(config) -> str:
+    """The configurations the project actually sells, phrased the way to say them out loud.
 
-    Asked what was available in a project selling 2, 3, 3.5 and 4.5 BHK, the agent said
-    "We have 2, 3, and 4 B H K homes". There is no 4 BHK; the 4.5 was rounded down and the
-    3.5 was dropped. A prospect who books a site visit for a flat that does not exist finds
-    out at the site, and the rounding is not the model being loose with a number — it is
-    describing a product we cannot sell.
+    Two live-call failures shaped this, in order.
 
-    The prompt cannot be trusted with this on its own, because rounding does not feel to a
-    model like inventing a fact. So the exact list is computed here and handed over as a
-    sentence to say, rather than as six rows to summarise.
+    First the agent rounded. Asked what was available in a project selling 2, 3, 3.5 and 4.5
+    BHK it said "We have 2, 3, and 4 B H K homes" — there is no 4 BHK, the 4.5 was rounded
+    down and the 3.5 was dropped. A prospect who books a visit for a flat that does not
+    exist finds out at the site. Rounding does not feel to a model like inventing a fact, so
+    the prompt could not be trusted with this alone and the exact set is computed here.
+
+    Then the fix made it robotic. Handing over a list of four finished labels produced:
+
+        "We have 2 B H K, 3 B H K, 3.5 B H K, and 4.5 B H K units starting at 1.17 Crores."
+
+    Every spelled-out acronym is four separate syllables to the voice engine and every comma
+    is a pause, so one sentence carried sixteen staccato letters and seven pauses. It read
+    like a form being filled in — which is exactly what a broker does not sound like. A
+    person says the counts once and the acronym once: "2, 3, 3.5 and 4.5 B H K". Same facts,
+    a quarter of the pauses.
+
+    So this returns a phrase and not a list. The join is the point of the function, not a
+    formatting detail left to the caller — a caller free to join it its own way is a caller
+    free to reintroduce the staccato.
 
     Variants collapse: "3 BHK Regular", "3 BHK Comfort" and "3 BHK Luxury" are one thing to
     name on an opening call. The trim level matters once they are choosing, and the full
-    table is still in the context for that.
+    priced table is still in the context for that.
     """
     if not isinstance(config, list):
-        return []
-    seen, out = set(), []
+        return ""
+    counts, others, seen = [], [], set()
     for item in config:
         if not isinstance(item, dict):
             continue
@@ -108,12 +122,20 @@ def spoken_configurations(config) -> list:
         if not raw:
             continue
         match = _BHK.match(raw)
-        # A villa, plot or villament has no BHK count to collapse on, so it is named whole.
-        label = _spoken_unit(match.group("count")) if match else raw
-        if label.lower() not in seen:
-            seen.add(label.lower())
-            out.append(label)
-    return out
+        # A villa, plot or villament has no BHK count to group on, so it is named whole.
+        label = match.group("count") if match else raw
+        key = (bool(match), label.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        (counts if match else others).append(label)
+
+    parts = []
+    if counts:
+        # The acronym once, at the end, after every count it applies to.
+        parts.append(f"{_join(counts)} B H K")
+    parts.extend(others)
+    return _join(parts)
 
 
 def build_campaign_context(project: dict) -> str:
@@ -156,11 +178,12 @@ def build_campaign_context(project: dict) -> str:
     units = spoken_configurations(config)
     if units:
         # Given the table alone the agent summarised six rows as "2, 3, and 4 B H K" for a
-        # project that sells 2, 3, 3.5 and 4.5. Handing it the finished sentence removes the
-        # summarising step that produced the error.
+        # project that sells 2, 3, 3.5 and 4.5. Handing over the finished phrase removes the
+        # summarising step that produced the error — and, because it is already joined, the
+        # step that turned it into "2 B H K, 3 B H K, 3.5 B H K, and 4.5 B H K" out loud.
         context_lines.append(
-            f"Configurations to name — say EXACTLY this list, never round or drop one: "
-            f"{', '.join(units)}"
+            f"Configurations — say this phrase exactly as written, never round it, never "
+            f"drop one, and never repeat B H K after each number: {units}"
         )
     if config and isinstance(config, list):
         context_lines.append("Available Configurations (Unit Types, Area, and Pricing):")

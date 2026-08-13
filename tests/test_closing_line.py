@@ -129,15 +129,56 @@ class _Task:
     async def queue_frames(self, frames):
         self.batches.append(frames)
 
+    async def flush_pipeline(self, timeout=None):
+        return True
 
-def _run_handler(arguments):
-    """Execute the real end_call_handler body against fakes."""
-    task = _Task()
+
+class _Farewell:
+    """Stands in for FarewellGate. Reports the goodbye as heard, so the handler proceeds."""
+
+    def __init__(self, heard=True):
+        self.heard = heard
+        self.armed = False
+
+    def arm(self):
+        self.armed = True
+
+    async def wait_until_spoken(self, timeout):
+        assert self.armed, "the gate must be armed before the farewell is queued"
+        return self.heard
+
+
+def _build(task, farewell):
+    """Compile the real end_call_handler and its helper together.
+
+    They have to be built inside one enclosing function because end_call_handler declares
+    `nonlocal _ending` and closes over say_goodbye_then_hang_up. Exec'ing either alone is a
+    SyntaxError, and rewriting them for the test would be testing the rewrite.
+    """
+    import asyncio
+
+    spawned = []
+
+    class _AsyncioShim:
+        @staticmethod
+        def create_task(coro):
+            # asyncio.run() would cancel a real pending task the moment the handler returns.
+            spawned.append(coro)
+            return coro
+
+    outer = ast.parse(
+        "def _outer():\n    _ending = False\n    return end_call_handler\n"
+    ).body[0]
+    outer.body[1:1] = [_node("say_goodbye_then_hang_up"), _node("end_call_handler")]
+
     ns = {
         "closing_line": closing_line,
         "logger": agent.logger,
         "call_sid": "sid",
         "task_ref": [task],
+        "farewell": farewell,
+        "farewell_timeout": lambda line: 1.0,
+        "asyncio": _AsyncioShim,
         "TTSSpeakFrame": _Speak,
         "EndFrame": _Frame,
         # The farewell is followed by EndWorkerFrame, not EndFrame: EndFrame stops the
@@ -145,12 +186,24 @@ def _run_handler(arguments):
         "EndWorkerFrame": _Frame,
         "InterruptionWorkerFrame": _Frame,
     }
-    exec(compile(ast.Module([_node("end_call_handler")], []), "<handler>", "exec"), ns)
+    exec(compile(ast.Module([outer], []), "<handler>", "exec"), ns)
+    return ns["_outer"](), spawned
 
+
+def _run_handler(arguments):
+    """Execute the real end_call path against fakes, including the detached hangup."""
     import asyncio
 
+    task = _Task()
+    handler, spawned = _build(task, _Farewell())
     params = type("P", (), {"arguments": arguments})()
-    asyncio.run(ns["end_call_handler"](params))
+
+    async def drive():
+        await handler(params)
+        for coro in spawned:
+            await coro
+
+    asyncio.run(drive())
     return task.batches
 
 
@@ -169,38 +222,65 @@ def test_handler_falls_back_when_the_model_sends_nothing():
 def test_handler_discards_speech_still_queued_behind_it():
     """A split turn ran two inferences: one asked "What time on Sunday?" while the other
     hung up. Both played, so the agent answered its own question and rang off."""
-    node = _node("end_call_handler")
-    frames = [
-        el.func.id
-        for n in ast.walk(node)
-        if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "queue_frames"
-        for el in n.args[0].elts
-        if isinstance(el, ast.Call)
-    ]
-    assert "InterruptionWorkerFrame" in frames, "stale speech is never flushed"
-    assert frames.index("InterruptionWorkerFrame") < frames.index("TTSSpeakFrame"), (
-        "the interruption must precede the farewell or it cancels the farewell instead"
-    )
+    batches = _run_handler({"closing_line": BOOKING_READBACK})
+    kinds = [[type(f).__name__ for f in batch] for batch in batches]
+    flat = [k for batch in kinds for k in batch]
+    # _Frame stands in for every non-speech frame, so position is what carries the meaning:
+    # something is queued before the farewell, and something after it.
+    assert flat.index("_Speak") > 0, "nothing precedes the farewell — stale speech is never flushed"
+    assert flat.index("_Speak") < len(flat) - 1, "nothing follows the farewell — the call never ends"
+
+
+def test_a_second_hangup_is_refused():
+    """A model can emit a structured tool call and leaked syntax for the same turn, so both
+    end paths fire. Each one opens with an interruption, so the second would cancel the
+    first one's goodbye mid-sentence — exactly the cutoff this path exists to prevent."""
+    import asyncio
+
+    task = _Task()
+    handler, spawned = _build(task, _Farewell())
+    params = type("P", (), {"arguments": {"closing_line": BOOKING_READBACK}})()
+
+    async def drive():
+        await handler(params)
+        await handler(params)
+        for coro in spawned:
+            await coro
+
+    asyncio.run(drive())
+    spoken = [f for batch in task.batches for f in batch if isinstance(f, _Speak)]
+    assert len(spoken) == 1, f"the farewell was queued {len(spoken)} times"
+
+
+def test_the_goodbye_is_hung_up_on_even_if_it_never_plays():
+    """A dead TTS raises no BotStoppedSpeakingFrame. Waiting for one that is not coming
+    would hold the carrier leg open and go on billing."""
+    import asyncio
+
+    task = _Task()
+    handler, spawned = _build(task, _Farewell(heard=False))
+
+    async def drive():
+        await handler(type("P", (), {"arguments": {"closing_line": BOOKING_READBACK}})())
+        for coro in spawned:
+            await coro
+
+    asyncio.run(drive())
+    assert task.batches, "the call was never ended"
+    assert len(task.batches) >= 3
 
 
 def test_handler_survives_a_params_object_without_arguments():
     """Pipecat hands us FunctionCallParams; a provider that omits args must not crash the hangup."""
-    task = _Task()
-    ns = {
-        "closing_line": closing_line,
-        "logger": agent.logger,
-        "call_sid": "sid",
-        "task_ref": [task],
-        "TTSSpeakFrame": _Speak,
-        "EndFrame": _Frame,
-        # The farewell is followed by EndWorkerFrame, not EndFrame: EndFrame stops the
-        # transport in queue order and cut a live goodbye off after 425ms.
-        "EndWorkerFrame": _Frame,
-        "InterruptionWorkerFrame": _Frame,
-    }
-    exec(compile(ast.Module([_node("end_call_handler")], []), "<handler>", "exec"), ns)
-
     import asyncio
 
-    asyncio.run(ns["end_call_handler"](None))
+    task = _Task()
+    handler, spawned = _build(task, _Farewell())
+
+    async def drive():
+        await handler(None)
+        for coro in spawned:
+            await coro
+
+    asyncio.run(drive())
     assert _spoken(task.batches) == FAREWELL_LINE
