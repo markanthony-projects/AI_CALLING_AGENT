@@ -138,6 +138,46 @@ def spoken_configurations(config) -> str:
     return _join(parts)
 
 
+# A USP that is an argument about money rather than about the property. These belong next
+# to the price, not in the opening hook, so they are pulled out separately.
+# No trailing \b: these stems run straight into their suffixes ("pricing", "priced"), and a
+# word boundary after "pric" matched none of them.
+_PRICE_BENEFIT = re.compile(
+    r"\b(?:eoi"
+    r"|pre[-\s]?launch\s+(?:pric\w*|offer)"
+    r"|introductory\s+pric\w*"
+    r"|early[-\s]bird"
+    r"|below\s+the\s+(?:expected\s+)?launch"
+    r"|lower\s+than\s+the\s+launch)",
+    re.I,
+)
+
+
+def pitch_points(project: dict) -> tuple:
+    """(headline, price_benefit) — the two lines that carry the opening.
+
+    The opening used to be "We are launching a new project in Varthur. Are you looking for
+    any property purchase?" — true, and true of every builder calling that afternoon. The
+    prospect has nothing to be interested in yet.
+
+    Both are picked from usps rather than judged here. That column is hand-curated per
+    project and written in selling order, so the first entry is the headline by construction
+    — a model asked to choose "the most attractive one" from thirteen bullets is choosing
+    fresh on every call, and it picked differently each time.
+
+    The money argument is separated out because it lands somewhere else. "Twenty to thirty
+    Lakhs below the launch price" answers a question the prospect has not asked in the first
+    ten seconds; said next to the price, it is the reason to keep listening.
+    """
+    usps = project.get("usps")
+    if not isinstance(usps, list):
+        return "", ""
+    clean = [str(u).strip() for u in usps if str(u or "").strip()]
+    price_benefit = next((u for u in clean if _PRICE_BENEFIT.search(u)), "")
+    headline = next((u for u in clean if u != price_benefit), "")
+    return headline, price_benefit
+
+
 def build_campaign_context(project: dict) -> str:
     """
     Parses the Redis project dictionary and builds a comprehensive LLM context string.
@@ -164,6 +204,21 @@ def build_campaign_context(project: dict) -> str:
     usps = project.get('usps')
     if usps:
         context_lines.append(f"Key Selling Points (USPs): {', '.join(usps)}")
+
+    # Named separately from the USP list above so the opening does not depend on the model
+    # picking well from a dozen bullets under time pressure. The list stays for everything
+    # that comes after the hook.
+    headline, price_benefit = pitch_points(project)
+    if headline:
+        context_lines.append(
+            f"Headline — the one thing that makes this project worth a minute of their "
+            f"time. Say it in your opening, in simple words: {headline}"
+        )
+    if price_benefit:
+        context_lines.append(
+            f"Price benefit — say this whenever you give the price, never before it: "
+            f"{price_benefit}"
+        )
         
     nearby = project.get('nearby_facilities')
     if nearby and isinstance(nearby, dict):

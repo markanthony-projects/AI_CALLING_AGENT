@@ -1,6 +1,7 @@
 import asyncio
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -58,9 +59,10 @@ from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.spoken_text import ToolSyntaxFilter
+from app.utils.timeutils import time_of_day_greeting
 from app.utils.stt_witness import SttWitness
 from app.utils.turn_gate import TurnFinalityGate
-from app.prompts.agent_prompts import get_system_prompt
+from app.prompts.agent_prompts import AGENT_NAME, get_system_prompt
 import sys
 from loguru import logger
 
@@ -110,21 +112,30 @@ LLM_BUSY_LINE = "One moment please."
 # Spoken before we hang up when the model gives us nothing usable to say.
 FAREWELL_LINE = "Thank you so much for your time. Have a wonderful day!"
 
-AGENT_NAME = "Ananya"
-
-
-def build_opening_line(project_name: str, customer_name: Optional[str] = None) -> str:
+def build_opening_line(
+    project_name: str,
+    customer_name: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> str:
     """The first thing the caller hears.
 
-    The name comes off the dial list, so the call opens by confirming we reached the right
-    person rather than asking a stranger who they are. Without a name there is nothing to
-    confirm, so it asks instead — never a guessed name.
+    Greets by time of day and asks for a minute of their time rather than opening with a
+    question about who they are. The name off the dial list is used to address them, so a
+    prospect who does hear their own name knows the call is meant for them; without one the
+    greeting simply omits it and the agent asks in its first reply — never a guessed name.
+
+    Written as three short sentences rather than the one comma-spliced line it was specified
+    as. Sarvam pauses at every comma, and "Hi, Good morning Chandan, I am Priya calling you
+    from X, can I speak to you for a minute?" comes out as four chopped fragments. Same
+    words, said the way a person says them.
     """
-    intro = f"Hi, I am {AGENT_NAME} calling you on behalf of {project_name}."
+    part = time_of_day_greeting(now)
     name = (customer_name or "").strip()
-    if name:
-        return f"{intro} Am I speaking with {name}?"
-    return f"{intro} May I know your good name?"
+    address = f" {name}" if name else ""
+    return (
+        f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from {project_name}. "
+        f"Can I speak to you for a minute?"
+    )
 
 # A sign-off is two or three sentences. Anything longer is the model monologuing into a
 # hangup, and the caller waits through all of it before the line clears.

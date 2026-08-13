@@ -2,7 +2,7 @@
 
 A dial landed on voicemail and the whole pipeline treated it as a conversation:
 
-    AGENT → "Hi, I am Ananya calling you on behalf of ..." [interrupted]
+    AGENT → "Hi, Good morning. I am Priya calling you from ..." [interrupted]
     USER  → "The person you are trying to reach is not available. At the please record
              your message. When you have finished recording, you may hang up."
     Call finalised | status=COMPLETED

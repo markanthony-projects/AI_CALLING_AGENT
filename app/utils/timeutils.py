@@ -38,6 +38,26 @@ def to_ist(value: datetime) -> datetime:
     return value.astimezone(IST)
 
 
+def time_of_day_greeting(value: Optional[datetime] = None) -> str:
+    """"morning" / "afternoon" / "evening" for the prospect's clock, not the server's.
+
+    Read in IST because the droplet runs on UTC: at 09:30 IST — the middle of a dialing
+    shift — a UTC clock says 04:00, and the caller would be wished good morning at what the
+    machine thinks is the dead of night. The 5h30m offset also moves the afternoon boundary
+    by half a day, so getting this from utcnow() is wrong twice over.
+
+    Boundaries follow Indian English usage: afternoon starts at noon, evening at 5 PM.
+    Anything before noon is morning — dialing runs 10 AM to 8 PM, so the small hours never
+    come up, and "good morning" is the harmless answer if they ever do.
+    """
+    hour = to_ist(value if value is not None else utc_now()).hour
+    if hour < 12:
+        return "morning"
+    if hour < 17:
+        return "afternoon"
+    return "evening"
+
+
 def parse_time_of_day(raw: Optional[str]) -> Optional[time]:
     """Parse '15:00', '3 PM', '3:30pm' into a time. None if it isn't a usable clock time."""
     if not raw:

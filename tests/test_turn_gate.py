@@ -167,7 +167,7 @@ def test_frames_that_are_not_llm_text_pass_straight_through():
     gate, sink = _gate()
     gate.user_turn_started()
     gate.inference_triggered()
-    asyncio.run(_send(gate, TTSSpeakFrame("Hi, I am Ananya.")))
+    asyncio.run(_send(gate, TTSSpeakFrame("Hi, I am Priya.")))
     assert sink.frames and isinstance(sink.frames[0], TTSSpeakFrame)
 
 
