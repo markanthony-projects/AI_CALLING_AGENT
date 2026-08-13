@@ -79,6 +79,32 @@ def test_without_a_name_the_model_is_told_to_ask_in_its_first_reply():
     assert "good name" in name_rule
 
 
+def test_the_name_question_is_the_whole_of_that_reply():
+    """On call 2afae4e1 the agent said, in one breath:
+
+        "May I know your good name? Also, we are launching a new project in Varthur. It is
+        Bengaluru's first Scotland-themed residential township. Are you looking for any
+        property purchase?"
+
+    Two questions, and the prospect hung up. "Ask in your very first reply, before anything
+    else" was read as an instruction about word order inside the sentence. It has to say
+    that the question IS the reply.
+    """
+    name_rule = next(l for l in PROMPT.splitlines() if l.startswith("NAME:"))
+    assert "ONLY this, and nothing else at all" in name_rule
+    assert "Do NOT add the project" in name_rule
+    assert "wait for them to answer" in name_rule
+
+
+def test_one_question_per_reply_is_a_rule_for_the_whole_call():
+    """It was only ever stated inside step 4, so the opening and the requalification both
+    doubled up. The same call also asked "Which area are you looking in, and when are you
+    planning to buy?" — on a phone line the prospect answers one and the other is lost."""
+    assert "ONE question per reply, always" in PROMPT
+    style = PROMPT[PROMPT.index("SPEAKING STYLE:") :]
+    assert "ONE question per reply" in style, "the rule must sit outside the DISCOVERY step"
+
+
 def test_with_a_name_the_model_addresses_rather_than_verifies():
     assert "Rahul Sharma" in NAMED
     assert "not asking them to prove who they are" in NAMED

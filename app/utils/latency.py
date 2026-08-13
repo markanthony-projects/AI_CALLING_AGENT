@@ -16,6 +16,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     Frame,
+    LLMFullResponseStartFrame,
     MetricsFrame,
     UserStoppedSpeakingFrame,
 )
@@ -24,7 +25,17 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 
 NS_PER_SEC = 1_000_000_000
 
-_TRACKED = (UserStoppedSpeakingFrame, BotStartedSpeakingFrame, MetricsFrame)
+_TRACKED = (
+    UserStoppedSpeakingFrame,
+    BotStartedSpeakingFrame,
+    MetricsFrame,
+    LLMFullResponseStartFrame,
+)
+
+# Below this, the remainder is ordinary frame plumbing and saying so on every turn would
+# bury the turns where it is not. Set from the clean turns on call db5027ae, whose
+# remainders ran 20-220ms.
+_WORTH_REPORTING_SECS = 0.3
 
 
 def _short(processor: str) -> str:
@@ -57,6 +68,11 @@ class LatencyObserver(BaseObserver):
         self._ttfa: dict[str, TTFAMetricsData] = {}
         self._turns: list[float] = []
         self._seen: set[int] = set()
+        # When the LLM's first token came back, and which processor produced it. Together
+        # with that processor's TTFB they give the moment the request was actually sent,
+        # which is the one boundary the per-service metrics do not cover.
+        self._llm_first_token_ns: Optional[int] = None
+        self._llm_processor: Optional[str] = None
 
     @property
     def turns(self) -> list[float]:
@@ -73,6 +89,16 @@ class LatencyObserver(BaseObserver):
             self._turn_start_ns = data.timestamp
             self._ttfb.clear()
             self._ttfa.clear()
+            self._llm_first_token_ns = None
+            self._llm_processor = None
+            return
+
+        if isinstance(frame, LLMFullResponseStartFrame):
+            # The first token of the reply. Only the first one in a turn: a split turn runs
+            # two inferences and it is the first that started the caller's wait.
+            if self._turn_start_ns is not None and self._llm_first_token_ns is None:
+                self._llm_first_token_ns = data.timestamp
+                self._llm_processor = str(data.source)
             return
 
         if isinstance(frame, MetricsFrame):
@@ -89,22 +115,54 @@ class LatencyObserver(BaseObserver):
             return
 
         elapsed = (data.timestamp - self._turn_start_ns) / NS_PER_SEC
+        breakdown = self._breakdown(elapsed)
         self._turn_start_ns = None
         if elapsed < 0:
             return
         self._turns.append(elapsed)
         logger.info(
             f"[{self._call_sid}] LATENCY turn {len(self._turns)}: "
-            f"{elapsed * 1000:.0f}ms voice-to-voice{self._breakdown()}"
+            f"{elapsed * 1000:.0f}ms voice-to-voice{breakdown}"
         )
 
-    def _breakdown(self) -> str:
+    def _before_the_llm(self) -> Optional[float]:
+        """Seconds between the prospect falling silent and the request leaving for the LLM.
+
+        Nothing else measures this stretch. Each service reports its own time-to-first-byte,
+        so the clock only starts once that service has been handed something — the wait for
+        Deepgram to finalize the transcript, and for the aggregator to decide the turn is
+        over, sits before all of them and was invisible.
+
+        It has to be derived rather than read: the first token arrives TTFB after the
+        request went out, so subtracting the LLM's own TTFB from the arrival time gives the
+        moment it was sent.
+        """
+        if self._turn_start_ns is None or self._llm_first_token_ns is None:
+            return None
+        ttfb = self._ttfb.get(self._llm_processor)
+        if ttfb is None:
+            return None
+        return max(0.0, (self._llm_first_token_ns - self._turn_start_ns) / NS_PER_SEC - ttfb)
+
+    def _breakdown(self, elapsed: float) -> str:
         parts = [f"{_short(p)}={v * 1000:.0f}ms" for p, v in sorted(self._ttfb.items())]
         for processor, item in sorted(self._ttfa.items()):
             parts.append(
                 f"{_short(processor)}_audio={item.ttfa * 1000:.0f}ms"
                 f"(silence={item.leading_silence * 1000:.0f}ms)"
             )
+
+        # On call db5027ae turn 2 reported 3959ms voice-to-voice against groq=619ms and
+        # sarvam=200ms. Three seconds were missing and there was no line for them, so the
+        # log looked like the services were fast and the caller was wrong. These two make
+        # the total add up, or say plainly that it does not.
+        before_llm = self._before_the_llm()
+        if before_llm is not None and before_llm >= _WORTH_REPORTING_SECS:
+            parts.append(f"before_llm={before_llm * 1000:.0f}ms")
+        accounted = sum(self._ttfb.values()) + (before_llm or 0.0)
+        rest = elapsed - accounted
+        if rest >= _WORTH_REPORTING_SECS:
+            parts.append(f"unattributed={rest * 1000:.0f}ms")
         return "  |  " + "  ".join(parts) if parts else ""
 
     def summary(self) -> Optional[dict]:

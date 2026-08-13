@@ -6,7 +6,9 @@ not. These pin the measurement that replaced it: user stops talking -> caller he
 """
 
 import pytest
+from loguru import logger
 from pipecat.frames.frames import (
+    LLMFullResponseStartFrame,
     BotStartedSpeakingFrame,
     MetricsFrame,
     TextFrame,
@@ -18,9 +20,20 @@ from pipecat.observers.base_observer import FramePushed
 from app.utils.latency import NS_PER_SEC, LatencyObserver, _short, percentile
 
 
-def pushed(frame, at_seconds: float) -> FramePushed:
+class _Processor:
+    """Stands in for the pushing service. The observer reads str(source) to learn which
+    TTFB belongs to the LLM."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __str__(self):
+        return self._name
+
+
+def pushed(frame, at_seconds: float, source=None) -> FramePushed:
     return FramePushed(
-        source=None, destination=None, frame=frame,
+        source=source, destination=None, frame=frame,
         direction=None, timestamp=int(at_seconds * NS_PER_SEC),
     )
 
@@ -28,6 +41,12 @@ def pushed(frame, at_seconds: float) -> FramePushed:
 async def drive(observer, events):
     for frame, at in events:
         await observer.on_push_frame(pushed(frame, at))
+
+
+async def drive_from(observer, events):
+    """Like drive, but each event names the processor that pushed the frame."""
+    for frame, at, source in events:
+        await observer.on_push_frame(pushed(frame, at, source))
 
 
 # --- the core measurement --------------------------------------------------------
@@ -115,11 +134,120 @@ async def test_breakdown_attributes_time_to_each_service(caplog):
         (metrics, 0.5),
         (BotStartedSpeakingFrame(), 1.3),
     ])
-    line = obs._breakdown()
+    line = obs._breakdown(0.0)
     assert "deepgram=310ms" in line
     assert "groq=420ms" in line
     assert "sarvam_audio=500ms" in line
     assert "silence=220ms" in line, "TTS padding is latency the caller hears as dead air"
+
+
+# --- the time nobody was measuring -----------------------------------------------
+#
+# Call db5027ae turn 2 reported 3959ms voice-to-voice against groq=619ms and sarvam=200ms.
+# Three seconds were missing, and the log gave no line for them — so it read as though every
+# service had been fast and the caller had imagined the wait. Each service reports its own
+# time-to-first-byte, which starts only once that service has been handed something; the
+# stretch before the first of them had no owner.
+
+
+async def test_the_wait_before_the_llm_is_measured():
+    """Deepgram finalizing and the aggregator closing the turn both happen here, and both
+    sit before every TTFB the pipeline reports."""
+    obs = LatencyObserver("sid")
+    llm = _Processor("GroqLLMService#0")
+    await drive_from(obs, [
+        (UserStoppedSpeakingFrame(), 0.0, None),
+        # Request went out at 3.0s; the first token arrived 0.6s later.
+        (LLMFullResponseStartFrame(), 3.6, llm),
+        (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.6)]), 3.6, None),
+    ])
+    assert "before_llm=3000ms" in obs._breakdown(3.9)
+
+
+async def test_a_turn_that_adds_up_says_nothing_extra():
+    """Every turn carrying a line for 20ms of frame plumbing would bury the turns where it
+    is seconds. The clean turns on that same call ran 20-220ms unattributed."""
+    obs = LatencyObserver("sid")
+    llm = _Processor("GroqLLMService#0")
+    await drive_from(obs, [
+        (UserStoppedSpeakingFrame(), 0.0, None),
+        (LLMFullResponseStartFrame(), 0.6, llm),
+        (MetricsFrame(data=[
+            TTFBMetricsData(processor="GroqLLMService#0", value=0.55),
+            TTFBMetricsData(processor="SarvamTTSService#0", value=0.2),
+        ]), 0.6, None),
+    ])
+    line = obs._breakdown(0.8)
+    assert "before_llm" not in line
+    assert "unattributed" not in line
+
+
+async def test_time_nobody_can_account_for_is_still_reported():
+    """The point of the whole thing: if the parts do not add up to the total, say so rather
+    than print a breakdown that quietly implies they do."""
+    obs = LatencyObserver("sid")
+    llm = _Processor("GroqLLMService#0")
+    await drive_from(obs, [
+        (UserStoppedSpeakingFrame(), 0.0, None),
+        (LLMFullResponseStartFrame(), 0.6, llm),
+        (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.6)]), 0.6, None),
+    ])
+    # Two and a half seconds between the reply being generated and the caller hearing it.
+    assert "unattributed=2500ms" in obs._breakdown(3.1)
+
+
+async def test_a_split_turn_is_timed_from_the_first_inference():
+    """Two inferences run for one turn. The caller's wait started with the first."""
+    obs = LatencyObserver("sid")
+    llm = _Processor("GroqLLMService#0")
+    await drive_from(obs, [
+        (UserStoppedSpeakingFrame(), 0.0, None),
+        (LLMFullResponseStartFrame(), 1.5, llm),
+        (LLMFullResponseStartFrame(), 2.9, llm),
+        (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.5)]), 2.9, None),
+    ])
+    assert "before_llm=1000ms" in obs._breakdown(3.2)
+
+
+async def test_every_turn_measures_its_own_wait():
+    """The first-token timestamp has to be cleared when a new turn starts, or the "only the
+    first inference counts" guard sees the PREVIOUS turn's value still sitting there and
+    never records this one. Every turn after the first would then silently report nothing —
+    which looks exactly like a pipeline with no problem."""
+    obs = LatencyObserver("sid")
+    llm = _Processor("GroqLLMService#0")
+    await drive_from(obs, [
+        (UserStoppedSpeakingFrame(), 0.0, None),
+        (LLMFullResponseStartFrame(), 3.6, llm),
+        (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.6)]), 3.6, None),
+        (BotStartedSpeakingFrame(), 3.9, None),
+        # Second turn, a different wait.
+        (UserStoppedSpeakingFrame(), 10.0, None),
+        (LLMFullResponseStartFrame(), 12.1, llm),
+        (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.5)]), 12.1, None),
+    ])
+    assert "before_llm=1600ms" in obs._breakdown(2.4)
+
+
+async def test_the_line_that_actually_gets_logged_carries_it():
+    """The others exercise the computation directly. This one proves it survives the wiring
+    into on_push_frame, where the turn state is torn down as the line is written."""
+    written = []
+    sink = logger.add(lambda m: written.append(str(m)), level="INFO")
+    try:
+        obs = LatencyObserver("sid")
+        llm = _Processor("GroqLLMService#0")
+        await drive_from(obs, [
+            (UserStoppedSpeakingFrame(), 0.0, None),
+            (LLMFullResponseStartFrame(), 3.6, llm),
+            (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.6)]), 3.6, None),
+            (BotStartedSpeakingFrame(), 3.9, None),
+        ])
+    finally:
+        logger.remove(sink)
+    line = next(m for m in written if "LATENCY turn 1" in m)
+    assert "3900ms voice-to-voice" in line
+    assert "before_llm=3000ms" in line
 
 
 async def test_metrics_are_cleared_between_turns():
@@ -130,7 +258,7 @@ async def test_metrics_are_cleared_between_turns():
         (BotStartedSpeakingFrame(), 1.0),
         (UserStoppedSpeakingFrame(), 5.0),
     ])
-    assert obs._breakdown() == "", "stale timings must not be attributed to the next turn"
+    assert obs._breakdown(0.0) == "", "stale timings must not be attributed to the next turn"
 
 
 @pytest.mark.parametrize(
