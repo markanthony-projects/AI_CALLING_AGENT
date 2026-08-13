@@ -5,6 +5,7 @@ can show that. They exist so a prompt edit cannot silently drop a hard-won rule.
 """
 
 import inspect
+import re
 
 import pytest
 
@@ -49,6 +50,40 @@ def test_every_way_out_of_the_call_goes_through_the_tool():
             f"this line tells the model to finish the call without the tool that hangs "
             f"up: {line.strip()!r}"
         )
+
+
+def test_the_prompt_never_writes_out_a_closing_line_argument():
+    """On call 83e77392 the model emitted this into its SPOKEN text:
+
+        <function=end_call closing_line="Thank you for sharing. Our property expert will
+        call you with better options. Have a good day!"/>
+
+    ToolSyntaxFilter caught it, so the caller heard none of it — but gemma-4-31b was chosen
+    precisely because it used the tool channel on 6 replies out of 6, and it had never done
+    this before. The sentence inside the markup is word for word the one this prompt had
+    started carrying:
+
+        close by CALLING end_call with closing_line "Thank you for sharing. Our property
+        expert will call you with better options."
+
+    Showing a model `closing_line "<a sentence>"` teaches it the textual form of the call,
+    and it duly produced the textual form. Say what the goodbye should CONTAIN; never spell
+    out the parameter with a quoted value beside it.
+    """
+    # A quoted value of real length hanging off the parameter name. The NEVER SPEAK TOOL
+    # SYNTAX rule has to name "closing_line" to forbid it, and that is not the same thing:
+    # there is no sentence attached for a model to lift.
+    template = re.compile(r'closing_line\s*=?\s*"[^"]{15,}"')
+    offenders = [ln.strip() for ln in PROMPT.splitlines() if template.search(ln)]
+    assert not offenders, f"these hand the model a tool call to copy verbatim: {offenders}"
+
+
+def test_the_prompt_still_forbids_speaking_tool_syntax():
+    """The rule was already there and was not enough on its own — a model imitating a
+    template in its own instructions is not reading a prohibition elsewhere. It stays
+    because it is what makes the leak recoverable rather than audible."""
+    assert "NEVER SPEAK TOOL SYNTAX" in PROMPT
+    assert "<function=end_call" in PROMPT
 
 
 def test_the_prompt_says_what_happens_when_a_goodbye_is_merely_spoken():
