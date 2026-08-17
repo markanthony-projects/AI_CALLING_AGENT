@@ -5,7 +5,6 @@ import os
 # Add the root directory to sys.path so we can import 'app'
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal
 from app.models.db import Project, Campaign, CampaignStatus
 

@@ -19,7 +19,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.groq.llm import GroqLLMService
 from pipecat.services.sarvam.tts import SarvamTTSService
 
-from app.services.agent import GROQ_MODEL
+from app.core.config import settings
 
 AGENT_SOURCE = Path(__file__).resolve().parents[1] / "app" / "services" / "agent.py"
 
@@ -55,7 +55,7 @@ def pipecat_objects():
 
     context = LLMContext(messages=[{"role": "system", "content": "x"}], tools=[end_call])
     return {
-        "llm": GroqLLMService(api_key="test", settings=GroqLLMService.Settings(model=GROQ_MODEL)),
+        "llm": GroqLLMService(api_key="test", settings=GroqLLMService.Settings(model=settings.LLM_MODEL)),
         "user_agg": LLMUserAggregator(context=context, params=LLMUserAggregatorParams()),
         "assistant_agg": LLMAssistantAggregator(context=context),
         "tts": SarvamTTSService(api_key="test", settings=SarvamTTSService.Settings(model="bulbul:v3")),

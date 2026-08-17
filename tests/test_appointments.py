@@ -7,7 +7,7 @@ gpt-4o-mini was asked to do calendar arithmetic and produced, from a Monday call
 The model now reports only what was said; these tests pin the arithmetic that replaced it.
 """
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time
 
 import pytest
 

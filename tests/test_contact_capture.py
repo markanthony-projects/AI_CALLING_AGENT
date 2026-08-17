@@ -75,6 +75,8 @@ def test_extraction_asks_for_the_unit_type():
         ("2 BHK", "2 BHK"),
         ("2bhk", "2 BHK"),
         ("2-BHK", "2 BHK"),
+        # Still normalised even though the agent no longer says it this way: transcripts
+        # from calls placed before the change are re-extracted, and STT can space it too.
         ("2 B H K", "2 BHK"),
         ("  3 bhk  ", "3 BHK"),
         ("villament", "Villament"),

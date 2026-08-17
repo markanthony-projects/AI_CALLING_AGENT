@@ -32,7 +32,6 @@ from app.services.llm_provider import (
     LLMEndpoint,
     ResilientLLMService,
     build_llm_service,
-    fallback_endpoint,
     is_transient_throttle,
     primary_endpoint,
     retry_after_header,

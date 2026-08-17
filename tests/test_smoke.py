@@ -1,10 +1,9 @@
 """Deploy smoke tests: would this build actually serve a call?"""
 
-import uuid
 
 import pytest
 
-from app.core.config import Settings, settings
+from app.core.config import Settings
 from app.models.db import CallStatus
 
 

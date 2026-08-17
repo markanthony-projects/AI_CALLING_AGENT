@@ -29,7 +29,7 @@ from sqlalchemy import String as SAString
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
-from app.api.routes.campaign import MAX_DIAL_BATCH, DialRequest
+from app.api.routes.campaign import DialRequest
 from app.core.ratelimit import reserve_dial_quota, reserve_llm_headroom, window_keys
 from app.core.security import SessionClaims, require_admin, require_session
 from app.models.db import (
@@ -45,7 +45,7 @@ from app.models.db import (
 from app.services.call_context import remember_customer_name, remember_dialed_number
 from app.services.dialer import trigger_vobiz_call
 from app.services.discovery import invalidate_project_cache
-from app.utils.timeutils import IST, to_ist, utc_now
+from app.utils.timeutils import to_ist, utc_now
 
 router = APIRouter(
     prefix="/api/v1/dashboard",

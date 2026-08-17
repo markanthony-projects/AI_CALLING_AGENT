@@ -89,24 +89,23 @@ def spoken_configurations(config) -> str:
     Two live-call failures shaped this, in order.
 
     First the agent rounded. Asked what was available in a project selling 2, 3, 3.5 and 4.5
-    BHK it said "We have 2, 3, and 4 B H K homes" — there is no 4 BHK, the 4.5 was rounded
+    BHK it said "We have 2, 3, and 4 BHK homes" — there is no 4 BHK, the 4.5 was rounded
     down and the 3.5 was dropped. A prospect who books a visit for a flat that does not
     exist finds out at the site. Rounding does not feel to a model like inventing a fact, so
     the prompt could not be trusted with this alone and the exact set is computed here.
 
     Then the fix made it robotic. Handing over a list of four finished labels produced:
 
-        "We have 2 B H K, 3 B H K, 3.5 B H K, and 4.5 B H K units starting at 1.17 Crores."
+        "We have 2 BHK, 3 BHK, 3.5 BHK, and 4.5 BHK units starting at 1.17 Crores."
 
-    Every spelled-out acronym is four separate syllables to the voice engine and every comma
-    is a pause, so one sentence carried sixteen staccato letters and seven pauses. It read
-    like a form being filled in — which is exactly what a broker does not sound like. A
-    person says the counts once and the acronym once: "2, 3, 3.5 and 4.5 B H K". Same facts,
-    a quarter of the pauses.
+    A person says the counts once and the acronym once. So this returns a phrase and not a
+    list: the join is the point of the function, not a formatting detail left to the caller,
+    because a caller free to join it its own way is free to reintroduce the repetition.
 
-    So this returns a phrase and not a list. The join is the point of the function, not a
-    formatting detail left to the caller — a caller free to join it its own way is a caller
-    free to reintroduce the staccato.
+    The acronym is written solid. It used to be spaced to "B H K" on the belief that Sarvam
+    would otherwise attack it as a word, but that was measured against an older voice and is
+    no longer true: on bulbul:v3 the same sentence takes 5.55s solid against 6.31s spaced,
+    and spelling it out is what made the list sound mechanical.
 
     Variants collapse: "3 BHK Regular", "3 BHK Comfort" and "3 BHK Luxury" are one thing to
     name on an opening call. The trim level matters once they are choosing, and the full
@@ -133,7 +132,7 @@ def spoken_configurations(config) -> str:
     parts = []
     if counts:
         # The acronym once, at the end, after every count it applies to.
-        parts.append(f"{_join(counts)} B H K")
+        parts.append(f"{_join(counts)} BHK")
     parts.extend(others)
     return _join(parts)
 
@@ -232,13 +231,13 @@ def build_campaign_context(project: dict) -> str:
     config = project.get('config_json')
     units = spoken_configurations(config)
     if units:
-        # Given the table alone the agent summarised six rows as "2, 3, and 4 B H K" for a
+        # Given the table alone the agent summarised six rows as "2, 3, and 4 BHK" for a
         # project that sells 2, 3, 3.5 and 4.5. Handing over the finished phrase removes the
         # summarising step that produced the error — and, because it is already joined, the
-        # step that turned it into "2 B H K, 3 B H K, 3.5 B H K, and 4.5 B H K" out loud.
+        # step that turned it into "2 BHK, 3 BHK, 3.5 BHK, and 4.5 BHK" out loud.
         context_lines.append(
             f"Configurations — say this phrase exactly as written, never round it, never "
-            f"drop one, and never repeat B H K after each number: {units}"
+            f"drop one, and never repeat BHK after each number: {units}"
         )
     if config and isinstance(config, list):
         context_lines.append("Available Configurations (Unit Types, Area, and Pricing):")

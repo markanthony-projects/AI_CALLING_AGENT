@@ -453,9 +453,10 @@ def test_the_dial_is_refused_when_the_first_turn_cannot_be_answered(monkeypatch)
     from fastapi import HTTPException
 
     from app.core import ratelimit
+    from app.core.llm_budget import Headroom
 
     async def empty():
-        return ratelimit.Headroom(tokens=10.0, requests=None)
+        return Headroom(tokens=10.0, requests=None)
 
     monkeypatch.setattr(ratelimit, "headroom", empty)
     with pytest.raises(HTTPException) as exc:
@@ -466,9 +467,10 @@ def test_the_dial_is_refused_when_the_first_turn_cannot_be_answered(monkeypatch)
 
 def test_a_healthy_budget_dials(monkeypatch):
     from app.core import ratelimit
+    from app.core.llm_budget import Headroom
 
     async def plenty():
-        return ratelimit.Headroom(tokens=11_000.0, requests=4.0)
+        return Headroom(tokens=11_000.0, requests=4.0)
 
     monkeypatch.setattr(ratelimit, "headroom", plenty)
     asyncio.run(ratelimit.reserve_llm_headroom())  # must not raise
@@ -478,9 +480,10 @@ def test_the_gate_can_be_turned_off(monkeypatch):
     """A small plan may prefer a stalled greeting to a refused campaign; that is the
     operator's call, not ours."""
     from app.core import ratelimit
+    from app.core.llm_budget import Headroom
 
     async def empty():
-        return ratelimit.Headroom(tokens=0.0, requests=0.0)
+        return Headroom(tokens=0.0, requests=0.0)
 
     monkeypatch.setattr(ratelimit, "headroom", empty)
     monkeypatch.setattr(ratelimit.settings, "LLM_MIN_TOKENS_TO_DIAL", 0)

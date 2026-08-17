@@ -19,7 +19,7 @@ from loguru import logger
 from redis.exceptions import RedisError
 
 from app.core.config import settings
-from app.core.llm_budget import Headroom, headroom
+from app.core.llm_budget import headroom
 from app.core.queue import get_arq_pool
 from app.utils.timeutils import to_ist, utc_now
 

@@ -9,7 +9,6 @@ the false trigger produced no log line at all.
 import ast
 import inspect
 
-import pytest
 from pipecat.audio.vad.vad_analyzer import (
     VAD_CONFIDENCE,
     VAD_MIN_VOLUME,

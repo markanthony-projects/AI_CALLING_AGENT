@@ -14,6 +14,8 @@ transcript, so connection noise suppressed the greeting before it was ever spoke
 import ast
 import inspect
 
+import pytest
+
 from app.services import agent
 
 TREE = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())

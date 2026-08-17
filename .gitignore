@@ -35,3 +35,9 @@ Thumbs.db
 
 # Let's Encrypt account key, private keys and certificates
 certbot/
+
+# Audio written by scripts/compare_tts_spellings.py while choosing how a phrase should be
+# spelled for the voice engine. Regenerate rather than commit: they are large, they are
+# per-voice, and the decision they informed lives in the code.
+tts_samples/
+*.bak

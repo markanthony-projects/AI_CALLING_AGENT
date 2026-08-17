@@ -11,6 +11,7 @@ means the line also has to be vetted before it becomes the last thing the caller
 """
 
 import ast
+import asyncio
 import inspect
 
 import pytest
@@ -155,8 +156,6 @@ def _build(task, farewell):
     `nonlocal _ending` and closes over say_goodbye_then_hang_up. Exec'ing either alone is a
     SyntaxError, and rewriting them for the test would be testing the rewrite.
     """
-    import asyncio
-
     spawned = []
 
     class _AsyncioShim:
@@ -192,8 +191,6 @@ def _build(task, farewell):
 
 def _run_handler(arguments):
     """Execute the real end_call path against fakes, including the detached hangup."""
-    import asyncio
-
     task = _Task()
     handler, spawned = _build(task, _Farewell())
     params = type("P", (), {"arguments": arguments})()

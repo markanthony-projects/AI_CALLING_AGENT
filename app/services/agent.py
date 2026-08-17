@@ -10,7 +10,6 @@ from pipecat.frames.frames import (
     EndFrame,
     EndWorkerFrame,
     InterruptionWorkerFrame,
-    TextFrame,
     TTSSpeakFrame,
 )
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
@@ -70,11 +69,6 @@ from loguru import logger
 logger.remove()
 logger.add(sys.stderr, level="INFO")
 
-# Which model serves calls is configuration now, not a constant here: Groq gave six
-# weeks' notice on llama-3.3-70b-versatile, and the next such notice should cost an
-# env change rather than a release. See LLM_MODEL in app/core/config.py.
-GROQ_MODEL = settings.LLM_MODEL
-
 # Groq rejects a malformed tool call server-side ("Failed to call a function"), which ends
 # the turn with no speech at all. Left unhandled the caller just hears silence until they
 # hang up, so every failed turn must still produce audio.
@@ -112,6 +106,7 @@ LLM_BUSY_LINE = "One moment please."
 # Spoken before we hang up when the model gives us nothing usable to say.
 FAREWELL_LINE = "Thank you so much for your time. Have a wonderful day!"
 
+
 def build_opening_line(
     project_name: str,
     customer_name: Optional[str] = None,
@@ -125,9 +120,9 @@ def build_opening_line(
     greeting simply omits it and the agent asks in its first reply — never a guessed name.
 
     Written as three short sentences rather than the one comma-spliced line it was specified
-    as. Sarvam pauses at every comma, and "Hi, Good morning Chandan, I am Priya calling you
-    from X, can I speak to you for a minute?" comes out as four chopped fragments. Same
-    words, said the way a person says them.
+    as. Pipecat synthesises one sentence per request, so a full stop is a real gap the caller
+    hears while a comma is not: measured on bulbul:v3, the same words with and without commas
+    take the same time to say. As one comma-spliced line this arrives in a single flat rush.
     """
     part = time_of_day_greeting(now)
     name = (customer_name or "").strip()

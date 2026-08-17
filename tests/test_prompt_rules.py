@@ -179,7 +179,9 @@ def test_tts_settings_use_no_unvalidated_tuning_values():
     "phrase,lost",
     [
         ("Tone: warm, professional, confident", "the only line that names a tone at all"),
-        ("Use confident short pauses with commas", "pacing"),
+        # The pacing rule is still asserted, by test_pauses_are_attributed_to_full_stops_
+        # and_not_commas. It is not listed here because its wording was replaced rather
+        # than lost: it used to credit commas with the pause, which measurement disproved.
         ("Do NOT read a script", "the anti-robot instruction"),
         ("real, dynamic conversation", "its other half"),
         ("Use their first name in most replies", "the name vanished from every reply"),
@@ -211,8 +213,25 @@ def test_a_rejection_gets_an_acknowledgement_too():
     assert "they say no or are not interested" in PROMPT
 
 
-def test_bhk_spacing_says_why():
-    """The rule was in the prompt and ignored on two consecutive calls; a bare
-    instruction with no reason is the first thing a compressing model drops."""
-    assert "3 B H K" in PROMPT
-    assert "pronounce it as a word" in PROMPT
+def test_bhk_is_written_solid_and_says_why():
+    """A bare instruction with no reason is the first thing a compressing model drops, and
+    this one was ignored on two consecutive calls when it had none.
+
+    The direction is now the opposite of what it was: "B H K" is what Sarvam spells out
+    letter by letter, and on a list of four that is what sounded mechanical.
+    """
+    pricing = next(l for l in PROMPT.splitlines() if l.startswith("- Pricing:"))
+    assert 'Write "BHK" solid' in pricing
+    assert "spells out letter by letter" in pricing
+
+
+def test_pauses_are_attributed_to_full_stops_and_not_commas():
+    """Measured on bulbul:v3: identical words with commas and without differ by nothing.
+    Pipecat synthesises one sentence per request, so a full stop is a separate synthesis and
+    a real gap the caller hears, while a comma stays inside the chunk and changes nothing.
+
+    The prompt used to say the opposite — "use confident short pauses with commas" — which
+    is why long comma-chained replies came out in one flat rush.
+    """
+    assert "PAUSES COME FROM FULL STOPS, NOT COMMAS" in PROMPT
+    assert "pauses with commas" not in PROMPT

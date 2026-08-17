@@ -46,7 +46,7 @@ def test_the_spoken_half_survives_and_the_markup_does_not():
     "text",
     [
         "Perfect, so Saturday at 11 AM. I will send you the details.",
-        "The 2 B H K starts at 1.2 Crores.",
+        "The 2 BHK starts at 1.2 Crores.",
         "",
     ],
 )
@@ -233,7 +233,7 @@ def test_each_stray_character_is_named_once():
     assert non_latin_letters("क क क ख क") == "कख"
 
 
-@pytest.mark.parametrize("ordinary", ["That works well, Chandan.", "1.17 Crores", "3 B H K"])
+@pytest.mark.parametrize("ordinary", ["That works well, Chandan.", "1.17 Crores", "3 BHK"])
 def test_ordinary_english_is_not_flagged(ordinary):
     from app.utils.spoken_text import non_latin_letters
 
