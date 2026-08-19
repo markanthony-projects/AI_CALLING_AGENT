@@ -148,6 +148,11 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             customer_name=await recall_customer_name(call_sid),
         )
         transcript = result.transcript
+        # Alongside the status, because "COMPLETED" answers whether the call worked and this
+        # answers who ended it — and those were indistinguishable when a call finished with no
+        # reason logged at all.
+        if result.end_reason:
+            logger.info(f"[{call_sid}] Ended by: {result.end_reason}")
         if result.error:
             logger.error(f"[{call_sid}] Voice session ended in error: {result.error}")
         elif result.answering_machine:

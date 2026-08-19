@@ -225,6 +225,48 @@ def test_the_acknowledgement_rule_does_not_re_attach_the_name():
     assert "for investment, Chandan." not in block
 
 
+def test_the_prompt_shows_how_to_split_a_fact_rather_than_only_capping_it():
+    """The 15-word cap and "pauses come from full stops" were both already in the prompt, and
+    both were obeyed on acknowledgements and ignored on facts. Measured on call db5027ae:
+
+        reacting     14 words, longest sentence 8
+        the intro    36 words, longest sentence 24
+        amenities    37 words, longest sentence 19
+
+    "We have 2, 3, 3.5 and 4.5 BHK homes starting at 1.17 Crores, which is around 20 to 30
+    Lakhs below the launch price" is 24 words in one sentence, and Sarvam does not pause at
+    a comma — so it arrives as a single flat breath. Facts feel to a model like they belong
+    together, so a general cap does not reach them; a before-and-after on the same sentence
+    does, the way it did for the BHK list.
+    """
+    assert "FACTS ARE WHERE THIS GOES WRONG" in PROMPT
+    # The worked pair, not just the instruction.
+    assert 'GOOD "We have 2, 3, 3.5 and 4.5 BHK homes. Prices start at 1.17 Crores.' in PROMPT
+    assert "NEVER hang a clause off a comma" in PROMPT
+
+
+def test_the_worked_good_examples_obey_the_cap_they_illustrate():
+    """An example that broke the rule would teach the rule wrong, and it is the example the
+    model copies rather than the number."""
+    import re
+
+    for line in PROMPT.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith('GOOD "'):
+            continue
+        text = stripped[len('GOOD "') : stripped.rindex('"')]
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        longest = max(len(s.split()) for s in sentences)
+        assert longest <= 15, f"a GOOD example runs to {longest} words: {text}"
+        assert len(sentences) >= 2, f"a GOOD example is still one sentence: {text}"
+
+
+def test_the_bad_examples_are_the_ones_actually_heard():
+    """Taken from the call rather than invented, so the pattern named is the pattern that
+    happens."""
+    assert 'BAD  "We have 2, 3, 3.5 and 4.5 BHK homes starting at 1.17 Crores, which is' in PROMPT
+
+
 def test_the_word_limits_are_not_read_as_targets():
     """The model hit 15 words by dropping verbs. The cap has to say it is a ceiling."""
     assert "ceilings, not targets" in PROMPT

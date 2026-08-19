@@ -219,6 +219,24 @@ class CallResult:
     # transcript is somebody's outgoing greeting rather than a conversation, so there is
     # nothing in it to extract a lead from.
     answering_machine: bool = False
+    # What stopped the pipeline, in words, as reported by on_pipeline_finished. None means it
+    # stopped without saying — which is itself worth seeing, because that is exactly how an
+    # ending nobody chose looks from the outside.
+    end_reason: Optional[str] = None
+
+
+def ending_reason(frame) -> str:
+    """Why the pipeline stopped, in words, from the frame that stopped it.
+
+    Falls back to the frame's class rather than to None or to "completed": an ending nobody
+    labelled is the case worth seeing, and naming it EndFrame at least says which mechanism
+    fired. Blank reasons are treated as absent, because an empty string reads in a log as
+    though something was recorded when nothing was.
+    """
+    reason = getattr(frame, "reason", None)
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return type(frame).__name__
 
 
 def session_error(
@@ -380,7 +398,7 @@ async def run_voice_agent(
                 f"[{call_sid}] Goodbye never finished playing; hanging up anyway so the "
                 f"carrier leg stops billing"
             )
-        await task_ref[0].queue_frames([EndWorkerFrame()])
+        await task_ref[0].queue_frames([EndWorkerFrame(reason="end_call tool")])
 
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
@@ -413,7 +431,7 @@ async def run_voice_agent(
             logger.info(f"[{call_sid}] Ending call after leaked end_call syntax (goodbye already spoken)")
             farewell.arm()
             await farewell.wait_until_spoken(farewell_timeout(line or ""))
-            await task_ref[0].queue_frames([EndWorkerFrame()])
+            await task_ref[0].queue_frames([EndWorkerFrame(reason="leaked end_call, goodbye already spoken")])
             return
         spoken = closing_line(line)
         logger.info(f"[{call_sid}] Ending call after leaked end_call syntax → \"{spoken}\"")
@@ -504,6 +522,9 @@ async def run_voice_agent(
     _empty_user_turns: int = 0
     _idle_timed_out: bool = False
     _ran_too_long: bool = False
+    # What stopped the pipeline, filled in by on_pipeline_finished below. Reported on the
+    # CallResult so a call whose ending nobody chose is visible in the data, not just the log.
+    _end_reason: Optional[str] = None
     # True between the moment a turn is sent for inference and the moment its answer starts
     # coming back. If the prospect speaks again inside that window, whatever is being
     # generated is an answer to half of what they said.
@@ -578,7 +599,7 @@ async def run_voice_agent(
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"[{call_sid}] Client disconnected — ending pipeline")
-        await task.queue_frames([EndFrame()])
+        await task.queue_frames([EndFrame(reason="the caller hung up")])
 
     # ─── Hard Duration Cap ─────────────────────────────────────────────────────
     async def enforce_max_duration():
@@ -605,6 +626,21 @@ async def run_voice_agent(
         await abandon_call("exceeded the maximum call duration")
 
     _duration_guard = asyncio.create_task(enforce_max_duration())
+
+    # ─── Why the call ended ────────────────────────────────────────────────────
+    # Every deliberate ending in this module logs its own reason before queueing a frame.
+    # A live call still finished with none of them in the log: the agent asked a question,
+    # the audio played out, and 43ms later the pipeline was done with nothing to say why.
+    #
+    # That leaves the ending unattributable, which is the one thing a call log must never be
+    # — "the prospect hung up" and "we hung up on the prospect" look identical from here. So
+    # the pipeline reports its own terminator, and the reason travels on the frame itself so
+    # the paths below can name themselves rather than relying on a log line written earlier.
+    @task.event_handler("on_pipeline_finished")
+    async def on_pipeline_finished(worker, frame):
+        nonlocal _end_reason
+        _end_reason = ending_reason(frame)
+        logger.info(f"[{call_sid}] Pipeline stopped by {type(frame).__name__}: {_end_reason}")
 
     # ─── Idle ──────────────────────────────────────────────────────────────────
     # Fires when the carrier dropped the phone leg but left the websocket open, which
@@ -669,7 +705,7 @@ async def run_voice_agent(
                     f"[{call_sid}] Answering machine detected; hanging up without leaving a "
                     f"message. Matched: {machine_phrases(transcript)}"
                 )
-                await task.queue_frames([EndFrame()])
+                await task.queue_frames([EndFrame(reason="answering machine")])
             _turns_heard += 1
             return
         # VAD heard speech but the STT produced nothing. Without this line a false barge-in
@@ -739,7 +775,7 @@ async def run_voice_agent(
         # A rejected tool call is the model trying to hang up, not a lost turn.
         if FUNCTION_CALL_FAILURE in (error.error or "").lower():
             logger.info(f"[{call_sid}] Tool call rejected upstream; closing the call as intended")
-            await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndWorkerFrame()])
+            await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndWorkerFrame(reason="provider rejected the tool call")])
             return
 
         # How long the provider asked us to wait, taken from its Retry-After header where it
@@ -762,7 +798,7 @@ async def run_voice_agent(
                 f"to ride these out instead of losing the turn."
             )
             if _llm_failures >= MAX_LLM_TURN_FAILURES:
-                await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame()])
+                await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm throttled past recovery")])
             else:
                 await task.queue_frames([TTSSpeakFrame(LLM_BUSY_LINE)])
             return
@@ -778,7 +814,7 @@ async def run_voice_agent(
                 f"[{call_sid}] LLM quota exhausted; signing off without asking the caller "
                 f"to repeat. Provider said: {error.error}"
             )
-            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame()])
+            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm quota exhausted")])
             return
 
         _llm_failures += 1
@@ -787,7 +823,7 @@ async def run_voice_agent(
         )
         if _llm_failures >= MAX_LLM_TURN_FAILURES:
             logger.error(f"[{call_sid}] LLM unrecoverable; signing off to avoid dead air")
-            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame()])
+            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm turn failures exhausted")])
         else:
             await task.queue_frames([TTSSpeakFrame(LLM_RECOVERY_LINE)])
 
@@ -862,6 +898,7 @@ async def run_voice_agent(
 
     return CallResult(
         transcript=transcript_str.strip(),
+        end_reason=_end_reason,
         error=session_error(
             error,
             _llm_failures,
