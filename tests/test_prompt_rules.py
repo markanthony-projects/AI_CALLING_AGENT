@@ -184,7 +184,8 @@ def test_tts_settings_use_no_unvalidated_tuning_values():
         # than lost: it used to credit commas with the pause, which measurement disproved.
         ("Do NOT read a script", "the anti-robot instruction"),
         ("real, dynamic conversation", "its other half"),
-        ("Use their first name in most replies", "the name vanished from every reply"),
+        # The name rule is asserted on its own below: it has been wrong in both directions,
+        # and a phrase match here would only pin whichever direction was last.
         ('"That works well, Chandan."', "a worked example; the bare rule was ignored"),
         ("Speak in complete sentences", "verbless fragments read flat through TTS"),
         ("NEVER jump straight to the next question", "the imperative behind ACKNOWLEDGE"),
@@ -192,6 +193,36 @@ def test_tts_settings_use_no_unvalidated_tuning_values():
 )
 def test_delivery_instructions_survive(phrase, lost):
     assert phrase in PROMPT, f"lost the rule guarding: {lost}"
+
+
+def test_the_name_is_for_moments_rather_than_every_reply():
+    """This rule has now been wrong in both directions, which is why it is pinned so tightly.
+
+    Compressing the prompt once dropped it entirely and the name went from 5 replies out of 5
+    to 0 out of 6. The fix said "use their first name in most replies" with a worked example
+    that was itself an opening acknowledgement — and on call db5027ae the agent used it in
+    10 replies out of 10, 9 of them in the first sentence:
+
+        "That is great to hear, Kundan." / "Got it, Kundan." / "Sure, I will do that, Kundan."
+
+    A model reading a vague frequency rounds it up, so the rule has to give a number and name
+    the pattern to avoid rather than describe a feeling.
+    """
+    rule = next(l for l in PROMPT.splitlines() if l.startswith("- Their first name is for"))
+    assert "Twice or three times in a whole call" in rule, "no number, so it will be rounded up"
+    assert "NEVER open a reply with it as a habit" in rule
+    assert "Most replies should carry no name at all" in rule
+
+
+def test_the_acknowledgement_rule_does_not_re_attach_the_name():
+    """The other half of the instruction. "React to what they said, and use their first name
+    while you do it" applies to every reply, because reacting is what every reply starts with —
+    so it reinstated the habit the rule above forbids."""
+    block = PROMPT[PROMPT.index("ACKNOWLEDGE BEFORE YOU ASK:") : PROMPT.index("NEVER JUDGE")]
+    assert "use their first name while you do it" not in block
+    assert "Usually without their name" in block
+    # And the worked examples must not model the banned pattern either.
+    assert "for investment, Chandan." not in block
 
 
 def test_the_word_limits_are_not_read_as_targets():
