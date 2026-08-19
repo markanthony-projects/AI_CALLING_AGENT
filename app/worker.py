@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
+from arq import cron
 from loguru import logger
 from openai import AsyncOpenAI
 from sqlalchemy import select
@@ -11,6 +12,7 @@ from app.core.database import AsyncSessionLocal, engine
 from app.core.queue import redis_settings
 from app.models.db import Call, Campaign, Lead, LeadStatus, Project, Transcript
 from app.models.schemas import LeadExtraction
+from app.services.dial_pump import dial_due_contacts, release_stale_dialing
 from app.utils.attribution import budget_is_grounded, phrase_is_grounded
 from app.utils.timeutils import is_within_business_hours, resolve_appointment, to_ist, utc_now
 
@@ -332,8 +334,51 @@ async def on_shutdown(ctx: dict) -> None:
     await engine.dispose()
 
 
+# --- the dial pump ---------------------------------------------------------------------
+
+
+async def pump_dials(ctx: dict) -> int:
+    """Place as many calls as the carrier has free slots for, and no more.
+
+    Runs on a short timer rather than being scheduled per number. See
+    app/services/dial_pump.py for why a pull model is what survives a worker restart, two
+    workers, a full carrier and a paused campaign without a special case for any of them.
+
+    Every exception is swallowed. This is the only thing that moves the queue, and a tick
+    that raises would be retried by arq with a job that has already dialled — so a transient
+    Postgres blip would place the same calls twice.
+    """
+    try:
+        return await dial_due_contacts()
+    except Exception as e:
+        logger.error(f"Dial pump tick failed: {e}")
+        return 0
+
+
+async def unstick_dials(ctx: dict) -> int:
+    """Return contacts stuck mid-dial to the queue.
+
+    A dial whose call never opened a websocket leaves its row DIALING for ever, and DIALING
+    is not eligible — so that number is silently never called again while its row looks busy
+    rather than broken.
+    """
+    try:
+        return await release_stale_dialing()
+    except Exception as e:
+        logger.error(f"Could not unstick mid-dial contacts: {e}")
+        return 0
+
+
 class WorkerSettings:
     functions = [process_extraction]
+    cron_jobs = [
+        # Every five seconds. Short because it bounds how long a freed slot sits idle, which
+        # on a three-slot account is a third of the throughput; cheap because a tick with no
+        # free slots and no active campaign is two indexed queries.
+        cron(pump_dials, second={s for s in range(0, 60, 5)}, run_at_startup=True, max_tries=1),
+        # Slower: this only cleans up after something that has already gone wrong.
+        cron(unstick_dials, minute={0, 15, 30, 45}, max_tries=1),
+    ]
     redis_settings = redis_settings()
     on_shutdown = on_shutdown
     max_jobs = 10

@@ -92,11 +92,19 @@ class Settings(BaseSettings):
     DIAL_MAX_PER_MINUTE: int = Field(default=30, ge=1)
     DIAL_MAX_PER_DAY: int = Field(default=500, ge=1)
 
-    # Streams accepted at once. Each one runs Silero VAD plus audio resampling on the CPU,
-    # so this has to match the droplet: roughly two calls per vCPU before audio starts to
-    # break up. Raising it past what the host can carry degrades every call in progress
-    # rather than rejecting the extra one.
-    MAX_CONCURRENT_CALLS: int = Field(default=4, ge=1)
+    # Calls in flight at once. This is now the DIAL gate as well as the stream gate: the dial
+    # pump takes a slot before asking the carrier to ring anybody, so the ceiling is enforced
+    # before money is spent rather than after. See app/core/call_slots.py.
+    #
+    # Set it to whatever the carrier account allows, and never above. The Vobiz account this
+    # runs on permits three simultaneous calls; it sat at 4, so the application's own cap was
+    # already looser than the carrier's and the fourth call could only ever fail.
+    #
+    # There is a second ceiling underneath this one: each stream runs Silero VAD plus audio
+    # resampling on the CPU, roughly two calls per vCPU before audio starts breaking up. Take
+    # the lower of the two. Raising this past what the host can carry degrades every call in
+    # progress instead of rejecting the extra one.
+    MAX_CONCURRENT_CALLS: int = Field(default=3, ge=1)
 
     # Barge-in sensitivity. Pipecat defaults are 0.7 / 0.6; running at 0.5 / 0.1 let PSTN
     # line noise clear the bar and cut the agent off mid-sentence, leaving callers saying

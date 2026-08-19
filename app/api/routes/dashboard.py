@@ -21,14 +21,16 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Generic, List, Literal, Optional, TypeVar
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
 from pydantic import BaseModel, Field, computed_field
 from sqlalchemy import Select, case, cast, func, or_, select, text
 from sqlalchemy import String as SAString
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
+from app.core import call_slots
 from app.api.routes.campaign import DialRequest
 from app.core.ratelimit import reserve_dial_quota, reserve_llm_headroom, window_keys
 from app.core.security import SessionClaims, require_admin, require_session
@@ -37,13 +39,14 @@ from app.models.db import (
     CallStatus,
     Campaign,
     CampaignStatus,
+    Contact,
+    ContactStatus,
     Lead,
     LeadStatus,
     Project,
+    Suppression,
     Transcript,
 )
-from app.services.call_context import remember_customer_name, remember_dialed_number
-from app.services.dialer import trigger_vobiz_call
 from app.services.discovery import invalidate_project_cache
 from app.utils.timeutils import to_ist, utc_now
 
@@ -479,11 +482,11 @@ async def funnel(
 async def live(db: AsyncSession = Depends(get_db)):
     """What the system is doing right now, plus how much dial budget is left.
 
-    active_calls is read from the API process that serves this request. With more than one
-    replica behind nginx that is a per-process figure, not a cluster total — the quota
-    counters below are the ones that hold across replicas, because they live in Redis.
+    active_calls comes from Redis, so it is the same figure every container enforces against
+    and the same one the dial pump reads before placing a call. It used to be a module-level
+    integer in whichever api process served this request, which with more than one replica
+    was not a count of anything.
     """
-    from app.api.routes.webhook import ACTIVE_CALLS
     from app.core.config import settings
 
     minute_key, day_key = window_keys()
@@ -507,7 +510,7 @@ async def live(db: AsyncSession = Depends(get_db)):
     ).all()
 
     return LiveStatus(
-        active_calls=ACTIVE_CALLS,
+        active_calls=await call_slots.active(),
         max_concurrent_calls=settings.MAX_CONCURRENT_CALLS,
         dialed_this_minute=dialed_minute,
         dial_max_per_minute=settings.DIAL_MAX_PER_MINUTE,
@@ -909,44 +912,93 @@ async def update_campaign(campaign_id: uuid.UUID, req: CampaignUpdate, db: Async
 async def dial_campaign(
     campaign_id: uuid.UUID,
     req: DialRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     claims: SessionClaims = Depends(require_admin),
 ):
-    """Start dialing from the dashboard.
+    """Add numbers to a campaign's dial queue.
 
-    Mirrors POST /api/v1/campaigns/{id}/dial/vobiz exactly — same E.164 normalisation, same
-    quota reservation before anything is dialled — but authorises on an admin session
-    instead of the API key, so nobody has to paste a spend-capable secret into a browser.
+    This used to place the calls itself, one background task per number, with the concurrency
+    cap checked later when each media websocket opened — after Vobiz had dialled, billed us
+    and rung a real person, who then had the line closed on them with no Call row written. On
+    a three-slot account a list of twenty meant seventeen people were called, charged for, and
+    hung up on invisibly.
+
+    So it enqueues instead. The pump in app/services/dial_pump.py places the calls, taking a
+    carrier slot before each one, and this returns as soon as the rows are written. What the
+    operator gives up is the illusion that the calls went out immediately; what they get is
+    that every number in the list is eventually dialled exactly once.
+
+    Kept alongside the spreadsheet import because pasting a handful of numbers is a real thing
+    to want — a callback, a number a colleague just passed on — and opening Excel for three of
+    them is not.
     """
     campaign = await db.get(Campaign, campaign_id)
     if campaign is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
     if campaign.status != CampaignStatus.ACTIVE:
-        # Pausing a campaign has to actually stop it, or the button means nothing.
+        # Pausing a campaign has to actually stop it, or the button means nothing. Queueing
+        # against a paused campaign would look like it worked and then never dial.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Campaign is {campaign.status.value}; set it ACTIVE before dialing",
         )
 
+    # Still reserved here, even though the pump is what spends the money. These are daily and
+    # per-minute ceilings on how much may be queued in one go, and refusing at the point the
+    # operator pressed the button is the only place they can act on it.
     await reserve_dial_quota(len(req.phone_numbers))
-    # Money is already committed by the line above; this asks the separate question
-    # of whether the LLM can answer the greeting once the phone is picked up.
+    # The separate question of whether the LLM can answer a greeting at all.
     await reserve_llm_headroom()
 
-    call_sids = []
-    for target in req.phone_numbers:
-        call_sid = str(uuid.uuid4())
-        call_sids.append(call_sid)
-        await remember_dialed_number(call_sid, target.number)
-        await remember_customer_name(call_sid, target.name)
-        background_tasks.add_task(trigger_vobiz_call, target.number, str(campaign_id), call_sid)
+    numbers = [t.number for t in req.phone_numbers]
+    blocked = set(
+        (
+            await db.execute(
+                select(Suppression.phone_number).where(Suppression.phone_number.in_(numbers))
+            )
+        )
+        .scalars()
+        .all()
+    )
 
-    campaign.total_leads_dialed = (campaign.total_leads_dialed or 0) + len(call_sids)
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "campaign_id": campaign_id,
+            "phone_number": target.number,
+            "name": target.name,
+            "status": ContactStatus.DND if target.number in blocked else ContactStatus.PENDING,
+            "last_outcome": "on the do-not-call list" if target.number in blocked else None,
+        }
+        for target in req.phone_numbers
+    ]
+    # A number already on this campaign's queue keeps whatever state it has. Pasting a list
+    # twice must not reset somebody who has already been called back to PENDING.
+    queued = len(
+        (
+            await db.execute(
+                pg_insert(Contact)
+                .values(rows)
+                .on_conflict_do_nothing(constraint="uq_contacts_campaign_phone")
+                .returning(Contact.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
     await db.commit()
 
-    logger.info(f"Dashboard dial: {len(call_sids)} numbers on campaign {campaign_id} by {claims.email}")
-    return {"status": "dialing_started", "total_numbers": len(call_sids), "call_sids": call_sids}
+    logger.info(
+        f"{claims.email} queued {queued} number(s) on campaign {campaign_id} "
+        f"({len(rows) - queued} already queued, {len(blocked)} suppressed)"
+    )
+    return {
+        "status": "queued",
+        "queued": queued,
+        "already_queued": len(rows) - queued,
+        "suppressed": len(blocked),
+        "total_numbers": len(rows),
+    }
 
 
 # --- Projects -------------------------------------------------------------------------

@@ -345,17 +345,14 @@ def test_the_name_is_recorded_before_the_dial():
     )
 
 
-@pytest.mark.parametrize("route", ["dial_campaign_vobiz", "dial_campaign"])
-def test_both_dial_routes_send_the_number_not_the_whole_lead(route):
-    """The dashboard route shares DialRequest but had its own loop. Passing the model
-    through gave Redis 'Invalid input of type: DialTarget' and Vobiz a JSON error."""
+def test_the_api_dial_route_sends_the_number_not_the_whole_lead():
+    """Passing the model through gave Redis 'Invalid input of type: DialTarget' and Vobiz a
+    JSON error. This route still dials directly; the dashboard one now queues."""
     import ast
 
     from app.api.routes import campaign as campaign_route
-    from app.api.routes import dashboard as dashboard_route
 
-    fn = getattr(campaign_route, route, None) or getattr(dashboard_route, route)
-    tree = ast.parse(inspect.getsource(fn).lstrip())
+    tree = ast.parse(inspect.getsource(campaign_route.dial_campaign_vobiz).lstrip())
     passed = {
         ast.unparse(arg)
         for n in ast.walk(tree)
@@ -366,15 +363,60 @@ def test_both_dial_routes_send_the_number_not_the_whole_lead(route):
         )
         for arg in n.args
     }
-    assert "target.number" in passed, f"{route} must dial target.number, not the model"
+    assert "target.number" in passed, "must dial target.number, not the model"
     assert "target" not in passed, "a DialTarget is not serialisable by redis or httpx"
 
 
-def test_the_dashboard_dial_records_the_name_too():
+def test_the_dashboard_dial_queues_instead_of_calling():
+    """It used to add one background task per number and let the concurrency cap be checked
+    later, when each websocket opened — after the carrier had billed us and rung a real person.
+    It now writes contacts and lets the pump place the calls a slot at a time."""
     from app.api.routes import dashboard
 
-    assert "remember_customer_name" in inspect.getsource(dashboard.dial_campaign), (
-        "dialing from the dashboard would greet every lead as a stranger"
+    src = inspect.getsource(dashboard.dial_campaign)
+    assert "trigger_vobiz_call" not in src, "the dashboard still dials without taking a slot"
+    assert "Contact" in src and "on_conflict_do_nothing" in src
+
+
+def test_the_queued_name_survives_to_the_call():
+    """The greeting addresses the prospect by name, so the name has to travel with the number.
+    On the queued path it is a column rather than a Redis key, and the pump reads it back."""
+    from app.api.routes import dashboard
+    from app.services import dial_pump
+
+    assert '"name": target.name' in inspect.getsource(dashboard.dial_campaign)
+    assert "remember_customer_name(call_sid, contact.name)" in inspect.getsource(dial_pump._place)
+
+
+def test_queueing_the_same_list_twice_does_not_reset_anybody():
+    """An operator unsure whether the first paste worked will paste again. Somebody already
+    called must not go back to PENDING and be dialled a second time."""
+    from app.api.routes import dashboard
+
+    src = inspect.getsource(dashboard.dial_campaign)
+    assert "on_conflict_do_nothing(constraint=\"uq_contacts_campaign_phone\")" in src
+
+
+def test_the_dashboard_dial_honours_the_do_not_call_list():
+    """The lookup has to be against the numbers being queued. A grep for the column name
+    passes just as well when the predicate is `where(False)`, which suppresses nobody."""
+    import ast
+
+    from app.api.routes import dashboard
+
+    src = inspect.getsource(dashboard.dial_campaign)
+    assert "ContactStatus.DND" in src
+    tree = ast.parse(src.lstrip())
+    lookups = [
+        ast.unparse(n)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", None) == "where"
+        and "Suppression.phone_number" in ast.unparse(n)
+    ]
+    assert lookups, "the do-not-call list is never queried"
+    assert any("in_(numbers)" in q for q in lookups), (
+        f"the lookup does not test the numbers being queued: {lookups}"
     )
 
 

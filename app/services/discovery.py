@@ -11,10 +11,27 @@ _redis_client = None
 _l1_project_cache = {}  # In-memory L1 cache: campaign_id -> (timestamp, project_dict)
 L1_CACHE_TTL = 300  # 5 minutes in-memory TTL
 
+# Redis runs as a container on the same host, so a healthy round trip is sub-millisecond and
+# anything slower than a second or two is not slow, it is down. Left at redis-py's default of
+# no timeout, an unreachable Redis waits on the OS TCP timeout instead — measured at 23
+# seconds. That is now on the path that opens a live call: the carrier slot check, the dialled
+# number, the lead's name. Twenty-three seconds of that is a prospect listening to silence
+# while a container restarts, and it happens on every call until Redis is back.
+_REDIS_TIMEOUT_SECONDS = 2.0
+
+
 async def get_redis_client():
     global _redis_client
     if not _redis_client:
-        _redis_client = redis.from_url(settings.REDIS_URL)
+        _redis_client = redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=_REDIS_TIMEOUT_SECONDS,
+            socket_timeout=_REDIS_TIMEOUT_SECONDS,
+            # The client is long-lived and mostly idle between calls. Without this it hands
+            # out a connection the server closed hours ago and the first command fails.
+            health_check_interval=30,
+            retry_on_timeout=True,
+        )
     return _redis_client
 
 async def discover_projects(db: AsyncSession, filters: ProjectFilterParams):

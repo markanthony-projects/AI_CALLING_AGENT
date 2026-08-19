@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes.webhook import router as webhook_router
 from app.api.routes.campaign import router as campaign_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.contacts import router as contacts_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.core.config import settings
 from sqlalchemy import text
@@ -169,7 +170,11 @@ if settings.dashboard_cors_origins:
         CORSMiddleware,
         allow_origins=settings.dashboard_cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        # DELETE is here for a reason: removing an import batch, a campaign and a
+        # do-not-call entry are all DELETE, and the dashboard is served cross-origin. Leaving
+        # it out makes those three fail at the preflight with a CORS error that looks like an
+        # auth problem.
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type"],
         max_age=600,
     )
@@ -183,6 +188,9 @@ app.include_router(webhook_router)
 app.include_router(campaign_router)
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+# Same prefix and session auth as the dashboard, kept apart because that module is the read
+# side and everything here writes. See app/api/routes/contacts.py.
+app.include_router(contacts_router)
 
 @app.get("/health")
 async def health_check():

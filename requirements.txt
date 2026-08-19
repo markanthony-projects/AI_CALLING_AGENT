@@ -20,3 +20,9 @@ redis==5.3.1
 hiredis==3.4.0
 
 openai==2.46.0
+
+# Lead lists arrive as spreadsheets. Read-only streaming mode is what keeps a 20,000-row
+# sheet off the heap. Present today only as a pipecat transitive dependency, which is not
+# something to rely on: the day pipecat drops it the contact import stops importing.
+openpyxl==3.1.5
+python-multipart==0.0.20

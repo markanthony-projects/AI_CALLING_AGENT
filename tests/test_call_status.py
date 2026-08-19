@@ -251,6 +251,36 @@ def handle_call_env(session_factory, monkeypatch):
         monkeypatch.setattr(webhook, "run_voice_agent", fake_agent)
         monkeypatch.setattr(webhook, "build_campaign_context", lambda p: "ctx")
         monkeypatch.setattr(webhook, "enqueue_extraction", fake_enqueue)
+
+        # The carrier slot is granted. These tests are about what status a finished session is
+        # recorded as; refusing the slot is tested in test_concurrency_cap.py. Without the
+        # stub they exercise the fail-closed path against a Redis that is not running, and
+        # every one of them reads as "the call was refused".
+        async def granted(call_sid):
+            return True
+
+        async def freed(call_sid):
+            return None
+
+        async def counted():
+            return 1
+
+        monkeypatch.setattr(webhook.call_slots, "acquire", granted)
+        monkeypatch.setattr(webhook.call_slots, "release", freed)
+        monkeypatch.setattr(webhook.call_slots, "active", counted)
+
+        # Redis carries the dialled number, the lead's name and the contact behind the dial.
+        # None of the three is what these tests are about, and each costs a socket timeout.
+        async def no_contact(call_sid):
+            return None
+
+        async def no_outcome(contact_id, status, **kwargs):
+            return None
+
+        monkeypatch.setattr(webhook, "recall_contact", no_contact)
+        monkeypatch.setattr(webhook, "recall_dialed_number", no_contact)
+        monkeypatch.setattr(webhook, "recall_customer_name", no_contact)
+        monkeypatch.setattr(webhook, "record_outcome", no_outcome)
         return call
 
     return _setup
@@ -285,8 +315,16 @@ async def test_missing_project_is_recorded_failed(handle_call_env):
     assert ws.closed_with == 1008
 
 
-async def test_active_call_counter_is_released_on_failure(handle_call_env):
+async def test_the_carrier_slot_is_released_on_failure(handle_call_env, monkeypatch):
+    """A slot that is not given back holds a third of the account's capacity until it ages
+    out. It was a per-process integer, which two api replicas could not agree on; the count
+    is in Redis now, and this pins that a crashing pipeline still releases it."""
+    released = []
+
+    async def record(call_sid):
+        released.append(call_sid)
+
     handle_call_env(agent_exc=RuntimeError("boom"))
-    before = webhook.ACTIVE_CALLS
+    monkeypatch.setattr(webhook.call_slots, "release", record)
     await webhook._handle_call(FakeWebSocket(), "c1", "sid", "vobiz")
-    assert webhook.ACTIVE_CALLS == before
+    assert released == ["sid"]

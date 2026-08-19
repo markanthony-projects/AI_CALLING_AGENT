@@ -1,4 +1,3 @@
-import re
 import uuid
 from typing import Annotated, List, Optional, Union
 
@@ -13,42 +12,11 @@ from app.core.security import issue_call_token, require_api_key
 from app.models.db import Campaign, Project
 from app.services.call_context import remember_customer_name, remember_dialed_number
 from app.services.dialer import trigger_vobiz_call
+from app.utils.phone import to_e164
 
 router = APIRouter(prefix="/api/v1/campaigns", tags=["campaigns"], dependencies=[Depends(require_api_key)])
 
 MAX_DIAL_BATCH = 500
-
-_E164 = re.compile(r"^\+[1-9]\d{7,14}$")
-_SEPARATORS = re.compile(r"[\s\-().]")
-
-
-def to_e164(raw: str) -> str:
-    """Accept the formats a lead list actually contains and return strict E.164.
-
-    Spreadsheets and CRM exports carry numbers as '98765 43210', '098765-43210' or
-    '91 9876543210'; dialing must not fail on punctuation the operator never chose.
-    """
-    cc = settings.DEFAULT_COUNTRY_CODE
-    cleaned = _SEPARATORS.sub("", raw.strip())
-
-    if cleaned.startswith("+"):
-        candidate = cleaned
-    else:
-        digits = cleaned.lstrip("0")  # national trunk prefix, or 00 international prefix
-        # A bare national number is 10 digits; only a longer one can already carry
-        # the country code. Guards against 10-digit mobiles that start with 91.
-        if len(digits) > 10 and digits.startswith(cc):
-            candidate = f"+{digits}"
-        else:
-            candidate = f"+{cc}{digits}"
-
-    if not _E164.match(candidate):
-        raise ValueError(
-            f"'{raw}' is not a dialable number. Use E.164 (+919876543210) "
-            f"or a local number that a +{cc} prefix completes."
-        )
-    return candidate
-
 
 PhoneNumber = Annotated[str, AfterValidator(to_e164)]
 

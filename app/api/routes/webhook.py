@@ -1,23 +1,24 @@
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request, Response, WebSocket, WebSocketDisconnect
 from loguru import logger
 from sqlalchemy import select
 
+from app.core import call_slots
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import issue_call_token, require_call_token, require_call_token_ws
 from app.models.db import Call, CallStatus, Transcript
 from app.services.agent import run_voice_agent
 from app.services.call_context import recall_customer_name, recall_dialed_number
+from app.services.dial_pump import recall_contact, record_outcome
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
 from app.utils.context_builder import build_campaign_context
 from app.utils.timeutils import utc_now
 
 router = APIRouter()
-
-ACTIVE_CALLS = 0
 
 _HANGUP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -89,21 +90,32 @@ async def browser_webhook(websocket: WebSocket, campaign_id: str, call_sid: str)
 
 
 async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, client_type: str) -> None:
-    global ACTIVE_CALLS
-
-    if ACTIVE_CALLS >= settings.MAX_CONCURRENT_CALLS:
-        logger.warning(
-            f"[{call_sid}] Concurrency limit reached "
-            f"(max {settings.MAX_CONCURRENT_CALLS}); rejecting call"
+    # The slot was taken before the dial, by the pump. Acquiring here is idempotent per
+    # call_sid, so this refreshes that reservation rather than consuming a second one — and it
+    # covers the paths that do not come from the pump: a manual dial, and the browser client.
+    #
+    # Refusing here is a last resort and no longer the main defence. It used to be the only
+    # check, and it sat after Vobiz had dialled, billed us and rung a real person, who then
+    # got the line closed on them with no Call row to show it. See app/core/call_slots.py.
+    if not await call_slots.acquire(call_sid):
+        logger.error(
+            f"[{call_sid}] At carrier capacity ({settings.MAX_CONCURRENT_CALLS}) with the "
+            f"call already connected — refusing the stream. The dial should not have been "
+            f"placed; check that it came through the pump."
         )
         await websocket.close(code=1013)
+        # Recorded rather than dropped silently. A billed call that nobody could serve is
+        # exactly the thing that was invisible before.
+        await _record_refused(campaign_id, call_sid)
         return
 
     await websocket.accept()
-    ACTIVE_CALLS += 1
     _STREAMING_CALLS.add(call_sid)
     started_at = utc_now()
-    logger.info(f"[{call_sid}] {client_type} stream open | campaign={campaign_id} | active={ACTIVE_CALLS}")
+    # Deliberately not reporting the in-flight count here. Reading it is another round trip
+    # to Redis on the path that opens a live call, and it was being spent on a log line. The
+    # count is on the dashboard, where somebody is actually looking at it.
+    logger.info(f"[{call_sid}] {client_type} stream open | campaign={campaign_id}")
 
     transcript = ""
     # Default to FAILED: any path that leaves this block without a clean voice session —
@@ -114,6 +126,7 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             db.add(Call(
                 campaign_id=campaign_id,
                 call_sid=call_sid,
+                contact_id=contact_uuid(await recall_contact(call_sid)),
                 phone_number=await recall_dialed_number(call_sid),
                 status=CallStatus.IN_PROGRESS,
                 started_at=started_at,
@@ -150,9 +163,58 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
     except Exception as e:
         logger.error(f"[{call_sid}] Error handling call: {e}")
     finally:
-        ACTIVE_CALLS -= 1
         _STREAMING_CALLS.discard(call_sid)
+        # Before the DB write, and before anything that can raise: this frees the carrier
+        # slot, and a slot that is not released blocks a third of the account's capacity
+        # until it ages out.
+        await call_slots.release(call_sid)
         await _finalize_call(call_sid, started_at, transcript, status)
+        # The queue entry, so a number that rang out becomes eligible for a retry and one
+        # that spoke to the agent is never dialled again. Kept out of _finalize_call because
+        # that function owns the call history, which is a separate record.
+        await record_outcome(
+            await recall_contact(call_sid), status, answered_words=len(transcript.split())
+        )
+
+
+def contact_uuid(raw):
+    """The contact id carried through Redis, as a UUID, or None.
+
+    Tolerant on purpose: this sits in the path that opens a live call, and a malformed value
+    must cost the link between a call and its queue entry, never the call itself.
+    """
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(str(raw))
+    except (ValueError, AttributeError, TypeError):
+        logger.warning(f"Ignoring an unusable contact id on a dial: {raw!r}")
+        return None
+
+
+async def _record_refused(campaign_id: str, call_sid: str) -> None:
+    """Write down a call that was billed and could not be served.
+
+    The old code returned before the Call row was created, so a caller who was dialled,
+    charged for and hung up on left no trace at all — which is why nobody knew it was
+    happening. Best effort: if this write fails there is nothing further to try.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(Call(
+                campaign_id=campaign_id,
+                call_sid=call_sid,
+                contact_id=contact_uuid(await recall_contact(call_sid)),
+                phone_number=await recall_dialed_number(call_sid),
+                status=CallStatus.FAILED,
+                started_at=utc_now(),
+                ended_at=utc_now(),
+                duration_seconds=0,
+            ))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"[{call_sid}] Could not record the refused call: {e}")
+    await record_outcome(await recall_contact(call_sid), CallStatus.FAILED)
 
 
 async def _finalize_call(
@@ -185,7 +247,7 @@ async def _finalize_call(
         return
 
     logger.info(
-        f"[{call_sid}] Call finalised | status={status.value} | duration={duration:.1f}s | active={ACTIVE_CALLS}"
+        f"[{call_sid}] Call finalised | status={status.value} | duration={duration:.1f}s"
     )
     # A failed session still yields a partial transcript worth extracting a lead from.
     # A voicemail does not: the transcript is somebody's outgoing greeting, and running it

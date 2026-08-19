@@ -1,4 +1,7 @@
-from sqlalchemy import Boolean, Column, String, Text, DateTime, Integer, Numeric, Enum, ForeignKey, text
+from sqlalchemy import (
+    Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text,
+    UniqueConstraint, text,
+)
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 import uuid
@@ -37,6 +40,53 @@ class CallStatus(str, enum.Enum):
     # someone else's outgoing message to the extractor as though it were a conversation.
     # Distinct from FAILED too — nothing went wrong, the person simply was not there.
     MACHINE = "MACHINE"
+
+class ContactStatus(str, enum.Enum):
+    """Where a number is in the dialling queue.
+
+    The contacts table IS the queue. Before it existed, numbers arrived in the body of a dial
+    request, were copied into Redis so the answer webhook could find them, and then existed
+    only as a phone_number on a Call row. Nothing could answer "who is left to call", nothing
+    could retry a number that did not answer, and re-uploading a list dialled everyone again.
+    """
+
+    # Waiting to be dialled. next_attempt_at decides when it becomes eligible.
+    PENDING = "PENDING"
+    # A slot has been taken and Vobiz has been asked to dial. Distinct from PENDING so the
+    # pump cannot hand the same number to two workers, and distinct from IN_PROGRESS on the
+    # Call because this is set before the carrier has connected anything.
+    DIALING = "DIALING"
+    # The conversation happened. Whether it produced a good lead is the Lead's business.
+    COMPLETED = "COMPLETED"
+    # Rang out, or a machine picked up. Eligible for retry until the attempts run out.
+    NO_ANSWER = "NO_ANSWER"
+    # The dial itself failed, or the pipeline broke. Also retried: the cause is usually ours.
+    FAILED = "FAILED"
+    # Retries are spent. A terminal state that is deliberately not FAILED — the difference
+    # between "we could not reach them" and "we stopped trying" is what an operator needs.
+    EXHAUSTED = "EXHAUSTED"
+    # They asked not to be called, or the number is on the suppression list. Never dialled
+    # again by anything, and never counted as a failure.
+    DND = "DND"
+    # The spreadsheet cell was not a phone number we can dial. Kept rather than dropped so
+    # the operator can see which rows did not make it and fix the source.
+    INVALID = "INVALID"
+    # Removed from the run by an operator without being a DND. Not dialled, not retried.
+    SKIPPED = "SKIPPED"
+
+
+# Statuses the pump will pick up again once next_attempt_at has passed.
+RETRIABLE_CONTACT_STATUSES = (ContactStatus.NO_ANSWER, ContactStatus.FAILED)
+
+# Statuses nothing will ever dial again.
+TERMINAL_CONTACT_STATUSES = (
+    ContactStatus.COMPLETED,
+    ContactStatus.EXHAUSTED,
+    ContactStatus.DND,
+    ContactStatus.INVALID,
+    ContactStatus.SKIPPED,
+)
+
 
 class DashboardRole(str, enum.Enum):
     # Sales works leads and reads calls. Only an admin may spend money by dialing or
@@ -111,6 +161,9 @@ class Campaign(Base):
     
     project = relationship("Project", back_populates="campaigns")
     calls = relationship("Call", back_populates="campaign")
+    contacts = relationship(
+        "Contact", back_populates="campaign", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 class Lead(Base):
     __tablename__ = "leads"
@@ -160,6 +213,11 @@ class Call(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id"), index=True, nullable=False)
     lead_id = Column(UUID(as_uuid=True), ForeignKey("leads.id"), nullable=True)
+    # Which queue entry produced this call. Nullable: calls placed by hand, and every call
+    # made before the queue existed, have no contact behind them.
+    contact_id = Column(
+        UUID(as_uuid=True), ForeignKey("contacts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     call_sid = Column(String, unique=True, index=True, nullable=False)
     # E.164 number actually dialled. Recorded here so a call can be traced to a person even
     # when extraction produces no lead.
@@ -174,6 +232,93 @@ class Call(Base):
     campaign = relationship("Campaign", back_populates="calls")
     lead = relationship("Lead", back_populates="calls")
     transcript = relationship("Transcript", back_populates="call", uselist=False)
+
+class Contact(Base):
+    """One number to dial on one campaign, and everything the queue needs to know about it.
+
+    Rows are created by a spreadsheet import and consumed by the dial pump in
+    app/worker.py, which takes only as many as the carrier has free slots for. That is the
+    whole reason this table exists: dialling used to fire every number in the request at
+    once, and the concurrency cap was checked after the money had already been spent.
+    """
+
+    __tablename__ = "contacts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id = Column(
+        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False
+    )
+    # E.164, normalised on import. Indexed on its own as well as in the composite below,
+    # because the suppression check and the "has this person been called before" question
+    # both look across campaigns.
+    phone_number = Column(String, nullable=False, index=True)
+    # From the spreadsheet. Optional: without it the agent asks for the name on the call.
+    name = Column(String)
+
+    status = Column(
+        Enum(ContactStatus),
+        default=ContactStatus.PENDING,
+        server_default=text("'PENDING'"),
+        nullable=False,
+    )
+    # Dials placed, not conversations had. Compared against MAX_DIAL_ATTEMPTS.
+    attempts = Column(Integer, default=0, server_default=text("0"), nullable=False)
+    last_attempt_at = Column(DateTime)
+    # When this becomes eligible again. Null means "as soon as the pump gets to it", which is
+    # what a fresh import wants; a retry sets it forward.
+    next_attempt_at = Column(DateTime)
+    # Why the last attempt ended the way it did, in words an operator can act on.
+    last_outcome = Column(String)
+
+    # Which spreadsheet row this came from. Kept so a rejected row can be found and fixed in
+    # the source file rather than hunted for by phone number.
+    source_row = Column(Integer)
+    # Groups everything from one upload, so a mistaken import can be found and undone.
+    import_batch_id = Column(UUID(as_uuid=True), index=True)
+
+    created_at = Column(
+        DateTime, default=utc_now, server_default=text("(now() at time zone 'utc')"),
+        nullable=False,
+    )
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    campaign = relationship("Campaign", back_populates="contacts")
+
+    __table_args__ = (
+        # One number appears once per campaign. Re-uploading the same sheet must not dial
+        # everybody a second time, and this is what makes the import idempotent.
+        UniqueConstraint("campaign_id", "phone_number", name="uq_contacts_campaign_phone"),
+        # The pump's query: eligible contacts for a campaign, soonest first. Composite
+        # because it filters on both and orders on the third; three separate indexes would
+        # leave the sort to a heap scan on a table that grows with every lead list.
+        Index("ix_contacts_pump", "campaign_id", "status", "next_attempt_at"),
+    )
+
+
+class Suppression(Base):
+    """A number that must never be dialled again, by any campaign.
+
+    Separate from ContactStatus.DND because it has to outlive the campaign that learned it.
+    Someone who says "don't call me" has told the company, not one lead list, and the next
+    project's import must not undo that. It is also the only record that would answer a
+    regulator asking whether the request was honoured.
+    """
+
+    __tablename__ = "suppressions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Unique, so adding the same number twice is a no-op rather than a duplicate to reconcile.
+    phone_number = Column(String, nullable=False, unique=True, index=True)
+    # Free text: "asked not to be called", "wrong number", "employee". Read by a human who is
+    # deciding whether an entry was a mistake.
+    reason = Column(String)
+    # Who added it. An empty value means the agent recorded it from the call itself.
+    added_by = Column(String)
+    created_at = Column(
+        DateTime, default=utc_now, server_default=text("(now() at time zone 'utc')"),
+        nullable=False, index=True,
+    )
+
 
 class Transcript(Base):
     __tablename__ = "transcripts"
