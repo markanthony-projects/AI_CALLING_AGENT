@@ -95,7 +95,7 @@ def _eligible_sql() -> str:
     from sqlalchemy.dialects import postgresql
 
     return str(
-        dial_pump._eligible(utc_now()).compile(
+        dial_pump.eligible(utc_now()).compile(
             dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
         )
     )
@@ -311,3 +311,74 @@ def test_a_live_call_is_never_reclaimed():
 
     default = inspect.signature(dial_pump.release_stale_dialing).parameters["older_than"].default
     assert default.total_seconds() > MAX_CALL_DURATION_SECS
+
+
+# --- what the operator is told will happen ---------------------------------------------
+#
+# Queueing a number that is already on the campaign inserts nothing and changes nothing. The
+# endpoint reported only how many rows it wrote, so a paste of one number that had already
+# spoken to the agent answered "queued" and placed no call — indistinguishable from a broken
+# dialer, and the reason a dial from the dashboard went out to nobody.
+
+
+def _verdicts(*pairs):
+    """Rows as the database returns them: (status, eligible-evaluated-for-that-row)."""
+    return list(pairs)
+
+
+def test_a_fresh_contact_is_reported_as_going_out():
+    will_dial, held_back = dial_pump.dial_forecast(_verdicts((ContactStatus.PENDING, True)))
+    assert will_dial == 1
+    assert held_back == {}
+
+
+def test_a_contact_that_already_spoke_is_not_reported_as_going_out():
+    """The case that sent a dial nowhere. Counting the row would repeat the original lie."""
+    will_dial, held_back = dial_pump.dial_forecast(_verdicts((ContactStatus.COMPLETED, False)))
+    assert will_dial == 0
+    assert held_back == {ContactStatus.COMPLETED.value: 1}
+
+
+@pytest.mark.parametrize("status", TERMINAL_CONTACT_STATUSES)
+def test_no_terminal_status_is_ever_reported_as_going_out(status):
+    will_dial, _ = dial_pump.dial_forecast(_verdicts((status, False)))
+    assert will_dial == 0
+
+
+def test_the_reason_names_the_status_so_the_operator_can_act_on_it():
+    """"1 will not be dialled" is not actionable; "1 already spoke with the agent" is — it
+    points at the row to select and retry."""
+    _, held_back = dial_pump.dial_forecast(
+        _verdicts((ContactStatus.EXHAUSTED, False), (ContactStatus.DND, False))
+    )
+    assert held_back == {ContactStatus.EXHAUSTED.value: 1, ContactStatus.DND.value: 1}
+
+
+def test_held_back_counts_repeats_rather_than_collapsing_them():
+    _, held_back = dial_pump.dial_forecast(
+        _verdicts((ContactStatus.COMPLETED, False), (ContactStatus.COMPLETED, False))
+    )
+    assert held_back == {ContactStatus.COMPLETED.value: 2}
+
+
+def test_a_mixed_paste_reports_both_halves():
+    will_dial, held_back = dial_pump.dial_forecast(
+        _verdicts(
+            (ContactStatus.PENDING, True),
+            (ContactStatus.NO_ANSWER, True),
+            (ContactStatus.COMPLETED, False),
+        )
+    )
+    assert (will_dial, held_back) == (2, {ContactStatus.COMPLETED.value: 1})
+
+
+def test_an_unjudgeable_row_is_held_back_rather_than_assumed_dialable():
+    """A NULL from the database means the predicate could not decide. Counting it as going
+    out would restore exactly the silence this replaces."""
+    will_dial, held_back = dial_pump.dial_forecast(_verdicts((ContactStatus.PENDING, None)))
+    assert will_dial == 0
+    assert held_back == {ContactStatus.PENDING.value: 1}
+
+
+def test_queueing_nothing_promises_nothing():
+    assert dial_pump.dial_forecast([]) == (0, {})

@@ -27,8 +27,9 @@ should dial in the morning, not be rejected.
 """
 
 import uuid
+from collections import Counter
 from datetime import timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from loguru import logger
 from sqlalchemy import and_, func, or_, select, update
@@ -71,7 +72,7 @@ def next_attempt_after(attempts: int, now=None) -> Optional[object]:
     return (now or utc_now()) + gap
 
 
-def _eligible(now) -> object:
+def eligible(now) -> object:
     """The SQL condition for a contact the pump may dial right now."""
     return and_(
         or_(
@@ -82,6 +83,26 @@ def _eligible(now) -> object:
         or_(Contact.next_attempt_at.is_(None), Contact.next_attempt_at <= now),
         Contact.attempts < MAX_DIAL_ATTEMPTS,
     )
+
+
+def dial_forecast(verdicts: Sequence[Tuple[ContactStatus, object]]) -> Tuple[int, Dict[str, int]]:
+    """How many of these contacts the pump will call, and why it will not call the rest.
+
+    Takes rows of (status, dialable) where dialable is `eligible()` evaluated by the database
+    for that row, so this cannot disagree with what the pump selects.
+
+    It exists because adding a contact and queueing a call are different things, and from
+    outside they look identical. A number that has already spoken to the agent, or used up
+    its attempts, or been marked do-not-call, keeps that status when it is queued again — the
+    insert conflicts, nothing changes, and no call is ever placed. An operator reading
+    "queued" cannot tell that apart from a dialer that has stopped working.
+
+    Anything the database could not judge counts as held back rather than dialable. Guessing
+    the optimistic way here would restore the exact silence this replaces.
+    """
+    will_dial = sum(1 for _, dialable in verdicts if dialable)
+    held_back = Counter(status.value for status, dialable in verdicts if not dialable)
+    return will_dial, dict(held_back)
 
 
 async def claim(db: AsyncSession, campaign_id, limit: int, now) -> List[Contact]:
@@ -101,7 +122,7 @@ async def claim(db: AsyncSession, campaign_id, limit: int, now) -> List[Contact]
     rows = (
         await db.execute(
             select(Contact)
-            .where(Contact.campaign_id == campaign_id, _eligible(now))
+            .where(Contact.campaign_id == campaign_id, eligible(now))
             # Oldest first, so a list is worked in the order it was uploaded and a retry does
             # not jump the queue ahead of numbers never tried at all.
             .order_by(Contact.next_attempt_at.asc().nullsfirst(), Contact.created_at.asc())
@@ -143,7 +164,7 @@ async def active_campaign_ids(db: AsyncSession) -> List[uuid.UUID]:
     rows = await db.execute(
         select(Campaign.id, remaining)
         .join(Contact, Contact.campaign_id == Campaign.id)
-        .where(Campaign.status == CampaignStatus.ACTIVE, _eligible(now))
+        .where(Campaign.status == CampaignStatus.ACTIVE, eligible(now))
         .group_by(Campaign.id)
         .order_by(remaining.asc())
     )

@@ -47,6 +47,7 @@ from app.models.db import (
     Suppression,
     Transcript,
 )
+from app.services.dial_pump import dial_forecast, eligible
 from app.services.discovery import invalidate_project_cache
 from app.utils.timeutils import to_ist, utc_now
 
@@ -961,7 +962,7 @@ async def dial_campaign(
         .all()
     )
 
-    rows = [
+    contacts = [
         {
             "id": uuid.uuid4(),
             "campaign_id": campaign_id,
@@ -974,11 +975,11 @@ async def dial_campaign(
     ]
     # A number already on this campaign's queue keeps whatever state it has. Pasting a list
     # twice must not reset somebody who has already been called back to PENDING.
-    queued = len(
+    added = len(
         (
             await db.execute(
                 pg_insert(Contact)
-                .values(rows)
+                .values(contacts)
                 .on_conflict_do_nothing(constraint="uq_contacts_campaign_phone")
                 .returning(Contact.id)
             )
@@ -988,16 +989,39 @@ async def dial_campaign(
     )
     await db.commit()
 
+    # Writing a row is not the same as queueing a call, and the difference is invisible from
+    # here. A number that has already spoken to the agent, or used up its attempts, or been
+    # marked do-not-call, keeps that status — the insert conflicts and does nothing, and the
+    # pump will never pick it up. Reporting only what was inserted let this endpoint answer
+    # "queued" for a list that would place no calls at all, which is precisely the case an
+    # operator cannot tell apart from a broken dialer.
+    #
+    # Asked with the pump's own predicate rather than a copy of it, so the two cannot drift
+    # into disagreeing about whether a number is going to be called.
+    verdicts = (
+        await db.execute(
+            select(Contact.status, eligible(utc_now()).label("dialable")).where(
+                Contact.campaign_id == campaign_id, Contact.phone_number.in_(numbers)
+            )
+        )
+    ).all()
+    will_dial, held_back = dial_forecast(verdicts)
+
     logger.info(
-        f"{claims.email} queued {queued} number(s) on campaign {campaign_id} "
-        f"({len(rows) - queued} already queued, {len(blocked)} suppressed)"
+        f"{claims.email} queued {added} number(s) on campaign {campaign_id} "
+        f"({len(contacts) - added} already queued, {len(blocked)} suppressed); "
+        f"{will_dial} of {len(contacts)} will be dialled"
+        + (f", held back: {held_back}" if held_back else "")
     )
     return {
         "status": "queued",
-        "queued": queued,
-        "already_queued": len(rows) - queued,
+        "queued": added,
+        "already_queued": len(contacts) - added,
         "suppressed": len(blocked),
-        "total_numbers": len(rows),
+        "total_numbers": len(contacts),
+        # The two fields worth reading. will_dial is how many calls this actually causes.
+        "will_dial": will_dial,
+        "held_back": held_back,
     }
 
 
