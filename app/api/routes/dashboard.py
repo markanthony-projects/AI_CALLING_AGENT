@@ -24,7 +24,7 @@ from typing import Any, Generic, List, Literal, Optional, TypeVar
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
 from pydantic import BaseModel, Field, computed_field
-from sqlalchemy import Select, case, cast, func, or_, select, text
+from sqlalchemy import Select, case, cast, delete, func, or_, select, text
 from sqlalchemy import String as SAString
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1110,3 +1110,112 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
             campaigns=campaigns,
         )
     )
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    city: str = Field(min_length=1, max_length=100)
+    locality: str = Field(min_length=1, max_length=100)
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    possession_status: Optional[str] = Field(default=None, max_length=200)
+    rera_id: Optional[str] = Field(default=None, max_length=100)
+    amenities: List[str] = Field(default_factory=list)
+    usps: List[str] = Field(default_factory=list)
+    config_json: Optional[List[Any]] = None
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    city: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    locality: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    possession_status: Optional[str] = Field(default=None, max_length=200)
+    rera_id: Optional[str] = Field(default=None, max_length=100)
+    amenities: Optional[List[str]] = None
+    usps: Optional[List[str]] = None
+    config_json: Optional[List[Any]] = None
+
+
+@router.post("/projects", response_model=ProjectSummary, dependencies=[Depends(require_admin)])
+async def create_project(req: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    project = Project(
+        name=req.name,
+        city=req.city,
+        locality=req.locality,
+        min_price=req.min_price,
+        max_price=req.max_price,
+        possession_status=req.possession_status,
+        rera_id=req.rera_id,
+        amenities=req.amenities or [],
+        usps=req.usps or [],
+        config_json=req.config_json,
+    )
+    db.add(project)
+    await db.commit()
+    await db.refresh(project)
+    return _project_from_row(SimpleNamespace(
+        id=project.id, name=project.name, city=project.city, locality=project.locality,
+        min_price=project.min_price, max_price=project.max_price,
+        possession_status=project.possession_status, rera_id=project.rera_id,
+        amenities=project.amenities, usps=project.usps, config_json=project.config_json,
+        campaigns=0,
+    ))
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectSummary, dependencies=[Depends(require_admin)])
+async def update_project(project_id: uuid.UUID, req: ProjectUpdate, db: AsyncSession = Depends(get_db)):
+    project = await db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    for field, value in req.model_dump(exclude_unset=True).items():
+        setattr(project, field, value)
+
+    await db.commit()
+    await invalidate_project_cache(str(project_id))
+    return await get_project(project_id, db)
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    project = await db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    campaign_count = await db.scalar(
+        select(func.count(Campaign.id)).where(Campaign.project_id == project_id)
+    )
+    if campaign_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project has {campaign_count} campaign(s); delete or reassign them first",
+        )
+
+    await db.execute(delete(Project).where(Project.id == project_id))
+    await db.commit()
+    await invalidate_project_cache(str(project_id))
+
+
+# --- Campaign delete ------------------------------------------------------------------
+
+
+@router.delete("/campaigns/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+async def delete_campaign(campaign_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+    call_count = await db.scalar(
+        select(func.count(Call.id)).where(Call.campaign_id == campaign_id)
+    )
+    if call_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Campaign has {call_count} call record(s); archive it instead of deleting",
+        )
+
+    await db.execute(delete(Campaign).where(Campaign.id == campaign_id))
+    await db.commit()
+    await invalidate_project_cache(str(campaign_id))
