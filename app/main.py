@@ -19,6 +19,71 @@ import os
 import logging
 import mimetypes
 import re
+import sys
+
+# ---------------------------------------------------------------------------
+# Logging: quiet by default, verbose for call-critical paths only.
+#
+# The default loguru sink emits everything at DEBUG, which means SQLAlchemy
+# query plans, arq heartbeats, pipecat audio pipeline frames, and uvicorn
+# access lines for every dashboard poll all land in the same stream as the
+# one line that matters when a call fails.
+#
+# Policy:
+#   WARNING+  always visible (errors, unexpected states, stale-slot reaping)
+#   INFO      only for the modules that narrate a call end-to-end
+#   DEBUG     never on a running server (set LOG_LEVEL=DEBUG locally only)
+# ---------------------------------------------------------------------------
+
+_CALL_MODULES = {
+    "app.services.agent",
+    "app.services.dial_pump",
+    "app.services.dialer",
+    "app.services.extraction",
+    "app.services.stale_calls",
+    "app.api.routes.webhook",
+    "app.worker",
+}
+
+
+def _log_filter(record: dict) -> bool:
+    """Let WARNING+ through always; INFO only for call-path modules."""
+    if record["level"].no >= 30:  # WARNING = 30
+        return True
+    if record["level"].no >= 20:  # INFO = 20
+        return record["name"] in _CALL_MODULES
+    return False
+
+
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logger.remove()  # drop the default stderr sink
+logger.add(
+    sys.stderr,
+    level=_LOG_LEVEL,
+    filter=_log_filter,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan> - <level>{message}</level>",
+    colorize=False,
+    enqueue=True,
+)
+
+# Silence third-party loggers that flood the stream with internal state.
+for _noisy in (
+    "sqlalchemy.engine",
+    "sqlalchemy.pool",
+    "arq.worker",
+    "arq.connections",
+    "pipecat",
+    "httpx",
+    "httpcore",
+    "asyncio",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+# Pipecat also emits its startup banner through loguru directly. Intercept it by
+# temporarily raising the loguru level before pipecat imports, then restoring it.
+# Since pipecat is already imported by the time main.py loads (it's imported by
+# agent.py which is imported by webhook.py), suppress its logger name instead.
+# The filter above (_CALL_MODULES) already handles this — pipecat is not in the set.
 
 # Fix Windows registry MIME type issues for Javascript Worklets
 mimetypes.add_type("application/javascript", ".js")
@@ -82,20 +147,7 @@ class DropRoutinePollingFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(DropRoutinePollingFilter())
 
 
-class ASGILoggingMiddleware:
-    # /health is probed by Docker every 30 seconds; logging it buries real traffic. The
-    # dashboard's live panel polls harder still — every open tab asks every 5 seconds, and
-    # at two lines a request that is tens of thousands of lines a day. A 40-minute log
-    # capture of one real call was already mostly this.
-    _QUIET_PATHS = frozenset({"/health", "/api/v1/dashboard/live"})
 
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] in ("http", "websocket") and scope.get("path") not in self._QUIET_PATHS:
-            logger.info(f"ASGI Request: {scope['type']} {scope.get('path')}")
-        await self.app(scope, receive, send)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -152,6 +204,10 @@ async def lifespan(app: FastAPI):
         pass
     logger.info("Application shutdown complete.")
 
+# Route uvicorn's own stdlib logger through the same loguru filter so access
+# lines from dashboard polls don't appear even when uvicorn emits them.
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 app = FastAPI(
     title="Indian Real Estate Sales Voice Agent",
     lifespan=lifespan,
@@ -159,7 +215,6 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DOCS_ENABLED else None,
     openapi_url="/openapi.json" if settings.DOCS_ENABLED else None,
 )
-app.add_middleware(ASGILoggingMiddleware)
 
 # Only when the dashboard is served from its own origin. Same-origin deployments — nginx
 # serving the SPA and proxying /api on one host — need no CORS at all, and adding it there

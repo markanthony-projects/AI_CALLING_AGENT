@@ -1,4 +1,7 @@
 import json
+import logging
+import os
+import sys
 from datetime import datetime
 from typing import Optional
 
@@ -15,6 +18,38 @@ from app.models.schemas import LeadExtraction
 from app.services.dial_pump import dial_due_contacts, release_stale_dialing
 from app.utils.attribution import budget_is_grounded, phrase_is_grounded
 from app.utils.timeutils import is_within_business_hours, resolve_appointment, to_ist, utc_now
+
+_CALL_MODULES = {
+    "app.services.agent",
+    "app.services.dial_pump",
+    "app.services.dialer",
+    "app.services.extraction",
+    "app.services.stale_calls",
+    "app.api.routes.webhook",
+    "app.worker",
+}
+
+
+def _log_filter(record: dict) -> bool:
+    if record["level"].no >= 30:
+        return True
+    if record["level"].no >= 20:
+        return record["name"] in _CALL_MODULES
+    return False
+
+
+logger.remove()
+logger.add(
+    sys.stderr,
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    filter=_log_filter,
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name} - {message}",
+    colorize=False,
+    enqueue=True,
+)
+
+for _noisy in ("sqlalchemy.engine", "sqlalchemy.pool", "arq.worker", "arq.connections", "httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 EXTRACTION_MODEL = "gpt-4o-mini"
 
