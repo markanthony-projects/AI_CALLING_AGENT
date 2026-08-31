@@ -27,9 +27,13 @@ Postgres does **not** run on the droplet — it is your managed cluster. Redis *
 the droplet, as a container. Redis is not only a cache: the job queue lives in it, and the
 API and worker are separate processes that cannot pass work to each other any other way.
 
-**Capacity:** configured for **4 concurrent calls**, which suits 2 vCPU. Each call runs voice
-activity detection and audio resampling on the CPU — roughly two calls per vCPU before audio
-begins to break up.
+**Capacity:** **3 concurrent calls**. Two limits meet here and the lower one wins. The CPU
+allows about four — each call runs voice activity detection and audio resampling, roughly two
+calls per vCPU before audio breaks up — but the Vobiz account permits three simultaneous
+calls, so three is the ceiling. It also leaves CPU for the API, Redis, the worker and nginx.
+
+Raising `MAX_CONCURRENT_CALLS` above the carrier's limit does not buy throughput: the extra
+dials are placed, billed, and refused by Vobiz.
 
 ---
 
@@ -57,7 +61,7 @@ DigitalOcean console → **Create → Droplets**
 |---|---|---|
 | Region | **Bangalore (BLR1)** | same region as your database |
 | OS | **Ubuntu 24.04 LTS x64** | long-term support |
-| Type | **Regular**, 2 vCPU / 4 GB | matches 4 concurrent calls |
+| Type | **Regular**, 2 vCPU / 4 GB | carries 3 concurrent calls with headroom |
 | Authentication | **Password** | see below |
 | Hostname | `homebble-voice-prod` | so you can identify it later |
 | Monitoring | enable | free |
@@ -447,7 +451,7 @@ VOBIZ_PHONE_NUMBER=<your number>
 WEBHOOK_BASE_URL=https://ai-calls.homebble.in
 
 # ---- Capacity and spend limits ----
-MAX_CONCURRENT_CALLS=4
+MAX_CONCURRENT_CALLS=3
 DIAL_MAX_PER_MINUTE=30
 DIAL_MAX_PER_DAY=500
 
@@ -849,12 +853,20 @@ calls never produce a lead. Plain `down` without `-v` is safe.
 
 ### Raising capacity later
 
-If you resize the droplet, update the cap to match — roughly two calls per vCPU:
+Two things have to move together, and the carrier is usually the binding one. Raise the Vobiz
+concurrent-call limit first; without that, a higher cap here only places calls the carrier
+will refuse — after billing the attempt.
+
+Then resize the droplet to match, at roughly two calls per vCPU, and update the cap:
 
 ```bash
-sed -i 's/^MAX_CONCURRENT_CALLS=.*/MAX_CONCURRENT_CALLS=8/' .env
-docker compose -f docker-compose.prod.yml up -d api
+sed -i 's/^MAX_CONCURRENT_CALLS=.*/MAX_CONCURRENT_CALLS=<new limit>/' .env
+docker compose -f docker-compose.prod.yml up -d --force-recreate api worker
 ```
+
+Both containers, because the dial pump in the worker is what reserves slots, and
+`--force-recreate` because `env_file` is read when a container is created — a plain `up -d`
+can report "up to date" and leave the old value running.
 
 Setting it higher than the host can carry degrades every call in progress instead of
 rejecting the extra one.

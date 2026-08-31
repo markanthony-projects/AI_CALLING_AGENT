@@ -121,3 +121,19 @@ def test_middleware_is_quiet_for_the_same_paths(path):
 )
 def test_middleware_still_logs_everything_else(path):
     assert path not in ASGILoggingMiddleware._QUIET_PATHS
+
+
+# --- attached, not merely defined -------------------------------------------------------
+
+
+def test_the_middleware_is_actually_attached():
+    """The gap that let it disappear. Every test above asserts on the class, and the class
+    kept existing while nothing installed it — so the ASGI request lines the deployment guide
+    and every debugging session rely on were simply gone, with a green file to say otherwise.
+
+    It was then removed outright in 7f736e9 and the imports here took the whole suite down at
+    collection, which is the only reason anybody noticed.
+    """
+    from app.main import app
+
+    assert any(m.cls is ASGILoggingMiddleware for m in app.user_middleware)

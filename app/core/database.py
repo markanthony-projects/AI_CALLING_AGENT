@@ -3,7 +3,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import declarative_base
 from app.core.config import settings
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=False,
+    # See DB_POOL_SIZE in app/core/config.py for why these are set rather than left to the
+    # default. The short version: two processes, one managed cluster, and a connection that
+    # dies while idle is only discovered by the request that needs it — which on this service
+    # is a live call trying to write its own row.
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_pre_ping=True,
+    pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
+)
 AsyncSessionLocal = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )

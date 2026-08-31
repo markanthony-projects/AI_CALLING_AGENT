@@ -112,6 +112,16 @@ class RedactCallTokenFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(RedactCallTokenFilter())
 
 
+# The two endpoints nothing ever reads back. Docker probes /health every 30s and every open
+# dashboard tab asks /dashboard/live every 5s; together that is tens of thousands of lines a
+# day. Named once so the access-log filter below and the ASGI middleware further down cannot
+# drift into silencing different things — each request costs one line from each of them, and
+# quieting only one halves the noise while leaving the log just as unreadable.
+HEALTH_PATH = "/health"
+LIVE_PATH = "/api/v1/dashboard/live"
+QUIET_PATHS = frozenset({HEALTH_PATH, LIVE_PATH})
+
+
 class DropRoutinePollingFilter(logging.Filter):
     """Keep the two endpoints nothing ever reads out of the access log.
 
@@ -134,11 +144,11 @@ class DropRoutinePollingFilter(logging.Filter):
         if not isinstance(client, str) or not isinstance(path, str):
             return True
 
-        if client.startswith("127.0.0.1") and path.startswith("/health"):
+        if client.startswith("127.0.0.1") and path.startswith(HEALTH_PATH):
             return False
 
         status = args[4] if len(args) >= 5 else None
-        if path.startswith("/api/v1/dashboard/live") and status == 200:
+        if path.startswith(LIVE_PATH) and status == 200:
             return False
 
         return True
@@ -147,6 +157,34 @@ class DropRoutinePollingFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(DropRoutinePollingFilter())
 
 
+
+
+class ASGILoggingMiddleware:
+    """One line per request, before anything else has a chance to fail.
+
+    Uvicorn's own access log is written when a response is finished, so a request that hangs,
+    disconnects, or dies inside a handler leaves no trace of having arrived. This runs first
+    and records the arrival, which is what makes a call that went nowhere visible at all.
+
+    Removed in 7f736e9 along with the ASGI request lines the deployment guide and every
+    debugging session rely on, while tests/test_log_noise.py kept asserting against it — which
+    took the whole suite down at collection and left CI red.
+
+    The filter above drops the same two endpoints from uvicorn's log, but only conditionally:
+    /health from loopback, /dashboard/live only when it returned 200. This one is
+    unconditional, because a line recording arrival has nothing interesting to say about a
+    poll that failed — uvicorn's own line covers that.
+    """
+
+    _QUIET_PATHS = QUIET_PATHS
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and scope.get("path") not in self._QUIET_PATHS:
+            logger.info(f"ASGI Request: {scope['type']} {scope.get('path')}")
+        await self.app(scope, receive, send)
 
 
 @asynccontextmanager
@@ -215,6 +253,7 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DOCS_ENABLED else None,
     openapi_url="/openapi.json" if settings.DOCS_ENABLED else None,
 )
+app.add_middleware(ASGILoggingMiddleware)
 
 # Only when the dashboard is served from its own origin. Same-origin deployments — nginx
 # serving the SPA and proxying /api on one host — need no CORS at all, and adding it there

@@ -296,13 +296,21 @@ def test_the_last_attempt_exhausts_rather_than_looping():
 # --- stuck mid-dial -------------------------------------------------------------------
 
 
-def test_stuck_dials_are_returned_to_the_queue():
-    """A dial whose call never opened a websocket leaves its row DIALING for ever, and DIALING
-    is not eligible — so that number is silently never called again while the row looks busy
-    rather than broken."""
+def test_only_stuck_dials_are_swept():
+    """It selects on DIALING and on nothing else being that far past its last attempt. A
+    predicate that caught more would move contacts out from under a live call."""
     src = inspect.getsource(dial_pump.release_stale_dialing)
     assert "ContactStatus.DIALING" in src
-    assert "ContactStatus.NO_ANSWER" in src
+    assert "last_attempt_at < cutoff" in src
+
+
+def test_a_swept_dial_leaves_dialing():
+    """DIALING is not eligible, so a row left in it is never called again while looking busy
+    rather than broken. Asserted on the verdict rather than on the source text: the status
+    this produces is the thing that matters, and a grep passes for the wrong reasons."""
+    for attempts in range(0, MAX_DIAL_ATTEMPTS + 2):
+        status, _, _ = dial_pump.stale_dial_verdict(attempts)
+        assert status is not ContactStatus.DIALING
 
 
 def test_a_live_call_is_never_reclaimed():
@@ -382,3 +390,61 @@ def test_an_unjudgeable_row_is_held_back_rather_than_assumed_dialable():
 
 def test_queueing_nothing_promises_nothing():
     assert dial_pump.dial_forecast([]) == (0, {})
+
+
+# --- the dial that never connected -----------------------------------------------------
+#
+# This is the path a genuine ring-no-answer takes. A call nobody picks up never opens a media
+# stream, so it never reaches record_outcome; almost every no-answer in a campaign is
+# finalised by the stale-dial sweep instead. Two things were wrong with it, and both showed
+# up only on the outcome that happens most.
+
+
+def test_a_dial_that_never_connected_waits_the_same_gap_as_any_other_no_answer():
+    """It used to be made eligible immediately. Detection already costs twenty minutes plus
+    up to fifteen more, so the number that did not answer was redialled about half an hour
+    later — three times inside one morning, which is what the backoff exists to prevent."""
+    now = utc_now()
+    status, when, _ = dial_pump.stale_dial_verdict(1, now)
+    assert status is ContactStatus.NO_ANSWER
+    assert when == next_attempt_after(1, now)
+    assert when > now + timedelta(minutes=45)
+
+
+def test_the_gap_widens_for_a_second_failed_dial():
+    now = utc_now()
+    _, first, _ = dial_pump.stale_dial_verdict(1, now)
+    _, second, _ = dial_pump.stale_dial_verdict(2, now)
+    assert second > first
+
+
+def test_a_dial_with_no_attempts_left_is_exhausted():
+    """It used to write NO_ANSWER regardless. eligible() stops at the cap, so the contact was
+    never dialled again — but the dashboard showed it as still coming, for ever."""
+    status, when, _ = dial_pump.stale_dial_verdict(MAX_DIAL_ATTEMPTS)
+    assert status is ContactStatus.EXHAUSTED
+    assert when is None
+
+
+def test_the_two_finalising_paths_agree_on_the_end_state():
+    """record_outcome has always marked an out-of-attempts contact EXHAUSTED. Two paths
+    disagreeing about the same end state is how a queue starts lying about itself."""
+    status, _, _ = dial_pump.stale_dial_verdict(MAX_DIAL_ATTEMPTS)
+    assert status in TERMINAL_CONTACT_STATUSES
+
+
+def test_the_last_outcome_says_it_is_over_when_it_is_over():
+    """An operator reading 'the dial never connected' on a contact that will never be tried
+    again has no way to tell it apart from one still waiting its turn."""
+    _, _, still_going = dial_pump.stale_dial_verdict(1)
+    _, _, finished = dial_pump.stale_dial_verdict(MAX_DIAL_ATTEMPTS)
+    assert "no attempts left" not in still_going
+    assert "no attempts left" in finished
+
+
+def test_a_contact_somehow_at_zero_attempts_is_counted_as_having_had_one():
+    """claim() increments before dialling, so zero should be impossible here. If it happens,
+    treating it as a fresh contact would reset the retry budget and dial for ever."""
+    status, when, _ = dial_pump.stale_dial_verdict(0)
+    assert status is ContactStatus.NO_ANSWER
+    assert when is not None

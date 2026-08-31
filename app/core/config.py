@@ -150,6 +150,22 @@ class Settings(BaseSettings):
     # expecting better answers — the gate, not this timer, is what makes split turns safe.
     TURN_SETTLE_SECS: float = Field(default=0.4, gt=0)
 
+    # Postgres connections per process. Deliberately small and explicit: the default is
+    # unbounded overflow, and this deployment runs an api container and a worker container
+    # against one managed cluster whose connection limit is around twenty. Two processes each
+    # opening as many as they liked exhausted it, and the failure arrives as calls that
+    # cannot write their own rows rather than as anything named "too many connections".
+    #
+    # 5 + 5 is far more than three concurrent calls and a dashboard need, and leaves headroom
+    # for the migrate container and a psql session.
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=5, ge=0)
+    # Managed Postgres drops connections that have been idle, and a pooled connection that
+    # died in the background is indistinguishable from a live one until it is used — which
+    # here means mid-call. pre_ping costs a round trip per checkout and turns that into a
+    # transparent reconnect; recycle retires them before the server does.
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, gt=0)
+
     OPENAI_API_KEY: str
     SARVAM_API_KEY: str
     SARVAM_VOICE_ID: str = "simran"

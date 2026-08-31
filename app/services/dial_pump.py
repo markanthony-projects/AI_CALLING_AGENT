@@ -32,7 +32,7 @@ from datetime import timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from loguru import logger
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import call_slots
@@ -313,32 +313,73 @@ async def record_outcome(contact_id: Optional[str], call_status, *, answered_wor
         await db.commit()
 
 
+def stale_dial_verdict(attempts: int, now=None) -> Tuple[ContactStatus, Optional[object], str]:
+    """What a contact whose dial never connected becomes: status, next attempt, and why.
+
+    Separated from the query so it can be tested for the two things that were wrong with it,
+    neither of which a database is needed to show: that a ring-no-answer waits the same
+    widening gap as any other no-answer, and that one out of attempts ends as EXHAUSTED
+    rather than sitting at NO_ANSWER for ever, never dialled but shown as still coming.
+    """
+    when = next_attempt_after(attempts or 1, now)
+    if when is None:
+        return ContactStatus.EXHAUSTED, None, "the dial never connected; no attempts left"
+    return ContactStatus.NO_ANSWER, when, "the dial never connected"
+
+
 async def release_stale_dialing(older_than: timedelta = timedelta(minutes=20)) -> int:
-    """Return contacts stuck in DIALING to the queue.
+    """Move contacts stuck in DIALING out of it, on the same terms as any other no-answer.
 
-    A dial whose call never opened a websocket — the carrier dropped it, the number was
+    A dial whose call never opened a websocket — nobody picked up, the number was
     unreachable, the process died — leaves the row DIALING for ever, and DIALING is not
-    eligible, so that number is silently never called again. Nothing else notices: the row
-    looks busy rather than broken.
+    eligible, so that number is silently never called again while its row looks busy rather
+    than broken.
 
-    The threshold is well past the hard call duration cap, so a live call is never reclaimed.
+    Two things this used to get wrong, and both mattered because this is the path a genuine
+    ring-no-answer takes. A call nobody picks up never opens a media stream, so it does not
+    reach record_outcome at all; almost every no-answer in a campaign is finalised here.
+
+    It set next_attempt_at to now, making the contact eligible immediately. Detection already
+    takes twenty minutes plus up to fifteen more for this to run, so the widening backoff —
+    two hours, then a day — was replaced for the commonest outcome by a redial roughly half
+    an hour later. The number that did not answer got called back three times inside a
+    morning, which is the behaviour the backoff exists to prevent.
+
+    And it wrote NO_ANSWER regardless of how many attempts were left. A contact out of
+    attempts stayed NO_ANSWER for ever: never dialled again, because eligible() stops at the
+    cap, but shown on the dashboard as though it were still coming. record_outcome has always
+    marked that EXHAUSTED. Two paths disagreeing about the same end state is how a queue
+    starts lying about itself.
+
+    Row by row rather than one UPDATE because the next attempt depends on how many that
+    contact has already had. The volume here is whatever got stuck, which is small by
+    definition.
     """
     cutoff = utc_now() - older_than
+    exhausted = 0
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            update(Contact)
-            .where(Contact.status == ContactStatus.DIALING, Contact.last_attempt_at < cutoff)
-            .values(
-                status=ContactStatus.NO_ANSWER,
-                last_outcome="the dial never connected",
-                next_attempt_at=utc_now(),
+        rows = (
+            await db.execute(
+                select(Contact).where(
+                    Contact.status == ContactStatus.DIALING, Contact.last_attempt_at < cutoff
+                )
             )
-        )
+        ).scalars().all()
+
+        for contact in rows:
+            status, when, why = stale_dial_verdict(contact.attempts)
+            contact.status = status
+            contact.next_attempt_at = when
+            contact.last_outcome = why
+            exhausted += status is ContactStatus.EXHAUSTED
         await db.commit()
-    count = result.rowcount or 0
-    if count:
-        logger.warning(f"Returned {count} contact(s) stuck mid-dial to the queue")
-    return count
+
+    if rows:
+        logger.warning(
+            f"Returned {len(rows)} contact(s) stuck mid-dial to the queue"
+            + (f"; {exhausted} had no attempts left" if exhausted else "")
+        )
+    return len(rows)
 
 
 # --- carrying the contact id from the dial to the call --------------------------------
