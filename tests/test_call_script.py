@@ -326,9 +326,11 @@ def test_the_name_is_recorded_before_the_dial():
     trigger_vobiz_call would otherwise be enough to pass or fail this."""
     import ast
 
-    from app.api.routes import campaign
+    from app.services import dial_pump
 
-    tree = ast.parse(inspect.getsource(campaign.dial_campaign_vobiz).lstrip())
+    # The pump is the only thing that dials now. Both routes enqueue, so this ordering lives
+    # in the one place a number reaches Vobiz from.
+    tree = ast.parse(inspect.getsource(dial_pump._place).lstrip())
 
     def line_of(target: str) -> int:
         lines = [
@@ -345,14 +347,14 @@ def test_the_name_is_recorded_before_the_dial():
     )
 
 
-def test_the_api_dial_route_sends_the_number_not_the_whole_lead():
+def test_the_dialer_sends_the_number_not_the_whole_lead():
     """Passing the model through gave Redis 'Invalid input of type: DialTarget' and Vobiz a
-    JSON error. This route still dials directly; the dashboard one now queues."""
+    JSON error. Both routes now queue, so the only place this can go wrong is the pump."""
     import ast
 
-    from app.api.routes import campaign as campaign_route
+    from app.services import dial_pump
 
-    tree = ast.parse(inspect.getsource(campaign_route.dial_campaign_vobiz).lstrip())
+    tree = ast.parse(inspect.getsource(dial_pump._place).lstrip())
     passed = {
         ast.unparse(arg)
         for n in ast.walk(tree)
@@ -363,17 +365,17 @@ def test_the_api_dial_route_sends_the_number_not_the_whole_lead():
         )
         for arg in n.args
     }
-    assert "target.number" in passed, "must dial target.number, not the model"
-    assert "target" not in passed, "a DialTarget is not serialisable by redis or httpx"
+    assert "contact.phone_number" in passed, "must dial the number, not the row"
+    assert "contact" not in passed, "a Contact is not serialisable by redis or httpx"
 
 
 def test_the_dashboard_dial_queues_instead_of_calling():
     """It used to add one background task per number and let the concurrency cap be checked
     later, when each websocket opened — after the carrier had billed us and rung a real person.
     It now writes contacts and lets the pump place the calls a slot at a time."""
-    from app.api.routes import dashboard
+    from app.services import dial_queue
 
-    src = inspect.getsource(dashboard.dial_campaign)
+    src = inspect.getsource(dial_queue.enqueue)
     assert "trigger_vobiz_call" not in src, "the dashboard still dials without taking a slot"
     assert "Contact" in src and "on_conflict_do_nothing" in src
 
@@ -381,19 +383,19 @@ def test_the_dashboard_dial_queues_instead_of_calling():
 def test_the_queued_name_survives_to_the_call():
     """The greeting addresses the prospect by name, so the name has to travel with the number.
     On the queued path it is a column rather than a Redis key, and the pump reads it back."""
-    from app.api.routes import dashboard
+    from app.services import dial_queue
     from app.services import dial_pump
 
-    assert '"name": target.name' in inspect.getsource(dashboard.dial_campaign)
+    assert '"name": target.name' in inspect.getsource(dial_queue.enqueue)
     assert "remember_customer_name(call_sid, contact.name)" in inspect.getsource(dial_pump._place)
 
 
 def test_queueing_the_same_list_twice_does_not_reset_anybody():
     """An operator unsure whether the first paste worked will paste again. Somebody already
     called must not go back to PENDING and be dialled a second time."""
-    from app.api.routes import dashboard
+    from app.services import dial_queue
 
-    src = inspect.getsource(dashboard.dial_campaign)
+    src = inspect.getsource(dial_queue.enqueue)
     assert "on_conflict_do_nothing(constraint=\"uq_contacts_campaign_phone\")" in src
 
 
@@ -402,9 +404,9 @@ def test_the_dashboard_dial_honours_the_do_not_call_list():
     passes just as well when the predicate is `where(False)`, which suppresses nobody."""
     import ast
 
-    from app.api.routes import dashboard
+    from app.services import dial_queue
 
-    src = inspect.getsource(dashboard.dial_campaign)
+    src = inspect.getsource(dial_queue.enqueue)
     assert "ContactStatus.DND" in src
     tree = ast.parse(src.lstrip())
     lookups = [

@@ -1,17 +1,15 @@
 import uuid
 from typing import Annotated, List, Optional, Union
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import AfterValidator, BaseModel, BeforeValidator, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
 from app.core.config import settings
-from app.core.ratelimit import reserve_dial_quota, reserve_llm_headroom
+from app.services import dial_queue
 from app.core.security import issue_call_token, require_api_key
 from app.models.db import Campaign, Project
-from app.services.call_context import remember_customer_name, remember_dialed_number
-from app.services.dialer import trigger_vobiz_call
 from app.utils.phone import to_e164
 
 router = APIRouter(prefix="/api/v1/campaigns", tags=["campaigns"], dependencies=[Depends(require_api_key)])
@@ -72,34 +70,24 @@ async def create_campaign(req: CampaignCreate, db: AsyncSession = Depends(get_db
 async def dial_campaign_vobiz(
     campaign_id: uuid.UUID,
     req: DialRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    campaign = await db.get(Campaign, campaign_id)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+    """Add numbers to the campaign's dial queue, for callers holding the API key.
 
-    # Charged before anything is dialled: once trigger_vobiz_call runs the money is spent.
-    await reserve_dial_quota(len(req.phone_numbers))
-    # Money is already committed by the line above; this asks the separate question
-    # of whether the LLM can answer the greeting once the phone is picked up.
-    await reserve_llm_headroom()
+    This used to dial. It created one background task per number — up to five hundred — and
+    asked Vobiz to call every one at once. The concurrency cap was still enforced, but at the
+    media websocket, which opens only after the carrier has dialled, billed us and rung a
+    real person; everyone past the third slot was called, charged for, and hung up on with no
+    Call row to say it had happened. The dashboard route was rebuilt to fix exactly that, and
+    this door was left open behind it — with the deployment guide pointing operators at it.
 
-    call_sids = []
-    for target in req.phone_numbers:
-        call_sid = str(uuid.uuid4())
-        call_sids.append(call_sid)
-        # Recorded before dialling: the Call row is not written until the media stream
-        # opens, and by then this request is long gone. The name rides along the same way,
-        # so the agent can open with "Am I speaking with ...?".
-        await remember_dialed_number(call_sid, target.number)
-        await remember_customer_name(call_sid, target.name)
-        background_tasks.add_task(trigger_vobiz_call, target.number, str(campaign_id), call_sid)
-
-    campaign.total_leads_dialed = (campaign.total_leads_dialed or 0) + len(call_sids)
-    await db.commit()
-
-    return {"status": "dialing_started", "total_numbers": len(call_sids), "call_sids": call_sids}
+    It now enqueues through the same service the dashboard uses, so the carrier limit is
+    reserved before any number is dialled. The response no longer carries call_sids: no call
+    has been placed yet, and returning identifiers for calls that do not exist is what let
+    the old shape read as success.
+    """
+    report = await dial_queue.enqueue(db, campaign_id, req.phone_numbers, requested_by="api key")
+    return report.as_response()
 
 
 @router.post("/{campaign_id}/dial/browser")

@@ -490,12 +490,13 @@ def test_the_gate_can_be_turned_off(monkeypatch):
     asyncio.run(ratelimit.reserve_llm_headroom())  # must not raise
 
 
-@pytest.mark.parametrize("route", ["app/api/routes/campaign.py", "app/api/routes/dashboard.py"])
-def test_both_dial_routes_check_it(route):
-    from pathlib import Path
+def test_the_one_queueing_path_checks_it():
+    """Both routes used to carry their own copy of this check, and a copy is a thing that can
+    be forgotten. They now share one implementation, so the check has one home."""
+    from app.services import dial_queue
 
-    src = Path(route).read_text(encoding="utf-8")
-    assert "reserve_llm_headroom()" in src, f"{route} can dial into an empty token budget"
+    src = inspect.getsource(dial_queue.enqueue)
+    assert "reserve_llm_headroom()" in src, "numbers can be queued into an empty token budget"
 
 
 def test_the_watcher_publishes_what_the_dialer_reads():

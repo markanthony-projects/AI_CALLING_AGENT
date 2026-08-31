@@ -127,9 +127,10 @@ def test_dial_records_the_number_before_dialling():
     trigger_vobiz_call used to be enough to fail this."""
     import ast
 
-    from app.api.routes import campaign
+    from app.services import dial_pump
 
-    tree = ast.parse(inspect.getsource(campaign.dial_campaign_vobiz).lstrip())
+    # Both routes enqueue now; the pump is the only caller of trigger_vobiz_call.
+    tree = ast.parse(inspect.getsource(dial_pump._place).lstrip())
 
     def line_of(target: str) -> int:
         # trigger_vobiz_call is handed to add_task as a bare reference, never called here,

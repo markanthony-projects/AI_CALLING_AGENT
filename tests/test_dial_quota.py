@@ -8,11 +8,14 @@ eight got audio.
 One request carries up to MAX_DIAL_BATCH = 500 numbers, so the quota counts numbers.
 """
 
+import inspect
+
 import pytest
 from fastapi import HTTPException
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.core import ratelimit
+from app.services import dial_queue
 
 
 class FakeRedis:
@@ -151,12 +154,11 @@ def test_retry_after_midnight_is_bounded_to_a_day():
 
 
 def _dial_tree():
+    """The one place a number is admitted to a queue. Both routes delegate here, so the
+    ceiling has one home rather than a copy per door."""
     import ast
-    import inspect
 
-    from app.api.routes import campaign
-
-    return ast.parse(inspect.getsource(campaign.dial_campaign_vobiz).lstrip())
+    return ast.parse(inspect.getsource(dial_queue.enqueue).lstrip())
 
 
 def _quota_call():
@@ -177,11 +179,12 @@ def test_it_charges_the_batch_size_not_one():
     import ast
 
     arg = ast.unparse(_quota_call().args[0])
-    assert arg == "len(req.phone_numbers)", f"quota charged as {arg!r}"
+    assert arg == "len(targets)", f"quota charged as {arg!r}"
 
 
-def test_the_charge_happens_before_anything_is_dialled():
-    """Once trigger_vobiz_call runs, Vobiz has billed — a later check refunds nothing."""
+def test_the_charge_happens_before_anything_is_written():
+    """The ceiling has to refuse the request, not tidy up after it. A quota checked after the
+    rows are inserted would leave a queue the pump then dials at leisure."""
     import ast
 
     tree = _dial_tree()
@@ -189,8 +192,16 @@ def test_the_charge_happens_before_anything_is_dialled():
         n.lineno for n in ast.walk(tree)
         if isinstance(n, ast.Name) and n.id == "reserve_dial_quota"
     )
-    dial = min(
+    insert = min(
         n.lineno for n in ast.walk(tree)
-        if isinstance(n, ast.Name) and n.id == "trigger_vobiz_call"
+        if isinstance(n, ast.Name) and n.id == "pg_insert"
     )
-    assert quota < dial, "the quota is charged after the money is already spent"
+    assert quota < insert, "the quota is charged after the numbers are already queued"
+
+
+def test_the_queueing_path_places_no_calls_itself():
+    """The ceiling used to sit in front of a loop that dialled immediately. It now sits in
+    front of a queue, and the pump — which reserves a carrier slot per call — is the only
+    thing that reaches Vobiz. If this path ever dials again, the slot gate is bypassed."""
+    src = inspect.getsource(dial_queue)
+    assert "trigger_vobiz_call" not in src

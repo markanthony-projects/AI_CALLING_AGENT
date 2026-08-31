@@ -26,28 +26,24 @@ from loguru import logger
 from pydantic import BaseModel, Field, computed_field
 from sqlalchemy import Select, case, cast, delete, func, or_, select, text
 from sqlalchemy import String as SAString
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
 from app.core import call_slots
 from app.api.routes.campaign import DialRequest
-from app.core.ratelimit import reserve_dial_quota, reserve_llm_headroom, window_keys
+from app.core.ratelimit import window_keys
 from app.core.security import SessionClaims, require_admin, require_session
 from app.models.db import (
     Call,
     CallStatus,
     Campaign,
     CampaignStatus,
-    Contact,
-    ContactStatus,
     Lead,
     LeadStatus,
     Project,
-    Suppression,
     Transcript,
 )
-from app.services.dial_pump import dial_forecast, eligible
+from app.services import dial_queue
 from app.services.discovery import invalidate_project_cache
 from app.utils.timeutils import to_ist, utc_now
 
@@ -933,96 +929,10 @@ async def dial_campaign(
     to want — a callback, a number a colleague just passed on — and opening Excel for three of
     them is not.
     """
-    campaign = await db.get(Campaign, campaign_id)
-    if campaign is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
-    if campaign.status != CampaignStatus.ACTIVE:
-        # Pausing a campaign has to actually stop it, or the button means nothing. Queueing
-        # against a paused campaign would look like it worked and then never dial.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Campaign is {campaign.status.value}; set it ACTIVE before dialing",
-        )
-
-    # Still reserved here, even though the pump is what spends the money. These are daily and
-    # per-minute ceilings on how much may be queued in one go, and refusing at the point the
-    # operator pressed the button is the only place they can act on it.
-    await reserve_dial_quota(len(req.phone_numbers))
-    # The separate question of whether the LLM can answer a greeting at all.
-    await reserve_llm_headroom()
-
-    numbers = [t.number for t in req.phone_numbers]
-    blocked = set(
-        (
-            await db.execute(
-                select(Suppression.phone_number).where(Suppression.phone_number.in_(numbers))
-            )
-        )
-        .scalars()
-        .all()
+    report = await dial_queue.enqueue(
+        db, campaign_id, req.phone_numbers, requested_by=claims.email
     )
-
-    contacts = [
-        {
-            "id": uuid.uuid4(),
-            "campaign_id": campaign_id,
-            "phone_number": target.number,
-            "name": target.name,
-            "status": ContactStatus.DND if target.number in blocked else ContactStatus.PENDING,
-            "last_outcome": "on the do-not-call list" if target.number in blocked else None,
-        }
-        for target in req.phone_numbers
-    ]
-    # A number already on this campaign's queue keeps whatever state it has. Pasting a list
-    # twice must not reset somebody who has already been called back to PENDING.
-    added = len(
-        (
-            await db.execute(
-                pg_insert(Contact)
-                .values(contacts)
-                .on_conflict_do_nothing(constraint="uq_contacts_campaign_phone")
-                .returning(Contact.id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    await db.commit()
-
-    # Writing a row is not the same as queueing a call, and the difference is invisible from
-    # here. A number that has already spoken to the agent, or used up its attempts, or been
-    # marked do-not-call, keeps that status — the insert conflicts and does nothing, and the
-    # pump will never pick it up. Reporting only what was inserted let this endpoint answer
-    # "queued" for a list that would place no calls at all, which is precisely the case an
-    # operator cannot tell apart from a broken dialer.
-    #
-    # Asked with the pump's own predicate rather than a copy of it, so the two cannot drift
-    # into disagreeing about whether a number is going to be called.
-    verdicts = (
-        await db.execute(
-            select(Contact.status, eligible(utc_now()).label("dialable")).where(
-                Contact.campaign_id == campaign_id, Contact.phone_number.in_(numbers)
-            )
-        )
-    ).all()
-    will_dial, held_back = dial_forecast(verdicts)
-
-    logger.info(
-        f"{claims.email} queued {added} number(s) on campaign {campaign_id} "
-        f"({len(contacts) - added} already queued, {len(blocked)} suppressed); "
-        f"{will_dial} of {len(contacts)} will be dialled"
-        + (f", held back: {held_back}" if held_back else "")
-    )
-    return {
-        "status": "queued",
-        "queued": added,
-        "already_queued": len(contacts) - added,
-        "suppressed": len(blocked),
-        "total_numbers": len(contacts),
-        # The two fields worth reading. will_dial is how many calls this actually causes.
-        "will_dial": will_dial,
-        "held_back": held_back,
-    }
+    return report.as_response()
 
 
 # --- Projects -------------------------------------------------------------------------

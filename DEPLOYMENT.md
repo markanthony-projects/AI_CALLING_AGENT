@@ -677,8 +677,8 @@ deactivate ex@homebble.in  # revoke access — takes effect on their next page l
 
 Now open the **dashboard** URL from Step 8b — not this API host — and sign in.
 
-> **Why not just use the API key?** Because it dials, and dialing costs money. A key pasted
-> into a browser lives in devtools, in history, and in every extension on the page. The
+> **Why not just use the API key?** Because it queues calls, and calls cost money. A key
+> pasted into a browser lives in devtools, in history, and in every extension on the page. The
 > dashboard authenticates as a named person and carries a session in an httpOnly cookie that
 > page script cannot read.
 
@@ -693,6 +693,23 @@ If login appears to succeed but every page then says you are signed out, check
 ## 13. Make a test call
 
 Call your own number, not a customer's.
+
+This adds the number to the campaign's dial queue; it does not dial on the spot. The pump in
+the worker checks every five seconds, reserves one of the three carrier slots, and then dials
+— so expect the phone to ring within a few seconds rather than instantly. The campaign must
+be **ACTIVE**, or the request is refused with a 409 rather than queueing something that would
+never go out.
+
+Read `will_dial` in the response, not `queued`. `queued` counts rows written, and a number
+already on this campaign keeps whatever status it has — re-adding somebody who has already
+spoken to the agent writes nothing and calls nobody:
+
+```json
+{"status":"queued","queued":1,"will_dial":1,"held_back":{}}
+```
+
+If `will_dial` is `0`, `held_back` names the status stopping it — for example
+`{"COMPLETED":1}`. Select that contact in the dashboard's queue and press **Try again**.
 
 First find a campaign ID:
 
