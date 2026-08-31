@@ -59,17 +59,23 @@ def _launch_stage(project: dict) -> str:
     return "PRE_LAUNCH" if any(m in status for m in _PRE_LAUNCH_MARKERS) else "LAUNCHED"
 
 
-def _readable(value) -> str:
+def spoken_facility(value) -> str:
     """Flatten one nearby_facilities value into something speakable.
 
     Accepts a string, a list of strings, or the list of {name, drive_time, distance}
     objects that project data commonly arrives as.
+
+    Public because the dashboard shows and edits this column through the same flattening.
+    Doing it any other way would let an operator read one thing and the caller hear another,
+    and the round trip is lossless in the only sense that matters: this is the last step
+    before the text reaches the model, so a value stored already-flattened produces exactly
+    the line a structured one would have.
     """
     if isinstance(value, dict):
         parts = [str(value[k]) for k in ("name", "drive_time", "distance") if value.get(k)]
         return ", ".join(parts) if parts else ""
     if isinstance(value, list):
-        return ", ".join(p for p in (_readable(v) for v in value) if p)
+        return ", ".join(p for p in (spoken_facility(v) for v in value) if p)
     return str(value)
 
 
@@ -225,7 +231,7 @@ def build_campaign_context(project: dict) -> str:
         # objects — the shape every scraped source produces — made ', '.join raise TypeError
         # inside the call handler, which kills the call before the agent says a word. One
         # awkward landmark is worth more than a dropped call.
-        nearby_strs = [f"{k}: {_readable(v)}" for k, v in nearby.items()]
+        nearby_strs = [f"{k}: {spoken_facility(v)}" for k, v in nearby.items()]
         context_lines.append(f"Nearby Facilities: {' | '.join(nearby_strs)}")
         
     config = project.get('config_json')

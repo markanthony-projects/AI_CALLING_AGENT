@@ -19,7 +19,7 @@ columns exist will happily leak the next one somebody adds.
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Generic, List, Literal, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
@@ -44,7 +44,8 @@ from app.models.db import (
     Transcript,
 )
 from app.services import dial_queue
-from app.services.discovery import invalidate_project_cache
+from app.services.discovery import invalidate_campaign_context, invalidate_project_everywhere
+from app.utils.context_builder import spoken_facility
 from app.utils.timeutils import to_ist, utc_now
 
 router = APIRouter(
@@ -192,6 +193,11 @@ class ProjectSummary(BaseModel):
     amenities: List[str] = Field(default_factory=list)
     usps: List[str] = Field(default_factory=list)
     configs: List[UnitConfig] = Field(default_factory=list)
+    # Flattened to one line per category by the same function that feeds the caller, so what
+    # an operator reads here is what the agent says. The column also holds the richer shapes
+    # scraped sources produce; those flatten to the same text, and anything that is not a
+    # dict of categories reads as empty — which is exactly what the agent gets from it.
+    nearby: Dict[str, str] = Field(default_factory=dict)
     campaigns: int = 0
 
 
@@ -901,7 +907,7 @@ async def update_campaign(campaign_id: uuid.UUID, req: CampaignUpdate, db: Async
     await db.commit()
     # discovery.py caches campaign -> project for a day in Redis and 5 minutes in-process.
     # A campaign whose state just changed must not keep serving the old context to a live call.
-    await invalidate_project_cache(str(campaign_id))
+    await invalidate_campaign_context(str(campaign_id))
     return await get_campaign(campaign_id, db)
 
 
@@ -951,6 +957,7 @@ async def list_projects(
             Project.id, Project.name, Project.city, Project.locality,
             Project.min_price, Project.max_price, Project.possession_status,
             Project.rera_id, Project.amenities, Project.usps, Project.config_json,
+            Project.nearby_facilities,
             func.count(Campaign.id).label("campaigns"),
         )
         .select_from(Project)
@@ -959,6 +966,8 @@ async def list_projects(
             Project.id, Project.name, Project.city, Project.locality,
             Project.min_price, Project.max_price, Project.possession_status,
             Project.rera_id, Project.amenities, Project.usps, Project.config_json,
+            # jsonb has an equality operator, so it groups; plain json would not.
+            Project.nearby_facilities,
         )
     )
     if city:
@@ -980,6 +989,19 @@ async def list_projects(
     )
 
 
+def _nearby_from_column(value: Any) -> Dict[str, str]:
+    """The location facts the agent actually has, as text.
+
+    Not a dict of categories means the agent reads nothing from this column — see the
+    isinstance guard in context_builder — so showing it as empty is the honest answer rather
+    than a lossy one. It also gives the operator an empty editor to fill in, which is the
+    repair for a project in that state.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): spoken_facility(v) for k, v in value.items() if spoken_facility(v)}
+
+
 def _project_from_row(row: Any) -> ProjectSummary:
     raw_configs = row.config_json if isinstance(row.config_json, list) else []
     return ProjectSummary(
@@ -994,6 +1016,7 @@ def _project_from_row(row: Any) -> ProjectSummary:
         amenities=list(row.amenities or []),
         usps=list(row.usps or []),
         configs=[UnitConfig(**{k: c.get(k) for k in ("type", "area", "price")}) for c in raw_configs if isinstance(c, dict)],
+        nearby=_nearby_from_column(row.nearby_facilities),
         campaigns=int(row.campaigns or 0),
     )
 
@@ -1015,6 +1038,7 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
                 for name in (
                     "id", "name", "city", "locality", "min_price", "max_price",
                     "possession_status", "rera_id", "amenities", "usps", "config_json",
+                    "nearby_facilities",
                 )
             },
             campaigns=campaigns,
@@ -1032,7 +1056,12 @@ class ProjectCreate(BaseModel):
     rera_id: Optional[str] = Field(default=None, max_length=100)
     amenities: List[str] = Field(default_factory=list)
     usps: List[str] = Field(default_factory=list)
-    config_json: Optional[List[Any]] = None
+    # Typed rather than List[Any]. These three keys are the whole of what reaches the caller
+    # — context_builder reads type, area and price and nothing else — and the agent speaks
+    # this list out loud, so an unvalidated shape here becomes a wrong sentence on a call
+    # rather than an error anybody sees.
+    config_json: Optional[List[UnitConfig]] = None
+    nearby_facilities: Optional[Dict[str, str]] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -1045,7 +1074,8 @@ class ProjectUpdate(BaseModel):
     rera_id: Optional[str] = Field(default=None, max_length=100)
     amenities: Optional[List[str]] = None
     usps: Optional[List[str]] = None
-    config_json: Optional[List[Any]] = None
+    config_json: Optional[List[UnitConfig]] = None
+    nearby_facilities: Optional[Dict[str, str]] = None
 
 
 @router.post("/projects", response_model=ProjectSummary, dependencies=[Depends(require_admin)])
@@ -1060,7 +1090,9 @@ async def create_project(req: ProjectCreate, db: AsyncSession = Depends(get_db))
         rera_id=req.rera_id,
         amenities=req.amenities or [],
         usps=req.usps or [],
-        config_json=req.config_json,
+        # Plain dicts, because the column is JSONB and the ORM will not serialise a model.
+        config_json=[c.model_dump() for c in req.config_json] if req.config_json is not None else None,
+        nearby_facilities=req.nearby_facilities,
     )
     db.add(project)
     await db.commit()
@@ -1070,6 +1102,7 @@ async def create_project(req: ProjectCreate, db: AsyncSession = Depends(get_db))
         min_price=project.min_price, max_price=project.max_price,
         possession_status=project.possession_status, rera_id=project.rera_id,
         amenities=project.amenities, usps=project.usps, config_json=project.config_json,
+        nearby_facilities=project.nearby_facilities,
         campaigns=0,
     ))
 
@@ -1084,7 +1117,11 @@ async def update_project(project_id: uuid.UUID, req: ProjectUpdate, db: AsyncSes
         setattr(project, field, value)
 
     await db.commit()
-    await invalidate_project_cache(str(project_id))
+    # Every campaign selling this project, not the project id. The cache is keyed by
+    # campaign, so passing the project id here matched nothing and an edited price kept
+    # being spoken on live calls for another day.
+    cleared = await invalidate_project_everywhere(db, project_id)
+    logger.info(f"Project {project_id} edited; cleared context for {cleared} campaign(s)")
     return await get_project(project_id, db)
 
 
@@ -1103,9 +1140,14 @@ async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
             detail=f"Project has {campaign_count} campaign(s); delete or reassign them first",
         )
 
+    # Resolved before the delete: afterwards the campaigns are gone and there is nothing
+    # left to look up. The 409 above means there should be none, and clearing zero is the
+    # correct outcome — but this must not be the place that assumes it.
+    cleared = await invalidate_project_everywhere(db, project_id)
     await db.execute(delete(Project).where(Project.id == project_id))
     await db.commit()
-    await invalidate_project_cache(str(project_id))
+    if cleared:
+        logger.info(f"Project {project_id} deleted; cleared context for {cleared} campaign(s)")
 
 
 # --- Campaign delete ------------------------------------------------------------------
@@ -1128,4 +1170,4 @@ async def delete_campaign(campaign_id: uuid.UUID, db: AsyncSession = Depends(get
 
     await db.execute(delete(Campaign).where(Campaign.id == campaign_id))
     await db.commit()
-    await invalidate_project_cache(str(campaign_id))
+    await invalidate_campaign_context(str(campaign_id))

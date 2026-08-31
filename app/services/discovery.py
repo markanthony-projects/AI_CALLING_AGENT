@@ -113,7 +113,14 @@ async def get_project_by_campaign(db: AsyncSession, campaign_id: str):
         
     return project_dict
 
-async def invalidate_project_cache(campaign_id: str):
+async def invalidate_campaign_context(campaign_id: str):
+    """Drop the cached project context for one campaign.
+
+    Named for what it takes. It was called invalidate_project_cache, and two callers duly
+    handed it a project id — which matches no key, so editing a project cleared nothing and
+    live calls kept quoting the old prices for up to a day. Both the L1 dict and the Redis
+    key are campaign-scoped, because that is what the caller of get_project_context has.
+    """
     _l1_project_cache.pop(campaign_id, None)
     try:
         cache = await get_redis_client()
@@ -121,3 +128,21 @@ async def invalidate_project_cache(campaign_id: str):
     except Exception as e:
         logger.warning(f"Redis cache invalidate failed: {e}")
     logger.info(f"Invalidated L1 & L2 cache for campaign {campaign_id}")
+
+
+async def invalidate_project_everywhere(db, project_id) -> int:
+    """Drop the cached context of every campaign selling this project.
+
+    A project edit changes what the agent says on calls for every campaign attached to it,
+    and the cache has no key for the project itself. Resolving the campaigns is the only way
+    an edit reaches the caller; without it the dashboard saves happily and the next prospect
+    hears the old price for the next twenty-four hours.
+
+    Returns how many were cleared, so a caller can log it and a test can see it happened.
+    """
+    ids = (
+        await db.execute(select(Campaign.id).where(Campaign.project_id == project_id))
+    ).scalars().all()
+    for campaign_id in ids:
+        await invalidate_campaign_context(str(campaign_id))
+    return len(ids)

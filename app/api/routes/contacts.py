@@ -43,7 +43,7 @@ from app.models.db import (
 )
 from app.services.contact_import import ImportReport, load, parse
 from app.services.dial_pump import MAX_DIAL_ATTEMPTS
-from app.services.discovery import invalidate_project_cache
+from app.services.discovery import invalidate_campaign_context
 from app.utils.phone import to_e164
 from app.utils.timeutils import utc_now
 
@@ -255,7 +255,7 @@ async def update_campaign(
     await db.commit()
     # discovery.py caches campaign -> project; a campaign whose state just changed must not
     # keep serving the old context to a live call.
-    await invalidate_project_cache(str(campaign_id))
+    await invalidate_campaign_context(str(campaign_id))
     return {"id": str(campaign.id), "name": campaign.name, "status": campaign.status.value}
 
 
@@ -286,7 +286,7 @@ async def delete_campaign(
         )
     await db.delete(campaign)
     await db.commit()
-    await invalidate_project_cache(str(campaign_id))
+    await invalidate_campaign_context(str(campaign_id))
     logger.warning(f"Campaign {campaign_id} deleted by {claims.email}")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
