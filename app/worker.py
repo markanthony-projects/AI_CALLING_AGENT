@@ -13,10 +13,14 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, engine
 from app.core.queue import redis_settings
-from app.models.db import Call, Campaign, Lead, LeadStatus, Project, Transcript
+from app.models.db import Call, Campaign, Contact, Lead, LeadStatus, Project, Transcript
 from app.models.schemas import LeadExtraction
 from app.services.dial_pump import dial_due_contacts, release_stale_dialing
-from app.utils.attribution import budget_is_grounded, phrase_is_grounded
+from app.utils.attribution import (
+    budget_is_grounded,
+    name_spoken_by_prospect,
+    phrase_is_grounded,
+)
 from app.utils.timeutils import is_within_business_hours, resolve_appointment, to_ist, utc_now
 
 _CALL_MODULES = {
@@ -72,7 +76,14 @@ def _build_system_prompt(reference_time: datetime) -> str:
         "is_prospect MUST BE TRUE whenever the caller shares a budget, specifies a locality, asks about pricing, "
         "requests a callback or site visit, or shows ANY genuine interest in purchasing real estate—EVEN IF their budget is lower or higher than the project being pitched! "
         "(e.g., a caller with a 75 Lakhs budget on a 1.2 Cr project IS A VALID PROSPECT for other portfolio projects). "
-        "ONLY set is_prospect to false if the call is spam, wrong number, telemarketer, or the caller explicitly refuses all real estate discussions.\n"
+        "Set is_prospect to false if the call is spam, wrong number, telemarketer, or the caller explicitly refuses all real estate discussions.\n"
+        "ALSO FALSE when the Prospect never engaged. A call where their every line is a greeting, a filler "
+        "or a one-word acknowledgement — 'Hello', 'Yes', 'Haan', 'Who is this', 'Ok' — and they never "
+        "answered a qualifying question is NOT a lead, however politely it ended. Silence is not interest. "
+        "Not refusing is not agreeing. If you cannot point to a Prospect line saying something about what "
+        "they want, need or already own, is_prospect is false.\n"
+        "There are three outcomes, not two: interested (true), refused (false), and never engaged (false). "
+        "A call that ended before the Prospect said anything of their own belongs in the third.\n"
         "CRITICAL RULE FOR budget: ONLY output a valid numerical float (e.g. 8000000) or null. Convert Lakhs/Crores to full float (e.g. 75 Lakhs = 7500000).\n"
         "CRITICAL RULE FOR ATTRIBUTION: Extract ONLY facts the Prospect stated about themselves. "
         "Every 'Agent:' line describes the LISTING — its locality, asking price, size and amenities. None of it is prospect data. "
@@ -239,6 +250,27 @@ def _resolve(reference, weekday, in_days, time_of_day, call_sid: str, label: str
     return resolved
 
 
+def resolve_customer_name(extracted, said_it_themselves: bool, known):
+    """Whose spelling of the name to keep.
+
+    The dial list is where the name came from, and the agent speaks it in the greeting — so
+    the model reads it back off our own line and reports it as extracted. That is circular:
+    it tells us nothing we did not already know, it is the one filled field on a lead where
+    nothing was learned, and a model re-transliterating a name it saw once can spell it worse
+    than the list does.
+
+    So the list wins by default. It loses only when the prospect said a name themselves,
+    because then they may be correcting it — the person who answers is not always the person
+    on the list, and a correction is the one case where the model knows more than we do.
+
+    With no contact behind the call there is no list to prefer, and the model's value is all
+    there is.
+    """
+    if said_it_themselves and extracted:
+        return extracted
+    return known or extracted
+
+
 def _drop_ungrounded(lead_data: LeadExtraction, transcript: str, call_sid: str) -> LeadExtraction:
     """Null any prospect-owned field the prospect is not on record as having said.
 
@@ -292,11 +324,8 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
         # Grounded against the transliterated text where we have it: the extracted values
         # come back in Latin script, so checking them against a Devanagari transcript would
         # find nothing and discard everything the prospect said in Hindi.
-        lead_data = _drop_ungrounded(
-            lead_data,
-            lead_data.transliterated_transcript or transcript_record.full_text,
-            call_sid,
-        )
+        grounding_text = lead_data.transliterated_transcript or transcript_record.full_text
+        lead_data = _drop_ungrounded(lead_data, grounding_text, call_sid)
 
         if lead_data.transliterated_transcript:
             transcript_record.full_text = lead_data.transliterated_transcript
@@ -310,11 +339,27 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
             logger.info(f"[{call_sid}] Not a prospect; no lead created.")
             return
 
+        # The name the dial list already holds, unless the prospect gave one themselves.
+        known_name = None
+        if call_record.contact_id is not None:
+            contact = await db.get(Contact, call_record.contact_id)
+            known_name = contact.name if contact else None
+        customer_name = resolve_customer_name(
+            lead_data.customer_name,
+            name_spoken_by_prospect(lead_data.customer_name, grounding_text),
+            known_name,
+        )
+        if customer_name != lead_data.customer_name:
+            logger.info(
+                f"[{call_sid}] Name from the dial list ({customer_name!r}) rather than the "
+                f"transcript ({lead_data.customer_name!r})"
+            )
+
         lead = Lead(
             # Carried from the Call so a booked visit can actually be confirmed, leads can
             # be de-duplicated, and DND can be honoured.
             phone_number=call_record.phone_number,
-            customer_name=lead_data.customer_name,
+            customer_name=customer_name,
             preferred_location=lead_data.preferred_location,
             preferred_unit_type=await _match_unit_type(
                 db, call_record.campaign_id, lead_data.preferred_unit_type, call_sid

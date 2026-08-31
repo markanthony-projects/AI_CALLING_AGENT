@@ -15,6 +15,7 @@ from app.services.call_context import recall_customer_name, recall_dialed_number
 from app.services.dial_pump import recall_contact, record_outcome
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
+from app.utils.attribution import prospect_text
 from app.utils.context_builder import build_campaign_context
 from app.utils.timeutils import utc_now
 
@@ -177,8 +178,15 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         # The queue entry, so a number that rang out becomes eligible for a retry and one
         # that spoke to the agent is never dialled again. Kept out of _finalize_call because
         # that function owns the call history, which is a separate record.
+        # Only what the prospect said. This counted the whole transcript, agent lines
+        # included — and the agent always speaks, so the count was never zero and the
+        # "connected but no conversation" branch in record_outcome could not run. Every call
+        # that reached audio was filed as "spoke with the agent" and its contact was never
+        # dialled again, including the ones where the prospect said nothing at all.
         await record_outcome(
-            await recall_contact(call_sid), status, answered_words=len(transcript.split())
+            await recall_contact(call_sid),
+            status,
+            answered_words=len(prospect_text(transcript).split()),
         )
 
 

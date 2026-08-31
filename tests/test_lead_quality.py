@@ -210,8 +210,18 @@ def test_grounding_uses_the_transliterated_transcript():
     from app import worker
 
     src = inspect.getsource(worker.process_extraction)
-    call = src[src.index("_drop_ungrounded(") : src.index("if lead_data.transliterated_transcript")]
-    assert "transliterated_transcript" in call
+    binding = next(line for line in src.splitlines() if "grounding_text =" in line)
+    assert "transliterated_transcript" in binding
+
+
+def test_every_grounding_check_reads_the_same_text():
+    """Two of them now — the prospect-owned fields and the name. A second check against the
+    raw transcript would quietly disagree with the first on every Hindi call."""
+    from app import worker
+
+    src = inspect.getsource(worker.process_extraction)
+    assert "_drop_ungrounded(lead_data, grounding_text" in src
+    assert "name_spoken_by_prospect(lead_data.customer_name, grounding_text)" in src
 
 
 # --- what a prospect wants that we do not sell ----------------------------------------

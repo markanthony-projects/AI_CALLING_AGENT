@@ -132,3 +132,20 @@ def phrase_is_grounded(value: Optional[str], transcript: str) -> bool:
         # the same as wrong, so it is left alone rather than discarded.
         return True
     return any(t in said for t in wanted)
+
+def name_spoken_by_prospect(name: Optional[str], transcript: str) -> bool:
+    """True only when the prospect can be heard saying some part of this name.
+
+    Deliberately not phrase_is_grounded. That one answers "is there anything here that
+    contradicts the model", and returns True when a value is too short to check — the right
+    default when the alternative is discarding a real preference. This answers the opposite
+    question: is there positive evidence the prospect said their own name? Absence falls back
+    to the dial list, which is better information, so there is nothing to lose by being
+    strict and a wrong answer to gain by being lenient.
+
+    No minimum token length either: "Ram" and "Anu" are whole names.
+    """
+    if not name:
+        return False
+    said = set(_TOKEN.findall(prospect_text(transcript).lower()))
+    return any(token in said for token in _TOKEN.findall(name.lower()))
