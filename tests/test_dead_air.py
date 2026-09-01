@@ -232,3 +232,52 @@ def test_the_empty_turn_warning_carries_the_witness_report():
     src = _agent_source()
     warn = src.index("VAD fired with no transcribable speech")
     assert "stt_witness.report()" in src[warn : warn + 400]
+
+
+# --- the screen that answers before the person does -------------------------------------
+#
+# Three calls in one afternoon of production reached Google's call screen, which says:
+# "Record your name and reason for calling, I'll see if this person is available." It matched
+# nothing — the list had "record your message" and this bot says "name" — so each time the
+# agent pitched a township to a robot for twenty-odd seconds and billed the leg for it.
+
+
+def test_the_call_screen_is_recognised():
+    from app.utils.answering_machine import is_answering_machine
+
+    assert is_answering_machine(
+        "Record your name and reason for calling, I'll see if this person is available."
+    )
+
+
+def test_it_is_recognised_from_the_phrase_alone():
+    """Strong rather than generic: no person asks a caller to record their name, so this one
+    does not need a second phrase to corroborate it."""
+    from app.utils.answering_machine import is_answering_machine
+
+    assert is_answering_machine("Please record your name.")
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Hello, I am not available for a call right now, call me later",
+        "Sorry I can't talk now",
+        "Yes, please go ahead",
+        "Who is this? What is the reason for calling?",
+    ],
+)
+def test_a_person_saying_something_similar_stays_on_the_call(said):
+    """The expensive mistake is the other one. Hanging up on somebody who said they are busy
+    loses a prospect who was willing to be called back."""
+    from app.utils.answering_machine import is_answering_machine
+
+    assert is_answering_machine(said) is False
+
+
+def test_a_human_screening_the_call_is_not_a_machine():
+    """A personal assistant offering to check is a route to the prospect, not a dead end. The
+    strong list holds only what no person says."""
+    from app.utils.answering_machine import is_answering_machine
+
+    assert is_answering_machine("Let me see if this person is available.") is False

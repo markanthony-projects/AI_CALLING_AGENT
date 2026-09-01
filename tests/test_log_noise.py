@@ -137,3 +137,22 @@ def test_the_middleware_is_actually_attached():
     from app.main import app
 
     assert any(m.cls is ASGILoggingMiddleware for m in app.user_middleware)
+
+
+def test_the_latency_lines_can_actually_be_seen():
+    """They could not. app.utils.latency was missing from the allow-list, so every per-turn
+    timing was dropped at INFO — hours of production calls with no timing in them at all, and
+    the instrumentation looking broken from outside while working perfectly.
+
+    The filter is what decides whether a measurement exists in practice, so it is the thing
+    worth pinning.
+    """
+    from app.main import _CALL_MODULES, _log_filter
+
+    assert "app.utils.latency" in _CALL_MODULES
+    assert _log_filter({"level": _Level(20), "name": "app.utils.latency"}) is True
+
+
+class _Level:
+    def __init__(self, no):
+        self.no = no

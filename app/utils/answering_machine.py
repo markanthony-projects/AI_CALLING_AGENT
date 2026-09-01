@@ -26,6 +26,12 @@ from typing import Optional
 # words is far worse than transcribing one voicemail.
 _MACHINE_PHRASES = (
     "record your message",
+    # Google's call screen, verbatim: "Record your name and reason for calling, I'll see if
+    # this person is available." Seen three times in one afternoon of production calls, and
+    # each time the agent held a full conversation with it — the phrasing matched nothing,
+    # because the list had "record your message" and this bot says "name".
+    "record your name",
+    "see if this person is available",
     "leave your message",
     "leave a message",
     "after the tone",
@@ -81,4 +87,7 @@ def is_answering_machine(text: Optional[str]) -> bool:
     found = machine_phrases(text)
     if len(found) >= _MIN_PHRASES:
         return True
-    return any(p in found for p in ("record your message", "after the beep", "after the tone"))
+    return any(
+        p in found
+        for p in ("record your message", "record your name", "after the beep", "after the tone")
+    )
