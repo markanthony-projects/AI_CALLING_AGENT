@@ -1,6 +1,22 @@
+import os
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# Where settings come from when they are not already in the environment.
+#
+# Overridable because the test harness has to be able to switch it off. It said it did — "the
+# real .env must not leak into tests" — and it did not: environment variables win over the
+# file, so everything the harness set was honoured and everything it forgot came from the
+# developer's own .env. CEREBRAS_API_KEY was one of those, so the suite passed on every machine
+# that had one and failed in CI, which has none. DOCS_ENABLED was another, and two tests were
+# red locally for months because of it.
+#
+# Production leaves this unset and reads .env exactly as before. Both readers are pointed at
+# it: load_dotenv fills os.environ, and pydantic reads the file again for anything still
+# missing, so switching off one and not the other would leave half the leak in place.
+ENV_FILE = os.getenv("APP_ENV_FILE", ".env")
+
+load_dotenv(ENV_FILE)
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -264,7 +280,7 @@ class Settings(BaseSettings):
             return v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

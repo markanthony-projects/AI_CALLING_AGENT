@@ -13,8 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # Set before app.core.config is imported anywhere: the real .env must not leak into tests.
+#
+# APP_ENV_FILE is what makes that true rather than merely intended. Environment variables beat
+# the file, so every value below was already honoured — but anything missing from this dict
+# fell through to whatever .env the developer happened to have. CEREBRAS_API_KEY was missing,
+# so the suite passed everywhere except CI, and DOCS_ENABLED leaked in and kept two tests red.
+#
+# Everything the settings require has to be here now, because there is no longer a file behind
+# it to quietly fill the gaps.
 os.environ.update(
     {
+        "APP_ENV_FILE": str(ROOT / "tests" / "no-such-env-file"),
         "AUTH_ENABLED": "true",
         "API_KEY": "test-api-key-that-is-at-least-32-chars",
         "CALL_TOKEN_SECRET": "test-call-token-secret-at-least-32-chars",
@@ -24,6 +33,7 @@ os.environ.update(
         "OPENAI_API_KEY": "test",
         "SARVAM_API_KEY": "test",
         "GROQ_API_KEY": "test",
+        "CEREBRAS_API_KEY": "test",
         "DEEPGRAM_API_KEY": "test",
         "VOBIZ_AUTH_ID": "test-auth-id",
         "VOBIZ_AUTH_TOKEN": "test-auth-token",

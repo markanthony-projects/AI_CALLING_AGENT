@@ -73,6 +73,25 @@ BASE = dict(
 )
 
 
+@pytest.fixture(autouse=True)
+def _restore_environment():
+    """_settings() below strips the LLM variables out of os.environ so these assert against the
+    defaults rather than against whatever the machine has. It used to strip them permanently.
+
+    Every test that ran after this file then saw a process with no CEREBRAS_API_KEY, and the
+    ones that build their own Settings could not satisfy the "the LLM has a key" validator.
+    Nothing noticed, because .env was still being read as a last resort and quietly put the key
+    back. The moment the harness stopped reading .env — which is the whole point of a harness —
+    five unrelated tests failed in a full run and passed on their own.
+    """
+    import os
+
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 def _settings(**over):
     """A Settings built from arguments alone.
 
