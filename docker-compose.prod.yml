@@ -26,6 +26,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Bounded, like nginx below. Docker's json-file driver does not rotate unless told to, and
+    # these two are the chatty ones: a busy campaign writes a line per turn per call. Left to
+    # run, the file grows until the disk does not have room for Postgres connections, Redis's
+    # appendonly file, or the next image pull — and a full disk on this box takes the service
+    # down in three ways at once.
+    #
+    # 20 MB x 10 is a couple of days of campaign traffic, which is as far back as anybody has
+    # ever needed to read.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   # Runs to completion before api and worker start, so no process ever serves traffic
@@ -53,6 +66,19 @@ services:
     # has no route from the internet even if the firewall were misconfigured.
     expose:
       - "8000"
+    # Bounded, like nginx below. Docker's json-file driver does not rotate unless told to, and
+    # these two are the chatty ones: a busy campaign writes a line per turn per call. Left to
+    # run, the file grows until the disk does not have room for Postgres connections, Redis's
+    # appendonly file, or the next image pull — and a full disk on this box takes the service
+    # down in three ways at once.
+    #
+    # 20 MB x 10 is a couple of days of campaign traffic, which is as far back as anybody has
+    # ever needed to read.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -73,6 +99,19 @@ services:
         condition: service_healthy
     healthcheck:
       disable: true
+    # Bounded, like nginx below. Docker's json-file driver does not rotate unless told to, and
+    # these two are the chatty ones: a busy campaign writes a line per turn per call. Left to
+    # run, the file grows until the disk does not have room for Postgres connections, Redis's
+    # appendonly file, or the next image pull — and a full disk on this box takes the service
+    # down in three ways at once.
+    #
+    # 20 MB x 10 is a couple of days of campaign traffic, which is as far back as anybody has
+    # ever needed to read.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
     restart: unless-stopped
 
   # No dashboard service here on purpose: the operations UI lives in its own repo and is
