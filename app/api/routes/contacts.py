@@ -318,8 +318,15 @@ async def list_contacts(
     )
     rows = (
         await db.execute(
-            # Same order the pump works in, so the list reads as the queue it is.
-            stmt.order_by(Contact.created_at.asc(), Contact.source_row.asc())
+            # Newest batch first. This used to mirror the pump's own order so the list read as
+            # the queue it is, but the two are answering different questions: the pump decides
+            # what to dial next, and the list is what somebody opens to see what just happened.
+            # Oldest-first put the import they had just uploaded on the last page.
+            #
+            # Ascending on source_row inside a batch, because every row of one import shares a
+            # timestamp to the microsecond and reversing them would shuffle the spreadsheet the
+            # operator is holding.
+            stmt.order_by(Contact.created_at.desc(), Contact.source_row.asc())
             .limit(page_size)
             .offset((page - 1) * page_size)
         )

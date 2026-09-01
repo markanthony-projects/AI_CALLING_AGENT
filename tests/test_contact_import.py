@@ -250,3 +250,53 @@ def test_the_row_cap_stops_rather_than_truncating_silently():
 
 def test_the_cap_is_high_enough_for_a_real_lead_list():
     assert MAX_IMPORT_ROWS >= 10_000
+
+
+# --- what the operator sees first ---------------------------------------------------------
+
+
+def _list_order() -> str:
+    """The ORDER BY the queue list issues, as written.
+
+    Read off the clause that names columns rather than searching the whole function for
+    "desc": the count above it issues order_by(None) to drop the sort before wrapping the
+    query, and a looser match finds that one instead — which is how the first version of this
+    test failed against correct code.
+    """
+    import inspect
+    import re
+
+    from app.api.routes import contacts
+
+    src = inspect.getsource(contacts.list_contacts)
+    match = re.search(r"stmt\.order_by\(\s*(Contact\..*?)\)\s*\n", src, re.S)
+    assert match, "the list no longer orders its rows by anything on Contact"
+    return " ".join(match.group(1).split())
+
+
+def test_the_newest_import_is_on_the_first_page():
+    """It was oldest-first, mirroring the pump. The pump decides what to dial next; this is
+    what somebody opens to see what just happened, and the list they had just uploaded was on
+    the last page."""
+    order = _list_order()
+    assert "Contact.created_at.desc()" in order
+
+
+def test_a_batch_keeps_the_order_of_the_spreadsheet_it_came_from():
+    """Every row of one import shares a timestamp to the microsecond, so the tiebreak decides
+    the whole batch. Descending would shuffle the file the operator is holding."""
+    order = _list_order()
+    assert "Contact.source_row.asc()" in order
+    assert order.index("created_at.desc()") < order.index("source_row.asc()")
+
+
+def test_the_pump_still_dials_oldest_first():
+    """Only the list changed. A queue that dialled newest-first would leave the bottom of every
+    uploaded file permanently uncalled."""
+    import inspect
+
+    from app.services import dial_pump
+
+    src = inspect.getsource(dial_pump.claim)
+    assert "Contact.created_at.asc()" in src
+    assert "Contact.created_at.desc()" not in src
