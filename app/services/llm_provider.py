@@ -210,6 +210,16 @@ class BudgetWatcher:
         )
 
 
+def processor_name(endpoint: "LLMEndpoint") -> str:
+    """What the latency observer will call this service.
+
+    It shortens a class-shaped name by stripping the LLMService suffix, so "CerebrasLLMService"
+    prints as `cerebras=890ms`. Derived from the configured provider rather than hard-coded,
+    because a timing line naming the wrong vendor is worse than one naming none.
+    """
+    return f"{endpoint.name.strip().title().replace(' ', '')}LLMService"
+
+
 class ResilientLLMService(OpenAILLMService):
     """Any OpenAI-compatible provider, with a phone call's tolerance for waiting.
 
@@ -219,9 +229,13 @@ class ResilientLLMService(OpenAILLMService):
     """
 
     # Pipecat names a processor after its class, and that name is what the latency observer
-    # prints. Left alone every log line would read `resilientllm=376ms`, breaking continuity
-    # with every call log recorded so far for no gain.
-    LOG_NAME = "GroqLLMService"
+    # prints — so left alone every timing line would read `resilientllm=376ms`.
+    #
+    # It used to be pinned to "GroqLLMService" for continuity with older logs. That stopped
+    # being continuity and became a lie the moment the provider changed: production timings
+    # read `groq=1525ms` while every request was going to Cerebras, and the one case the label
+    # exists to make visible — the fallback taking a turn — was indistinguishable from the
+    # primary, because both printed the same word. It follows the endpoint now.
 
     def __init__(
         self,
@@ -239,7 +253,7 @@ class ResilientLLMService(OpenAILLMService):
         self._fallback_client: Optional[AsyncOpenAI] = None
         self._last_throttle_delay: Optional[float] = None
         self._watcher = BudgetWatcher(call_sid, warn_below=warn_below)
-        kwargs.setdefault("name", self.LOG_NAME)
+        kwargs.setdefault("name", processor_name(endpoint))
         super().__init__(
             api_key=endpoint.api_key,
             base_url=endpoint.base_url,
@@ -281,6 +295,33 @@ class ResilientLLMService(OpenAILLMService):
                 event_hooks={"response": [self._watcher]},
             ),
         )
+
+
+    async def warm_up(self) -> None:
+        """Open the connection to the provider before a turn needs it.
+
+        The first LLM call of every call pays a TCP and TLS handshake to a provider on another
+        continent, and it pays it on the critical path: the prospect has just finished speaking
+        and is waiting. Production timings show it plainly — first turn 3382ms against 1247ms
+        for the second on the same call, with the difference sitting in `unattributed`, and on
+        another call 1525ms of LLM time against a steady-state 490ms.
+
+        Deepgram and Sarvam do not have this problem: their websockets connect when the
+        pipeline starts. The LLM is HTTP and connects on first use, which is the first thing
+        the caller waits for.
+
+        So this is fired alongside the opening line, which takes six to eight seconds to speak
+        — several times what a handshake needs. One token, and every failure swallowed: a
+        warm-up that breaks a call is worse than a slow first turn.
+        """
+        try:
+            await self._client.chat.completions.create(
+                model=self._endpoint.model,
+                messages=[{"role": "user", "content": "."}],
+                max_tokens=1,
+            )
+        except Exception as e:
+            logger.debug(f"[{self._call_sid}] LLM warm-up did not complete: {e}")
 
     async def get_chat_completions(self, context):
         """Ask the primary; on a rate limit, ask the fallback rather than lose the turn."""

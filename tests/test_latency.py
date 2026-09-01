@@ -370,3 +370,52 @@ def test_observer_is_attached_to_the_worker():
         if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "PipelineWorker"
     ]
     assert "observers" in {kw.arg for kw in workers[0].keywords}
+
+
+# --- the handshake that landed on the prospect ------------------------------------------
+#
+# Production timings, first turn against second on the same call:
+#
+#   turn 1: 3382ms voice-to-voice | llm=490ms sarvam=373ms ... unattributed=2519ms
+#   turn 2: 1247ms voice-to-voice | llm=498ms sarvam=427ms ... unattributed=322ms
+#
+# and on another call the same cost showed up inside the LLM's own timing instead: 1525ms
+# against a steady state of about 490ms. Deepgram and Sarvam connect when the pipeline starts;
+# the LLM is HTTP and connects on first use, which is the first thing the caller waits for.
+
+
+def test_the_llm_is_warmed_while_the_greeting_plays():
+    """Alongside the opening line, which is built locally and takes six to eight seconds to
+    speak — several times what a handshake needs, and all of it before the prospect can reply."""
+    import inspect
+
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    greeting = src[src.index("async def startup_greeting") : src.index("nonlocal _startup_task")]
+    assert "llm.warm_up()" in greeting
+    assert greeting.index("llm.warm_up()") < greeting.index("TTSSpeakFrame(opening_line)")
+
+
+def test_the_warm_up_cannot_take_a_call_down():
+    """It runs for a call that is already connected. A warm-up that raises would cost the call
+    it was meant to speed up, so every failure is swallowed and logged at debug."""
+    import inspect
+
+    from app.services.llm_provider import ResilientLLMService
+
+    src = inspect.getsource(ResilientLLMService.warm_up)
+    assert "except Exception" in src
+    assert "max_tokens=1" in src, "a warm-up that generates a reply is a cost, not a handshake"
+
+
+def test_the_timing_line_names_the_provider_that_answered():
+    """It read `groq=1525ms` while every request went to Cerebras. The label exists to make the
+    fallback visible, and a hard-coded one made the two indistinguishable."""
+    from app.services.llm_provider import LLMEndpoint, processor_name
+    from app.utils.latency import _short
+
+    cerebras = LLMEndpoint(name="cerebras", model="m", base_url="u", api_key="k")
+    groq = LLMEndpoint(name="groq", model="m", base_url="u", api_key="k")
+    assert _short(processor_name(cerebras)) == "cerebras"
+    assert _short(processor_name(groq)) == "groq"

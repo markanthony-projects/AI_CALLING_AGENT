@@ -556,6 +556,12 @@ async def run_voice_agent(
                 opening_line = build_opening_line(project_name, customer_name)
                 context.add_message({"role": "assistant", "content": opening_line})
                 logger.info(f"[{call_sid}] AGENT → \"{opening_line}\"")
+                # Alongside the greeting, not before it: the opening line is built locally and
+                # needs no model, so this is six to eight seconds of speech during which the
+                # connection to the provider can be opened for free. Without it the handshake
+                # lands on the first thing the prospect actually waits for — measured at 3382ms
+                # for a first turn against 1247ms for the second on the same call.
+                asyncio.create_task(llm.warm_up())
                 await task.queue_frames([TTSSpeakFrame(opening_line)])
             else:
                 # They spoke first, so the greeting was cancelled and there is nothing left
