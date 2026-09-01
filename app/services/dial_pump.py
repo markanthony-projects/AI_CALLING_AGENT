@@ -49,14 +49,26 @@ from app.services.call_context import remember_customer_name, remember_dialed_nu
 from app.services.dialer import trigger_vobiz_call
 from app.utils.timeutils import is_within_business_hours, to_ist, utc_now
 
-# Dials placed per contact before it is EXHAUSTED. Very few people answer a first attempt
-# from an unknown number; stopping at one throws away most of a reachable list.
-MAX_DIAL_ATTEMPTS = 3
+# Dials placed per contact before it is EXHAUSTED.
+#
+# Two, not one: very few people answer a first attempt from an unknown number, and stopping
+# there throws away most of a reachable list. Two, not three: a third call to someone who has
+# not picked up twice is the point where a sales dialer starts reading as harassment, and it
+# is the operator's own limit for a ring-no-answer.
+#
+# This is a ceiling for every outcome. Once the carrier's hangup callback tells us *why* a
+# dial did not connect, the ones that deserve more — a busy line means the phone is on and
+# the person is there — can be given their own allowance above this floor.
+MAX_DIAL_ATTEMPTS = 2
 
 # Waits before each retry, indexed by the attempt just completed. Widening on purpose: a
-# second try two hours later catches someone who was driving, and the third the next day
-# catches someone who was travelling. Calling back in five minutes catches nobody and reads
-# as harassment.
+# second try two hours later catches someone who was driving, and a third the next day would
+# catch someone who was travelling. Calling back in five minutes catches nobody and reads as
+# harassment.
+#
+# Only the first entry is reachable at MAX_DIAL_ATTEMPTS = 2. The second is kept because the
+# cap is the thing meant to move — per-outcome allowances are coming — and a backoff table
+# that has to be rediscovered every time the cap changes is worse than one unused row.
 RETRY_BACKOFF = (timedelta(hours=2), timedelta(days=1))
 
 

@@ -54,11 +54,15 @@ def test_zero_attempts_is_not_a_retry():
 
 def test_the_gap_widens_between_attempts():
     """Calling back in five minutes catches nobody and reads as harassment. The second try
-    catches someone who was driving; the third, someone who was travelling."""
-    now = utc_now()
-    first = next_attempt_after(1, now)
-    second = next_attempt_after(2, now)
-    assert first < second
+    catches someone who was driving; a third would catch someone who was travelling.
+
+    Asserted on the table rather than on two next_attempt_after calls, because at a cap of
+    two only the first gap is reachable and the second call returns None. The property still
+    has to hold: the cap is the thing meant to move, and a table that stopped widening would
+    only be discovered by whoever raised it."""
+    gaps = list(RETRY_BACKOFF)
+    assert gaps == sorted(gaps)
+    assert len(set(gaps)) == len(gaps), "a repeated gap is not a widening one"
 
 
 def test_the_first_retry_is_hours_away_not_minutes():
@@ -77,8 +81,13 @@ def test_there_is_a_gap_for_every_retry():
     assert len(RETRY_BACKOFF) >= MAX_DIAL_ATTEMPTS - 1
 
 
-def test_the_attempt_cap_is_small_enough_not_to_pester():
-    assert 2 <= MAX_DIAL_ATTEMPTS <= 4
+def test_a_number_that_does_not_answer_is_called_exactly_twice():
+    """The operator's own limit, and the reason this is pinned rather than bounded: a third
+    call to someone who has not picked up twice is where a sales dialer starts reading as
+    harassment. A range would let it drift back up without anybody deciding to."""
+    assert MAX_DIAL_ATTEMPTS == 2
+    assert next_attempt_after(1) is not None, "the one retry has to survive"
+    assert next_attempt_after(2) is None, "and there must not be a second one"
 
 
 # --- who is eligible ------------------------------------------------------------------
@@ -411,11 +420,16 @@ def test_a_dial_that_never_connected_waits_the_same_gap_as_any_other_no_answer()
     assert when > now + timedelta(minutes=45)
 
 
-def test_the_gap_widens_for_a_second_failed_dial():
+def test_a_second_failed_dial_ends_it_at_the_current_cap():
+    """Two dials is the whole allowance for a ring-no-answer, so the second one that never
+    connects is the last. This is the same arithmetic as next_attempt_after, reached through
+    the sweep — the two must not disagree about when a contact is finished."""
     now = utc_now()
     _, first, _ = dial_pump.stale_dial_verdict(1, now)
-    _, second, _ = dial_pump.stale_dial_verdict(2, now)
-    assert second > first
+    status, second, _ = dial_pump.stale_dial_verdict(MAX_DIAL_ATTEMPTS, now)
+    assert first is not None
+    assert second is None
+    assert status is ContactStatus.EXHAUSTED
 
 
 def test_a_dial_with_no_attempts_left_is_exhausted():
