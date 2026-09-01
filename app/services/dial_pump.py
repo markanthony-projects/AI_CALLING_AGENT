@@ -339,6 +339,94 @@ def stale_dial_verdict(attempts: int, now=None) -> Tuple[ContactStatus, Optional
     return ContactStatus.NO_ANSWER, when, "the dial never connected"
 
 
+# --- what the carrier says happened ----------------------------------------------------
+#
+# Until the hangup callback existed, a call nobody answered left no trace at all: the media
+# websocket opens only on answer, so nothing recorded that the dial had happened, the carrier
+# slot stayed held until it aged out twelve minutes later, and the contact sat in DIALING
+# until the reaper swept it. Almost every no-answer in a campaign took that path.
+
+# Causes that mean the number itself is no good. Another dial spends money to learn the same
+# thing, and a list bought from anywhere has some of these in it.
+#
+# Deliberately short. Anything not named here is retried within the ordinary cap, because a
+# cause we have not seen before is far more likely to be a transient network condition than a
+# dead number — and wrongly retiring a real prospect is the expensive mistake.
+DEAD_NUMBER_CAUSES = frozenset(
+    {"UNALLOCATED_NUMBER", "NO_ROUTE_DESTINATION", "INVALID_NUMBER_FORMAT"}
+)
+
+_CAUSE_PHRASES = {
+    "NO_ANSWER": "nobody answered",
+    "NO_USER_RESPONSE": "nobody answered",
+    "ALLOTTED_TIMEOUT": "nobody answered",
+    "USER_BUSY": "the line was busy",
+    "CALL_REJECTED": "the call was declined",
+    "ORIGINATOR_CANCEL": "we stopped ringing",
+    "NORMAL_CLEARING": "the call ended without being answered",
+}
+
+
+def carrier_phrase(cause: str) -> str:
+    """What to show an operator for a hangup cause, in words they can act on."""
+    known = _CAUSE_PHRASES.get(cause)
+    if known:
+        return known
+    return f"the carrier ended the call ({cause.lower().replace('_', ' ')})" if cause else "the call did not connect"
+
+
+def carrier_verdict(hangup_cause: Optional[str], answered: bool, attempts: int, now=None):
+    """What the carrier's hangup callback means for this contact.
+
+    Returns (status, next_attempt_at, outcome) — or None when there is nothing to say,
+    which is the answered case. A call that was picked up is finalised by the session that
+    served it: only that side knows whether the prospect actually spoke, and overwriting its
+    verdict with "the call ended" would retire a real conversation or resurrect a finished one.
+
+    `answered` is taken from whether the carrier reported an answer time, not from the cause.
+    Cause names vary between carriers and this integration has seen exactly one; an answer
+    time either exists or does not, and it is the field the whole decision can rest on.
+    """
+    if answered:
+        return None
+
+    cause = (hangup_cause or "").strip().upper()
+    if cause in DEAD_NUMBER_CAUSES:
+        return ContactStatus.INVALID, None, f"{carrier_phrase(cause)}; not dialling it again"
+
+    when = next_attempt_after(attempts or 1, now)
+    if when is None:
+        return ContactStatus.EXHAUSTED, None, f"{carrier_phrase(cause)}; no attempts left"
+    return ContactStatus.NO_ANSWER, when, carrier_phrase(cause)
+
+
+async def record_carrier_outcome(
+    contact_id: Optional[str], hangup_cause: Optional[str], answered: bool
+) -> bool:
+    """Write the carrier's verdict onto the contact. True if anything changed.
+
+    Idempotent because Vobiz retries a failed callback up to three times: only a contact
+    still in DIALING is touched, so the second and third deliveries find their work done. The
+    same guard means an operator who marked the number DND while it was ringing keeps their
+    decision.
+    """
+    if not contact_id:
+        return False
+
+    async with AsyncSessionLocal() as db:
+        contact = await db.get(Contact, uuid.UUID(str(contact_id)))
+        if contact is None or contact.status is not ContactStatus.DIALING:
+            return False
+
+        verdict = carrier_verdict(hangup_cause, answered, contact.attempts or 1)
+        if verdict is None:
+            return False
+
+        contact.status, contact.next_attempt_at, contact.last_outcome = verdict
+        await db.commit()
+        return True
+
+
 async def release_stale_dialing(older_than: timedelta = timedelta(minutes=20)) -> int:
     """Move contacts stuck in DIALING out of it, on the same terms as any other no-answer.
 

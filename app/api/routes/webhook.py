@@ -12,7 +12,7 @@ from app.core.security import issue_call_token, require_call_token, require_call
 from app.models.db import Call, CallStatus, Transcript
 from app.services.agent import run_voice_agent
 from app.services.call_context import recall_customer_name, recall_dialed_number
-from app.services.dial_pump import recall_contact, record_outcome
+from app.services.dial_pump import recall_contact, record_carrier_outcome, record_outcome
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
 from app.utils.attribution import prospect_text
@@ -178,11 +178,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         # The queue entry, so a number that rang out becomes eligible for a retry and one
         # that spoke to the agent is never dialled again. Kept out of _finalize_call because
         # that function owns the call history, which is a separate record.
-        # Only what the prospect said. This counted the whole transcript, agent lines
-        # included — and the agent always speaks, so the count was never zero and the
-        # "connected but no conversation" branch in record_outcome could not run. Every call
-        # that reached audio was filed as "spoke with the agent" and its contact was never
-        # dialled again, including the ones where the prospect said nothing at all.
+        #
+        # answered_words counts only what the prospect said. It counted the whole transcript,
+        # agent lines included — and the agent always speaks, so the count was never zero and
+        # the "connected but no conversation" branch in record_outcome could not run.
         await record_outcome(
             await recall_contact(call_sid),
             status,
@@ -270,3 +269,93 @@ async def _finalize_call(
         return
     if transcript_stored:
         await enqueue_extraction(call_sid)
+
+async def callback_fields(request: Request) -> dict:
+    """The carrier's callback body, whichever way it was encoded.
+
+    Vobiz posts form-encoded, as its Plivo-shaped API does everywhere else. JSON is accepted
+    too because a body we cannot read looks exactly like a call that never happened, and the
+    cost of guessing wrong is a held slot and a contact stuck mid-dial.
+    """
+    try:
+        form = await request.form()
+        if form:
+            return {k: v for k, v in form.items()}
+    except Exception:
+        pass
+    try:
+        body = await request.json()
+        return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
+
+
+def was_answered(fields: dict) -> bool:
+    """Whether the carrier says a human picked up.
+
+    An answer time is the one field this can rest on. Hangup causes differ between carriers
+    and this integration has seen exactly one of them; an answer time either exists or does
+    not. Duration is a second witness for a carrier that reports one and not the other —
+    both are read case-insensitively because the callback's own casing is not ours to rely on.
+    """
+    lowered = {k.lower(): v for k, v in fields.items()}
+    answer_time = str(lowered.get("answertime") or lowered.get("answer_time") or "").strip()
+    if answer_time and answer_time.lower() not in ("none", "null", "0"):
+        return True
+    duration = str(lowered.get("duration") or lowered.get("billsec") or "").strip()
+    try:
+        return float(duration) > 0
+    except ValueError:
+        return False
+
+
+def hangup_cause_of(fields: dict) -> str:
+    lowered = {k.lower(): v for k, v in fields.items()}
+    for key in ("hangupcause", "hangup_cause", "hangupcausename", "hangup_cause_name"):
+        value = str(lowered.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+@router.post("/vobiz/hangup/{campaign_id}/{call_sid}", dependencies=[Depends(require_call_token)])
+async def vobiz_hangup(campaign_id: str, call_sid: str, request: Request):
+    """The carrier telling us a call is over — including the ones that never began.
+
+    This is the only report a ring-out produces. The media websocket opens on answer, so
+    before this endpoint existed a call nobody picked up left the carrier slot held until it
+    aged out twelve minutes later and the contact sitting in DIALING until the reaper found
+    it. On a three-slot account three unanswered dials stopped the queue for twelve minutes.
+
+    Two things happen here and their order matters. The slot is released first and
+    unconditionally: the call is over either way, and freeing it is what lets the pump dial
+    the next number. Only then is the contact's fate decided, and only for calls that were
+    never answered — an answered call is finalised by the session that served it, which is
+    the only side that knows whether the prospect said anything.
+
+    Always answers 200. Vobiz retries a failed callback up to three times, and a retry storm
+    on a body we could not parse would hold nothing open but would bury the log.
+    """
+    fields = await callback_fields(request)
+    answered = was_answered(fields)
+    cause = hangup_cause_of(fields)
+
+    # Before anything that can fail. A slot that is not released blocks a third of the
+    # account's capacity until it ages out, and nothing below is worth risking that for.
+    await call_slots.release(call_sid)
+
+    changed = False
+    try:
+        changed = await record_carrier_outcome(
+            await recall_contact(call_sid), cause, answered
+        )
+    except Exception as e:
+        # The reaper still returns the contact to the queue, so this is a delay, not a loss.
+        logger.error(f"[{call_sid}] Could not record the carrier's hangup verdict: {e}")
+
+    logger.info(
+        f"[{call_sid}] Carrier hung up | answered={answered} | cause={cause or 'unreported'}"
+        + (" | contact updated" if changed else "")
+    )
+    return Response(status_code=200)
+

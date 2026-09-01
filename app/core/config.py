@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     # agent stops speaking a single word starts their turn, so replies stay instant.
     INTERRUPT_MIN_WORDS: int = Field(default=3, ge=1)
 
+    # How long a number may ring before the carrier gives up.
+    #
+    # Two reasons, and the second is the expensive one. Ringing for the carrier's default —
+    # commonly a minute or more — is a minute of somebody's phone buzzing for a call they
+    # have decided not to take. And the carrier slot is held for the whole of it: a slot is
+    # reserved before the dial and, on a call nobody answers, released only when the hangup
+    # callback arrives. On a three-slot account a long default ring is throughput spent on
+    # nothing.
+    VOBIZ_RING_SECONDS: int = Field(default=30, ge=10, le=120)
+
     DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379/0"
 
