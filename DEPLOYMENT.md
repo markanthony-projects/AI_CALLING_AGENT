@@ -850,9 +850,10 @@ docker compose -f docker-compose.prod.yml restart api
 # Apply a change made to .env  ← NOT the same as restart
 docker compose -f docker-compose.prod.yml up -d --force-recreate api worker
 
-# Deploy new code
-git pull
-docker compose -f docker-compose.prod.yml up -d --build
+# Deploy new code — production tracks main
+git fetch origin && git reset --hard origin/main
+git log --oneline -1          # check this is what you meant to ship
+docker compose -f docker-compose.prod.yml up -d --build --force-recreate api worker
 
 # Status and resource use
 docker compose -f docker-compose.prod.yml ps
