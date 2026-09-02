@@ -462,3 +462,108 @@ def test_a_contact_somehow_at_zero_attempts_is_counted_as_having_had_one():
     status, when, _ = dial_pump.stale_dial_verdict(0)
     assert status is ContactStatus.NO_ANSWER
     assert when is not None
+
+
+# --- a call the agent never closed ------------------------------------------------------
+#
+# From a live call on 2 Sep 2026. The prospect had answered, said "yes" and then "yeah, I am
+# looking for a property", and 34 seconds in — mid-sentence, in the middle of the agent's
+# pitch — the media stream went away and Vobiz hung up on him. The carrier's own record put
+# the hangup source at the carrier, not the subscriber.
+#
+# He was filed as COMPLETED, "spoke with the agent", next_attempt_at = None: a real lead
+# retired on the strength of a conversation that never finished.
+
+
+def test_a_conversation_the_agent_never_closed_is_not_retired():
+    """end_call is the only way this system ends a call on purpose. Anything else stopped
+    for a reason nobody chose, so it cannot be recorded as a conversation that concluded."""
+    src = inspect.getsource(dial_pump.record_outcome)
+    # The whole condition read as one line, so a `closed_by_agent` mentioned anywhere else in
+    # the function cannot stand in for it actually gating the branch.
+    condition = next(
+        (
+            line.strip()
+            for line in src.splitlines()
+            if "CallStatus.COMPLETED" in line and "answered_words > 0" in line
+        ),
+        None,
+    )
+    assert condition is not None, "the branch that retires a contact has moved"
+    assert "closed_by_agent" in condition, condition
+
+
+def test_a_cut_off_call_says_so_rather_than_claiming_a_conversation():
+    """"no conversation" is the wrong words for it — the prospect was talking to us."""
+    src = inspect.getsource(dial_pump.record_outcome)
+    assert "cut off before the agent could close it" in src
+
+
+def test_the_default_keeps_every_other_caller_unchanged():
+    """record_outcome is called from the refused-call path too, which knows nothing about
+    how a call ended and must not start retrying completed ones."""
+    import inspect as _inspect
+
+    signature = _inspect.signature(dial_pump.record_outcome)
+    assert signature.parameters["closed_by_agent"].default is True
+
+
+def test_the_webhook_decides_it_from_the_end_reason():
+    """The flag has to come from what actually ended the call, not from the status — the
+    status was COMPLETED on the call this is about."""
+    import ast
+
+    from app.api.routes import webhook
+
+    tree = ast.parse(inspect.getsource(webhook._handle_call).lstrip())
+    passed = [
+        keyword.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "closed_by_agent"
+    ]
+    assert len(passed) == 1, [ast.unparse(p) for p in passed]
+
+    expression = passed[0]
+    if isinstance(expression, ast.Name):
+        assignments = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id == expression.id
+        ]
+        assert len(assignments) == 1
+        expression = assignments[0]
+    assert ast.unparse(expression) == "end_reason == 'end_call tool'"
+
+
+def test_the_cut_off_call_is_logged_where_it_can_be_counted():
+    """Nothing in the logs said this had happened. Finding it took the carrier's dashboard
+    and a read of the nginx access log."""
+    src = inspect.getsource(__import__("app.api.routes.webhook", fromlist=["x"])._handle_call)
+    assert "Call cut off mid-conversation" in src
+    assert "logger.warning" in src[src.index("Call cut off mid-conversation") - 200:]
+
+
+def test_the_websocket_closing_does_not_claim_the_caller_hung_up():
+    """It cannot know that. Reading it as the prospect walking away sent a real
+    investigation in the wrong direction for an afternoon."""
+    import ast
+
+    from app.services import agent
+
+    # The reason the EndFrame actually carries, not a grep of the source: the comment above
+    # it names the old wording to explain why it is gone, and a looser check finds that.
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    reasons = [
+        keyword.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "EndFrame"
+        for keyword in node.keywords
+        if keyword.arg == "reason" and isinstance(keyword.value, ast.Constant)
+    ]
+    assert reasons, "no EndFrame carries a reason any more"
+    assert "the caller hung up" not in reasons
+    assert "the media stream closed" in reasons

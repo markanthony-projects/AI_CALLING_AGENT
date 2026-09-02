@@ -50,7 +50,7 @@ class CancelFrame(_Frame):
 
 
 def test_a_named_ending_is_reported_by_name():
-    assert ending_reason(EndFrame(reason="the caller hung up")) == "the caller hung up"
+    assert ending_reason(EndFrame(reason="the media stream closed")) == "the media stream closed"
 
 
 def test_an_unnamed_ending_falls_back_to_the_mechanism():
@@ -101,7 +101,10 @@ def test_no_ending_queues_an_anonymous_frame():
 @pytest.mark.parametrize(
     "reason",
     [
-        "the caller hung up",
+        # Not "the caller hung up": the websocket closing does not say who ended the call,
+        # and a carrier-side hangup read as a prospect walking away sends an operator
+        # chasing the wrong thing.
+        "the media stream closed",
         "end_call tool",
         "answering machine",
         "llm quota exhausted",

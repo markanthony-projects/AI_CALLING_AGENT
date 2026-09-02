@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -122,6 +123,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
     # Default to FAILED: any path that leaves this block without a clean voice session —
     # missing project, pipeline crash, exhausted LLM turns — is a call we did not conduct.
     status = CallStatus.FAILED
+    # Whether the agent itself decided the call was over. end_call is the only way it ever
+    # does, so anything else means the call stopped for a reason nobody chose. Bound out
+    # here because the queue entry is settled in `finally`, where `result` may not exist.
+    end_reason: Optional[str] = None
     try:
         async with AsyncSessionLocal() as db:
             db.add(Call(
@@ -152,6 +157,7 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         # Alongside the status, because "COMPLETED" answers whether the call worked and this
         # answers who ended it — and those were indistinguishable when a call finished with no
         # reason logged at all.
+        end_reason = result.end_reason
         if result.end_reason:
             logger.info(f"[{call_sid}] Ended by: {result.end_reason}")
         if result.error:
@@ -163,8 +169,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         else:
             status = CallStatus.COMPLETED
     except WebSocketDisconnect:
-        # The caller hanging up is how a normal call ends, not a system failure.
+        # The stream going away is how a normal call ends, not a system failure. It does not
+        # say who ended it, so it is not recorded as the caller having done so.
         logger.info(f"[{call_sid}] Stream disconnected")
+        end_reason = "the media stream closed"
         status = CallStatus.COMPLETED
     except Exception as e:
         logger.error(f"[{call_sid}] Error handling call: {e}")
@@ -182,10 +190,21 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         # answered_words counts only what the prospect said. It counted the whole transcript,
         # agent lines included — and the agent always speaks, so the count was never zero and
         # the "connected but no conversation" branch in record_outcome could not run.
+        spoken_words = len(prospect_text(transcript).split())
+        closed_by_agent = end_reason == "end_call tool"
+        # Loud, and on its own line, because it is countable: this is a prospect who was
+        # talking to us when the call stopped. One of them on 2 Sep 2026 turned out to be the
+        # carrier tearing the stream down mid-sentence, and nothing in the logs said so.
+        if status is CallStatus.COMPLETED and spoken_words > 0 and not closed_by_agent:
+            logger.warning(
+                f"[{call_sid}] Call cut off mid-conversation | ended_by={end_reason!r} | "
+                f"prospect said {spoken_words} words | the agent never closed it"
+            )
         await record_outcome(
             await recall_contact(call_sid),
             status,
-            answered_words=len(prospect_text(transcript).split()),
+            answered_words=spoken_words,
+            closed_by_agent=closed_by_agent,
         )
 
 

@@ -283,7 +283,13 @@ async def _place(db: AsyncSession, contact: Contact) -> bool:
 # --- writing the outcome back ---------------------------------------------------------
 
 
-async def record_outcome(contact_id: Optional[str], call_status, *, answered_words: int = 0) -> None:
+async def record_outcome(
+    contact_id: Optional[str],
+    call_status,
+    *,
+    answered_words: int = 0,
+    closed_by_agent: bool = True,
+) -> None:
     """Move a contact out of DIALING once its call has finished.
 
     Called from the same place that finalises the Call row, so the queue and the call history
@@ -305,16 +311,25 @@ async def record_outcome(contact_id: Optional[str], call_status, *, answered_wor
         if contact.status not in (ContactStatus.DIALING,):
             return
 
-        if call_status is CallStatus.COMPLETED and answered_words > 0:
+        if call_status is CallStatus.COMPLETED and answered_words > 0 and closed_by_agent:
             contact.status = ContactStatus.COMPLETED
             contact.last_outcome = "spoke with the agent"
             contact.next_attempt_at = None
         else:
             # A COMPLETED call with nothing said is a pickup that produced no conversation,
             # which is the same thing to a dial list as a ring-out.
+            #
+            # So is one the agent never closed. end_call is the only way this system ends a
+            # call on purpose, so a conversation that stopped some other way stopped for a
+            # reason nobody chose — on 2 Sep 2026 the carrier tore a stream down 34s in,
+            # mid-sentence, and the prospect ("yes, I am looking for a property") was filed
+            # as "spoke with the agent" and never dialled again. Retiring a contact asserts
+            # the conversation reached an end. This one had not.
             contact.status = ContactStatus.NO_ANSWER
             contact.last_outcome = (
                 "answering machine" if call_status is CallStatus.MACHINE
+                else "cut off before the agent could close it"
+                if call_status is CallStatus.COMPLETED and answered_words > 0
                 else "no conversation" if call_status is CallStatus.COMPLETED
                 else "the call did not complete"
             )

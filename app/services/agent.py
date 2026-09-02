@@ -604,8 +604,15 @@ async def run_voice_agent(
     # ─── Client Disconnected ───────────────────────────────────────────────────
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"[{call_sid}] Client disconnected — ending pipeline")
-        await task.queue_frames([EndFrame(reason="the caller hung up")])
+        # "the media stream closed", not "the caller hung up". All this event reports is
+        # that the websocket went away, and that happens for two quite different reasons:
+        # the prospect pressed end, or the stream itself dropped while the PSTN leg was
+        # still up. Claiming the first cost a real investigation on 2 Sep 2026 — a call was
+        # read off this line as the prospect walking away mid-pitch, when the carrier's own
+        # record said the hangup source was the carrier. The distinction lives in the
+        # carrier's hangup cause, which arrives separately; this line must not pre-empt it.
+        logger.info(f"[{call_sid}] Media stream closed — ending pipeline")
+        await task.queue_frames([EndFrame(reason="the media stream closed")])
 
     # ─── Hard Duration Cap ─────────────────────────────────────────────────────
     async def enforce_max_duration():

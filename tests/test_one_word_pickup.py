@@ -125,7 +125,10 @@ def test_the_webhook_counts_prospect_words_and_not_the_transcript():
     """The helper being right is not enough — the bug was the call site using neither.
 
     Read off the keyword argument itself rather than grepping the function, so a mention of
-    prospect_text anywhere else in the handler cannot make this pass.
+    prospect_text anywhere else in the handler cannot make this pass. One level of
+    indirection is followed — the count is now also used to log a cut-off call, so it is
+    computed once into a local — but only one, and only to its assignment in this same
+    function. `len(transcript.split())` still fails whichever way it is spelled.
     """
     import ast
     import inspect
@@ -134,10 +137,24 @@ def test_the_webhook_counts_prospect_words_and_not_the_transcript():
 
     tree = ast.parse(inspect.getsource(webhook._handle_call).lstrip())
     passed = [
-        ast.unparse(keyword.value)
+        keyword.value
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         for keyword in node.keywords
         if keyword.arg == "answered_words"
     ]
-    assert passed == ["len(prospect_text(transcript).split())"], passed
+    assert len(passed) == 1, [ast.unparse(p) for p in passed]
+
+    expression = passed[0]
+    if isinstance(expression, ast.Name):
+        assignments = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id == expression.id
+        ]
+        assert len(assignments) == 1, f"{expression.id} is assigned more than once"
+        expression = assignments[0]
+
+    assert ast.unparse(expression) == "len(prospect_text(transcript).split())"
