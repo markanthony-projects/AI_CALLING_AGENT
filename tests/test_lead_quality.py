@@ -25,7 +25,12 @@ import pytest
 
 from app.models.db import CallStatus, Purpose
 from app.models.schemas import LeadExtraction
-from app.utils.answering_machine import is_answering_machine, machine_phrases
+from app.utils.answering_machine import (
+    OPENING_TURNS,
+    is_answering_machine,
+    machine_in_opening,
+    machine_phrases,
+)
 from app.utils.attribution import (
     budget_as_stated,
     budget_is_grounded,
@@ -336,9 +341,8 @@ def test_unmistakable_machines_are_caught(said):
     assert is_answering_machine(said)
 
 
-def test_the_check_only_runs_on_the_opening_turn():
-    """Later in a real conversation the same words are a person talking about when they
-    are free."""
+def _machine_guard():
+    """The `if` in the turn handler that decides a call is a machine."""
     from app.services import agent
 
     tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
@@ -347,29 +351,34 @@ def test_the_check_only_runs_on_the_opening_turn():
         if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
         and n.name == "on_user_turn_stopped"
     )
-    guard = next(
+    return next(
         n for n in ast.walk(handler)
-        if isinstance(n, ast.If) and "is_answering_machine" in ast.unparse(n.test)
+        if isinstance(n, ast.If) and "machine_in_opening" in ast.unparse(n.test)
     )
-    assert "_turns_heard == 0" in ast.unparse(guard.test), (
-        "without this the agent hangs up on anyone who says they are unavailable"
+
+
+def test_the_check_stops_once_the_conversation_has_started():
+    """Later in a real conversation the same words are a person talking about when they
+    are free, and hanging up on them is far worse than transcribing a voicemail."""
+    from app.services import agent
+
+    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    handler = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and n.name == "on_user_turn_stopped"
+    )
+    window = next(
+        n for n in ast.walk(handler)
+        if isinstance(n, ast.If) and "OPENING_TURNS" in ast.unparse(n.test)
+    )
+    assert "_opening_turns" in ast.unparse(window.test), (
+        "without a bound the agent hangs up on anyone who says they are unavailable"
     )
 
 
 def test_detecting_a_machine_ends_the_call():
-    from app.services import agent
-
-    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
-    handler = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and n.name == "on_user_turn_stopped"
-    )
-    guard = next(
-        n for n in ast.walk(handler)
-        if isinstance(n, ast.If) and "is_answering_machine" in ast.unparse(n.test)
-    )
-    assert "EndFrame" in ast.unparse(guard)
+    assert "EndFrame" in ast.unparse(_machine_guard())
 
 
 def test_a_machine_is_its_own_call_status():
@@ -744,3 +753,76 @@ def test_the_worker_still_drops_a_fabricated_budget_entirely():
 
     lead = LeadExtraction(is_prospect=True, budget=11_700_000.0)
     assert _drop_ungrounded(lead, FABRICATED, "sid").budget is None
+
+
+# --- the voicemail that got a sales pitch -----------------------------------------------
+#
+# A live call on 2 Sep 2026, 11:11. The machine picked up, talked over the agent's greeting,
+# and Deepgram cut its announcement at the pauses:
+#
+#     AGENT → "Hi, Good afternoon Bharat Dua..." [interrupted]
+#     USER  → "At the tone."
+#     USER  → "When you have finished recording, you may hang up."
+#     AGENT → "We are launching a new project in Varthur..."
+#     No speech either way for 60s; abandoning call
+#     Call finalised | status=FAILED | duration=76.6s
+#
+# The second line trips the two-phrase rule on its own. It was never tested, because the
+# check ran on the first turn only and the first turn — "At the tone." — is one generic
+# phrase. So the agent pitched into the recording, then sat there until the idle timeout:
+# 76 seconds billed, a carrier slot held, and an extraction job run against a greeting.
+
+CUT_UP_VOICEMAIL = ["At the tone.", "When you have finished recording, you may hang up."]
+
+
+def test_the_first_turn_alone_is_still_not_enough():
+    """"At the tone." is one generic phrase, and a person could say it. The old check saw
+    only this, said no, and closed itself for the rest of the call."""
+    assert not machine_in_opening(CUT_UP_VOICEMAIL[:1])
+
+
+def test_the_announcement_is_caught_once_its_second_turn_arrives():
+    assert machine_in_opening(CUT_UP_VOICEMAIL)
+
+
+def test_an_announcement_with_one_phrase_per_turn_is_still_caught():
+    """The reason the turns are read together rather than one at a time: split finely
+    enough, no single turn carries two phrases and the rule fires on none of them."""
+    split = ["The person you are trying to reach", "is not available", "at the tone"]
+    assert not any(is_answering_machine(turn) for turn in split)
+    assert machine_in_opening(split)
+
+
+def test_nothing_is_caught_after_the_opening_window():
+    """The safeguard, and the whole reason there is a window at all."""
+    assert machine_in_opening(CUT_UP_VOICEMAIL + ["at the beep"] * OPENING_TURNS) is False
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        ["Hello?", "Yes speaking", "Sorry, I am not available right now"],
+        ["Yeah?", "Who is this", "I can't take your call, I am driving"],
+        ["Hello", "Haan boliye", "Please try again later, I am busy"],
+    ],
+)
+def test_a_real_prospect_opening_a_call_is_not_a_machine(turns):
+    """Joining the turns must not manufacture a second phrase out of a person being
+    politely unavailable. This is what the two-phrase rule is protecting."""
+    assert not machine_in_opening(turns)
+
+
+def test_the_window_is_wider_than_one_turn():
+    """The whole failure was a window of exactly one. A regression to that would pass every
+    other test here, because they all read the joined text."""
+    assert OPENING_TURNS >= 2
+
+
+def test_the_agent_accumulates_the_opening_turns():
+    """The helper being right is not enough — the handler has to feed it every opening turn
+    rather than only the current one."""
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    assert "_opening_turns.append(transcript)" in src
+    assert "machine_in_opening(_opening_turns)" in src

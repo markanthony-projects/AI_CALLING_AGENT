@@ -52,7 +52,7 @@ from app.services.llm_provider import (
     is_transient_throttle,
     primary_endpoint,
 )
-from app.utils.answering_machine import is_answering_machine, machine_phrases
+from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
 from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
@@ -541,6 +541,9 @@ async def run_voice_agent(
     # Counted so the machine check only ever runs on the opening turn.
     _turns_heard: int = 0
     _answering_machine: bool = False
+    # What the prospect said in their opening turns, kept so a voicemail announcement
+    # split across several of them can be read as the one sentence it is.
+    _opening_turns: list[str] = []
 
     # ─── Pipeline Started ──────────────────────────────────────────────────────
     @task.event_handler("on_pipeline_started")
@@ -708,17 +711,23 @@ async def run_voice_agent(
             _user_has_spoken = True
             logger.info(f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})")
 
-            # Only ever the opening turn. A recorded greeting is the first thing a machine
-            # says; the same words later in a real conversation are a person talking about
-            # their availability, and hanging up on them would be much worse than
-            # transcribing one voicemail.
-            if not _answering_machine and _turns_heard == 0 and is_answering_machine(transcript):
-                _answering_machine = True
-                logger.info(
-                    f"[{call_sid}] Answering machine detected; hanging up without leaving a "
-                    f"message. Matched: {machine_phrases(transcript)}"
-                )
-                await task.queue_frames([EndFrame(reason="answering machine")])
+            # Only the opening turns. A recorded greeting is the first thing a machine says;
+            # the same words later in a real conversation are a person talking about their
+            # availability, and hanging up on them would be much worse than transcribing one
+            # voicemail.
+            #
+            # Turns plural, and read together: this was the first turn alone, which is not
+            # how a voicemail announcement arrives. See OPENING_TURNS.
+            if not _answering_machine and len(_opening_turns) < OPENING_TURNS:
+                _opening_turns.append(transcript)
+                if machine_in_opening(_opening_turns):
+                    _answering_machine = True
+                    logger.info(
+                        f"[{call_sid}] Answering machine detected over {len(_opening_turns)} "
+                        f"opening turn(s); hanging up without leaving a message. "
+                        f"Matched: {machine_phrases(' '.join(_opening_turns))}"
+                    )
+                    await task.queue_frames([EndFrame(reason="answering machine")])
             _turns_heard += 1
             return
         # VAD heard speech but the STT produced nothing. Without this line a false barge-in
