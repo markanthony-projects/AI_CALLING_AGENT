@@ -22,6 +22,7 @@ from app.utils.spoken_text import (
     classify_bracket,
     extract_closing_line,
     split_speakable,
+    trim_label_tail,
 )
 
 LEAK = (
@@ -332,3 +333,139 @@ def test_a_text_frame_before_any_response_start_does_not_crash():
         asyncio.run(filt.process_frame(LLMTextFrame("नमस्ते"), FrameDirection.DOWNSTREAM))
     finally:
         fp.FrameProcessor.process_frame = original
+
+
+# --- the bare form: no bracket anywhere ------------------------------------------------
+#
+# From a live call on 2 Sep 2026, campaign "Abhee Codename New Dimension":
+#
+#     AGENT → "No problem at all. I understand. Our team will send you the brochure, floor
+#              plans and price details on WhatsApp. Thank you for your time.
+#              node: end_call(closing_line="Thank you for your time. Have a great day!")"
+#
+# The prospect heard that. Everything above keys off a '<' and there is no '<' in it: no
+# suppression fired, no leak was logged, and the text went to the TTS and into the context.
+# The filter was written for Llama-on-Groq; the provider is Gemma-on-Cerebras now, and it
+# leaks in a different shape.
+
+BARE_LEAK = (
+    "No problem at all. I understand. Our team will send you the brochure, floor plans "
+    "and price details on WhatsApp. Thank you for your time. "
+    'node: end_call(closing_line="Thank you for your time. Have a great day!")'
+)
+
+
+def test_the_production_bare_leak_is_cut():
+    speak, held, started = split_speakable(BARE_LEAK)
+    assert started, "a tool call with no angle bracket is still a tool call"
+    assert "end_call" not in speak and "closing_line" not in speak
+    assert held.startswith("end_call(")
+
+
+def test_the_dangling_label_goes_too():
+    """Cutting at the marker alone leaves "node: " behind, and the caller hears "node"."""
+    speak, _, _ = split_speakable(BARE_LEAK)
+    assert speak.endswith("Thank you for your time.")
+    assert "node" not in speak
+
+
+def test_the_closing_line_survives_the_bare_form():
+    """The key is unquoted and the separator is '=', not ':'. A JSON-only pattern found
+    nothing here, so the prospect got a generic goodbye on exactly the calls where the
+    model had written a good one."""
+    _, held, _ = split_speakable(BARE_LEAK)
+    assert extract_closing_line(held) == "Thank you for your time. Have a great day!"
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        'end_call(closing_line="Bye.")',
+        "end_call({'closing_line': 'Bye.'})",
+        '{"name": "end_call", "arguments": {"closing_line": "Bye."}}',
+        '[end_call(closing_line="Bye.")]',
+        'Tool: end_call closing_line="Bye."',
+        "```json\n{\"name\": \"end_call\"}\n```",
+        "<|python_tag|>end_call(closing_line=\"Bye.\")",
+    ],
+)
+def test_every_shape_of_the_call_is_suppressed(leak):
+    speak, _, started = split_speakable("Thank you for your time. " + leak)
+    assert started, f"not caught: {leak!r}"
+    assert speak == "Thank you for your time."
+
+
+def test_a_marker_split_across_streaming_frames_is_still_caught():
+    """Tokens arrive separately. "end" then "_call(" must not speak the "end"."""
+    filtered, buffer = [], ""
+    for chunk in ["Thank you. ", "end", "_call(closing_line=", '"Bye.")']:
+        buffer += chunk
+        speak, held, started = split_speakable(buffer)
+        filtered.append(speak)
+        buffer = "" if started else held
+        if started:
+            break
+    assert "end" not in "".join(filtered).replace("Thank you.", "")
+    assert "".join(filtered).strip() == "Thank you."
+
+
+def test_a_label_arriving_in_its_own_frame_is_held_back():
+    """The reason the label has to be held rather than trimmed at the cut: by the time
+    `end_call` arrives, a "node: " already pushed downstream is in the TTS and gone."""
+    speak, held, started = split_speakable("Thank you for your time. node: ")
+    assert not started
+    assert speak == "Thank you for your time. "
+    assert held == "node: "
+
+
+async def test_the_bare_leak_never_reaches_the_tts():
+    filt = ToolSyntaxFilter("sid")
+    frames = await _run(filt, [BARE_LEAK[:60], BARE_LEAK[60:130], BARE_LEAK[130:]])
+    spoken = "".join(getattr(f, "text", "") for f in frames)
+    for forbidden in ("end_call", "closing_line", "node:", "("):
+        assert forbidden not in spoken, f"caller would hear {forbidden!r} in {spoken!r}"
+    assert spoken.strip().endswith("Thank you for your time.")
+
+
+async def test_the_bare_leak_still_hangs_the_call_up():
+    """It meant to end the call. Suppressing the text must not also lose the intent, or the
+    prospect is left holding a silent line."""
+    seen = {}
+
+    async def on_leak(line, already_spoke):
+        seen["line"], seen["spoke"] = line, already_spoke
+
+    filt = ToolSyntaxFilter("sid", on_leaked_end_call=on_leak)
+    await _run(filt, [BARE_LEAK])
+    assert seen["spoke"] is True
+    assert seen["line"] == "Thank you for your time. Have a great day!"
+
+
+# --- what must NOT be cut ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "We have a grand clubhouse for functions and events.",
+        "The call ends when you say so.",
+        "Prices start at 1.17 Crores, about 20 Lakhs below the launch price.",
+        "It is near Dommasandra Circle, well connected to ITPL and Whitefield.",
+        "Budget < 1 Crore is fine",
+        "We are open from 10 AM to 8 PM.",
+        "Would 11 AM on Sunday work for you?",
+        "There are 4 clubhouses and over 140 amenities.",
+    ],
+)
+def test_ordinary_speech_is_never_cut_or_held(sentence):
+    """Every marker carries an underscore or is a code fence precisely so that no sentence
+    this agent could legitimately say can trip it. A false positive here is worse than the
+    leak: it silently drops real speech mid-call."""
+    assert split_speakable(sentence) == (sentence, "", False)
+
+
+def test_a_sentence_ending_in_a_full_stop_is_not_treated_as_a_label():
+    """The label trim is anchored on ':' '=' and brackets, never on '.', or every cut would
+    also eat the sentence in front of it."""
+    assert trim_label_tail("Prices start at 1.17 Crores.") == "Prices start at 1.17 Crores."
+    assert trim_label_tail("Thank you for your time. node: ") == "Thank you for your time."

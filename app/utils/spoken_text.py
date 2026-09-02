@@ -44,7 +44,54 @@ _MARKUP_WORDS = (
     "|python_tag",
 )
 
-_CLOSING_LINE = re.compile(r'"closing_line"\s*:\s*"((?:[^"\\]|\\.)*)"')
+# Both shapes the leak has taken: JSON ("closing_line": "...") and the bare call form
+# (closing_line="..."), with either quote character. The key is unquoted in the second, so a
+# pattern that insisted on the JSON shape recovered nothing from it — and the prospect got a
+# generic goodbye on exactly the calls where the model had written a good one.
+_CLOSING_LINE = re.compile(
+    r"""["']?closing_line["']?\s*[:=]\s*(?P<q>["'])(?P<text>(?:(?!(?P=q))[^\\]|\\.)*)(?P=q)"""
+)
+
+# Markup the model writes WITHOUT a leading '<'. Everything above keys off a bracket, which
+# is how Llama-on-Groq leaked. Gemma-on-Cerebras does not use brackets at all:
+#
+#     "Thank you for your time. node: end_call(closing_line="Have a great day!")"
+#
+# That reached a live caller on 2 Sep 2026. The bracket scanner never saw a '<', so nothing
+# fired: no suppression, no leak log, and the text went to the TTS and into the context.
+# The provider changed and the shape of the leak changed with it.
+#
+# Every entry carries an underscore or is a code fence, so none can occur in a spoken sales
+# line. That is the whole basis for cutting on sight. A bare word like "functions" or "node"
+# is deliberately NOT here: "we have a hall for functions." is a sentence this agent could
+# legitimately say, and cutting there would cost the caller real speech.
+_BARE_MARKERS = (
+    "end_call",      # the only tool this agent exposes
+    "closing_line",  # its only parameter
+    "tool_call",
+    "toolcall",
+    "tool_use",
+    "tooluse",
+    "function_call",
+    "functioncall",
+    "```",           # a markdown code fence
+    "<|",            # a special token whose word classify_bracket does not know
+)
+
+# A label left dangling in front of the call itself — the "node: " of the leak above, or the
+# '{"name": ' of a JSON one. Cutting at the marker alone leaves it behind and the caller
+# hears "node" for no reason.
+#
+# Anchored on ':' '=' or an opening bracket, never on '.', so an ordinary sentence ending
+# ("...below the launch price.") cannot match it. Only ever applied at a cut point, where
+# markup follows and nothing further will be appended.
+_TRAILING_LABEL = re.compile(
+    r"""(?:
+          ["']?[A-Za-z_][A-Za-z0-9_]{0,30}["']?\s*[:=]
+        | [\[\{\("'`]
+        )\s*$""",
+    re.X,
+)
 
 # Past Latin Extended-B. Deliberately letters only, so an em dash, a curly quote or a rupee
 # sign — none of which trouble the voice engine — do not cry wolf.
@@ -62,6 +109,68 @@ def non_latin_letters(text: str) -> str:
     audio whose transcript is clean ASCII throughout.
     """
     return "".join(dict.fromkeys(c for c in text if ord(c) > _LATIN_END and c.isalpha()))
+
+def trim_label_tail(spoken: str) -> str:
+    """Drop the label the model left dangling in front of its tool call."""
+    out = spoken.rstrip()
+    # Bounded rather than `while True`: a pathological response must not spin here, and four
+    # labels deep ('{"name": "') is already deeper than any leak has gone.
+    for _ in range(6):
+        match = _TRAILING_LABEL.search(out)
+        if not match:
+            break
+        out = out[: match.start()].rstrip()
+    return out
+
+
+def _earliest_bare_marker(lowered: str) -> int:
+    """Where the first bare marker starts in already-lowercased text, or -1."""
+    found = -1
+    for marker in _BARE_MARKERS:
+        at = lowered.find(marker)
+        if at != -1 and (found == -1 or at < found):
+            found = at
+    return found
+
+
+def _starts_a_word(text: str, at: int) -> bool:
+    """Whether position `at` could be the first character of a marker.
+
+    A marker always begins a word, so a trailing "e" inside "fine" is not the start of
+    `end_call` and must not be held back. Without this the last letter of almost every
+    ordinary reply was held for a frame, which broke the guarantee that normal speech
+    streams through untouched.
+    """
+    if at == 0:
+        return True
+    before = text[at - 1]
+    return not (before.isalnum() or before == "_")
+
+
+def _pending_suffix(text: str, lowered: str) -> int:
+    """How many trailing characters to hold back rather than speak yet.
+
+    Two reasons to hold. A suffix that is a proper prefix of a marker ("end_c") may become
+    one on the next token. And a trailing label ("node: ") may turn out to be sitting in
+    front of one — that second case is the one that matters, because the tokens arrive in
+    separate frames, so by the time `end_call` is recognised the label has already gone to
+    the TTS and cannot be taken back.
+
+    Costs one frame of delay, and only on text ending in ':' '=' or an opening bracket.
+    """
+    held = 0
+    for marker in _BARE_MARKERS:
+        length = min(len(marker) - 1, len(lowered))
+        while length > held:
+            if lowered.endswith(marker[:length]) and _starts_a_word(lowered, len(lowered) - length):
+                held = length
+                break
+            length -= 1
+    label = _TRAILING_LABEL.search(text)
+    if label:
+        held = max(held, len(text) - label.start())
+    return held
+
 
 TEXT = "text"
 MARKUP = "markup"
@@ -99,17 +208,30 @@ def split_speakable(buffer: str) -> Tuple[str, str, bool]:
     safe = ""
     rest = buffer
     while True:
+        lowered = rest.lower()
+        bare = _earliest_bare_marker(lowered)
         idx = rest.find("<")
-        if idx == -1:
-            return safe + rest, "", False
-        verdict = classify_bracket(rest[idx:])
-        if verdict == MARKUP:
-            return safe + rest[:idx], rest[idx:], True
-        if verdict == PARTIAL:
-            return safe + rest[:idx], rest[idx:], False
-        # A '<' that is genuinely part of speech; keep it and look past it.
-        safe += rest[: idx + 1]
-        rest = rest[idx + 1 :]
+
+        # The bracket scanner runs first only where a bracket actually comes first. On a tie
+        # the bare marker wins: that tie is '<|', whose word classify_bracket does not know.
+        if idx != -1 and (bare == -1 or idx < bare):
+            verdict = classify_bracket(rest[idx:])
+            if verdict == MARKUP:
+                return trim_label_tail(safe + rest[:idx]), rest[idx:], True
+            if verdict == PARTIAL:
+                return safe + rest[:idx], rest[idx:], False
+            # A '<' that is genuinely part of speech; keep it and look past it.
+            safe += rest[: idx + 1]
+            rest = rest[idx + 1 :]
+            continue
+
+        if bare != -1:
+            return trim_label_tail(safe + rest[:bare]), rest[bare:], True
+
+        held = _pending_suffix(rest, lowered)
+        if held:
+            return safe + rest[: len(rest) - held], rest[len(rest) - held :], False
+        return safe + rest, "", False
 
 
 def extract_closing_line(markup: str) -> Optional[str]:
@@ -117,9 +239,9 @@ def extract_closing_line(markup: str) -> Optional[str]:
     if not match:
         return None
     try:
-        return match.group(1).encode().decode("unicode_escape")
+        return match.group("text").encode().decode("unicode_escape")
     except Exception:
-        return match.group(1)
+        return match.group("text")
 
 
 class ToolSyntaxFilter(FrameProcessor):
