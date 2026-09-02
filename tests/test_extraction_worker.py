@@ -100,8 +100,15 @@ async def test_booked_site_visit_is_upgraded_to_hot(run_worker):
 
 
 async def test_no_booking_keeps_the_model_status(run_worker):
+    """The timeline is what makes WARM survivable: without a single stated fact the status is
+    capped at COLD whatever the model claims, and this test would then be measuring the cap
+    rather than the absence of a booking. A timeline rather than a budget because budget is
+    checked against the transcript and would be dropped before the cap ever saw it."""
     lead = await run_worker(
-        LeadExtraction(is_prospect=True, customer_name="Rahul", status=LeadStatus.WARM)
+        LeadExtraction(
+            is_prospect=True, customer_name="Rahul", status=LeadStatus.WARM,
+            timeline_months=6,
+        )
     )
     assert lead.site_visit_time is None
     assert lead.status is LeadStatus.WARM
@@ -112,10 +119,13 @@ async def test_partial_appointment_is_not_stored(run_worker):
     lead = await run_worker(
         LeadExtraction(
             is_prospect=True, customer_name="Rahul", status=LeadStatus.WARM,
+            timeline_months=6,
             site_visit_weekday=Weekday.SATURDAY, site_visit_at=None,
         )
     )
     assert lead.site_visit_time is None
+    # WARM survives because of the timeline, not the half-appointment: a weekday
+    # with no hour is not a booking and must not raise the lead by itself.
     assert lead.status is LeadStatus.WARM
 
 

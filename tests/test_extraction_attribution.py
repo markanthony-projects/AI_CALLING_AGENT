@@ -44,25 +44,23 @@ def test_transliteration_covers_names():
     assert "No Devanagari character may remain" in PROMPT
 
 
-def test_a_missing_status_is_defaulted_not_stored_null():
+def test_a_missing_status_is_never_stored_null():
     """13 of 24 leads had no status, including one with a 1.5 Crore budget and an agreed
-    visit. A null hides the lead from every filter sales works from."""
-    src = inspect.getsource(worker.process_extraction)
-    tree = ast.parse(src.lstrip())
-    guards = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.If)
-        and isinstance(n.test, ast.Compare)
-        and ast.unparse(n.test) == "lead.status is None"
-    ]
-    assert guards, "a status the model omitted is written to the database as null"
-    assert "LeadStatus.WARM" in ast.unparse(guards[0]), "the default must be a real status"
+    visit. A null hides the lead from every filter sales works from.
+
+    The fill-in used to be a flat WARM. It is the lead's own ceiling now — never null, and
+    never warmer than the call earned. See app/utils/lead_status.py."""
+    from app.models.db import Lead, LeadStatus
+    from app.utils.lead_status import capped_status
+
+    assert capped_status(None, Lead()) is LeadStatus.COLD
+    assert capped_status(None, Lead(budget=8_000_000)) is LeadStatus.WARM
 
 
-def test_the_default_runs_before_the_hot_upgrade():
-    """Order matters: defaulting after the site-visit upgrade would overwrite HOT with WARM."""
+def test_the_status_is_settled_before_the_hot_upgrade():
+    """Order matters: settling it after the site-visit upgrade would overwrite HOT."""
     src = inspect.getsource(worker.process_extraction)
-    assert src.index("lead.status is None") < src.index("lead.site_visit_time is not None")
+    assert src.index("capped_status(") < src.index("lead.site_visit_time is not None")
 
 
 def test_the_column_itself_refuses_null():

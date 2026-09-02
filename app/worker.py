@@ -22,6 +22,7 @@ from app.utils.attribution import (
     name_spoken_by_prospect,
     phrase_is_grounded,
 )
+from app.utils.lead_status import capped_status, qualifying_facts
 from app.utils.timeutils import is_within_business_hours, resolve_appointment, to_ist, utc_now
 
 _CALL_MODULES = {
@@ -85,6 +86,11 @@ def _build_system_prompt(reference_time: datetime) -> str:
         "they want, need or already own, is_prospect is false.\n"
         "There are three outcomes, not two: interested (true), refused (false), and never engaged (false). "
         "A call that ended before the Prospect said anything of their own belongs in the third.\n"
+        "WHEN THE TWO RULES ABOVE DISAGREE — they showed interest but told you nothing about themselves — "
+        "is_prospect is TRUE and status is COLD. Wanting to hear more is not the same as telling you "
+        "something: 'tell me more', 'go on', 'batao batao', 'how much is it', asked and then the call ended, "
+        "is a curious Prospect and worth keeping as a lead. It is not a requirement they stated, so it must "
+        "never make them WARM.\n"
         "CRITICAL RULE FOR status: you MUST always set it. It is never null. This is the field sales sorts "
         "the day's callbacks by, and a lead without one is invisible to them.\n"
         "- HOT: they agreed to a site visit, asked for a callback at a stated time, gave a budget that fits, "
@@ -93,7 +99,9 @@ def _build_system_prompt(reference_time: datetime) -> str:
         "locality, a configuration, a timeline — but committed to nothing yet.\n"
         "- COLD: they refused, they have already bought, their timeline is far away, or the call ended with "
         "them having said nothing about their own requirements. A call that was cut off before they engaged "
-        "is COLD, not WARM: nothing in it says they are interested.\n"
+        "is COLD, not WARM: nothing in it says they are interested. So is one where every Prospect line is "
+        "an acknowledgement or a request to hear more — 'Yes', 'Ok', 'tell me tell me' — however keen they "
+        "sounded. Point to the budget, locality, configuration or timeline they gave; if you cannot, COLD.\n"
         "Judge only what the Prospect said. A polite 'yes' to the Agent's questions is not a commitment.\n"
         "CRITICAL RULE FOR budget: ONLY output a valid numerical float (e.g. 8000000) or null. Convert Lakhs/Crores to full float (e.g. 75 Lakhs = 7500000).\n"
         "Give the figure the Prospect actually said. If they gave a range ('1 to 2 Crores'), report the LOWEST "
@@ -410,12 +418,25 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
         if lead.customer_name and not lead.customer_name.isascii():
             logger.warning(f"[{call_sid}] customer_name not transliterated: {lead.customer_name!r}")
 
-        # is_prospect already qualified them, so a missing status is the model declining to
-        # answer rather than a judgement that the lead is cold. Leaving it null hides the lead
-        # from every status filter sales uses, which is worse than guessing one notch high.
-        if lead.status is None:
-            logger.warning(f"[{call_sid}] Extraction returned no status; defaulting to WARM")
-            lead.status = LeadStatus.WARM
+        # Lowered to whatever the prospect actually told us, and set to that outright when the
+        # model declined to say. This used to default to a flat WARM, which was reached on two
+        # of the first three production calls and was wrong on both — a lead carrying nothing
+        # at all wore the same colour as one with a budget, a timeline and a booked callback.
+        # See app/utils/lead_status.py. It only ever lowers: a COLD verdict on a prospect who
+        # gave four facts is the model hearing a refusal, and that is left alone.
+        claimed = lead.status
+        lead.status = capped_status(claimed, lead)
+        if claimed is None:
+            logger.info(
+                f"[{call_sid}] Extraction returned no status; the call itself says "
+                f"{lead.status.value} (stated: {qualifying_facts(lead) or 'nothing'})"
+            )
+        elif lead.status is not claimed:
+            logger.warning(
+                f"[{call_sid}] Extraction claimed {claimed.value}, but the prospect stated "
+                f"{qualifying_facts(lead) or 'nothing'} and booked nothing; recording "
+                f"{lead.status.value}"
+            )
 
         # A booked site visit is the strongest buying signal there is; don't leave it to the model.
         if lead.site_visit_time is not None and lead.status is not LeadStatus.HOT:

@@ -23,7 +23,7 @@ import time
 
 import pytest
 
-from app.models.db import CallStatus, Purpose
+from app.models.db import CallStatus, Lead, LeadStatus, Purpose
 from app.models.schemas import LeadExtraction
 from app.utils.answering_machine import (
     OPENING_TURNS,
@@ -31,6 +31,7 @@ from app.utils.answering_machine import (
     machine_in_opening,
     machine_phrases,
 )
+from app.utils.lead_status import capped_status, qualifying_facts, status_ceiling
 from app.utils.attribution import (
     budget_as_stated,
     budget_is_grounded,
@@ -826,3 +827,132 @@ def test_the_agent_accumulates_the_opening_turns():
     src = inspect.getsource(agent.run_voice_agent)
     assert "_opening_turns.append(transcript)" in src
     assert "machine_in_opening(_opening_turns)" in src
+
+
+# --- how warm a lead is allowed to be ---------------------------------------------------
+#
+# A live call on 2 Sep 2026, 11:35. Everything the prospect said:
+#
+#     Prospect: "Yes. Ok."
+#     Prospect: "Tell me tell me."
+#
+# Six words, and the extraction returned WARM. Every field on the lead was null — the name
+# and number came off the dial list, not out of the call — and it went into the dashboard
+# beside a lead who had given a budget, a purpose, a timeline, a configuration and a booked
+# callback, wearing the same colour.
+#
+# The prompt already said a call where the prospect stated nothing is COLD. It said so on
+# this call too. So the rule is expressed as code as well, the same move _drop_ungrounded
+# made for budget and locality after the prompt was ignored twice in capitals.
+
+def _lead(**fields):
+    return Lead(**fields)
+
+
+def test_a_lead_that_carries_nothing_cannot_be_warm():
+    """The call this was built from."""
+    assert capped_status(LeadStatus.WARM, _lead(customer_name="Abhijit Kumar Singh")) is LeadStatus.COLD
+
+
+def test_one_stated_requirement_is_enough_to_be_warm():
+    assert capped_status(LeadStatus.WARM, _lead(purpose=Purpose.SELF_USE)) is LeadStatus.WARM
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("budget", 8_000_000),
+        ("purpose", "SELF_USE"),
+        ("timeline", "next year"),
+        ("timeline_months", 12),
+        ("preferred_unit_type", "2 BHK"),
+        ("preferred_location", "Whitefield"),
+    ],
+)
+def test_every_qualifying_field_counts(field, value):
+    """Each of these is something a rep can act on. Leaving one out would quietly cap a real
+    lead at COLD."""
+    assert qualifying_facts(_lead(**{field: value})) == [field]
+
+
+def test_the_dial_lists_own_columns_do_not_count():
+    """customer_name and phone_number are on the row whether the call happened or not. If
+    they counted, no lead could ever be COLD and the cap would do nothing at all."""
+    assert qualifying_facts(_lead(customer_name="Abhijit", phone_number="+919449814509")) == []
+
+
+def test_a_booking_outranks_everything():
+    """Someone who agreed to a time has told us more than any answer could, so a lead with
+    nothing else on it is still allowed to be HOT."""
+    from datetime import datetime
+
+    assert status_ceiling(_lead(site_visit_time=datetime(2026, 9, 6, 11, 0))) is LeadStatus.HOT
+    assert status_ceiling(_lead(callback_time=datetime(2026, 9, 2, 18, 0))) is LeadStatus.HOT
+
+
+def test_the_cap_only_ever_lowers():
+    """A COLD verdict on a prospect who gave four facts is the model hearing a refusal, and
+    that judgement is left alone. The failure being corrected runs one way — towards
+    flattering the pipeline."""
+    rich = _lead(budget=8_000_000, preferred_location="Whitefield", timeline_months=3)
+    assert capped_status(LeadStatus.COLD, rich) is LeadStatus.COLD
+
+
+def test_a_missing_status_becomes_the_ceiling_rather_than_a_flat_warm():
+    """Two of the first three production calls hit the old flat default, and it was wrong on
+    both."""
+    assert capped_status(None, _lead()) is LeadStatus.COLD
+    assert capped_status(None, _lead(timeline_months=6)) is LeadStatus.WARM
+
+
+def test_the_four_production_leads_land_where_they_belong():
+    """The whole point, read against the calls that produced the rule."""
+    from datetime import datetime
+
+    mayur = _lead(budget=10_000_000, purpose=Purpose.SELF_USE, timeline_months=12,
+                  preferred_unit_type="2 BHK", callback_time=datetime(2026, 9, 2, 18, 0))
+    sachin = _lead(purpose=Purpose.SELF_USE, timeline_months=42, preferred_unit_type="2 BHK",
+                   site_visit_time=datetime(2026, 9, 6, 11, 0))
+
+    assert capped_status(LeadStatus.WARM, _lead()) is LeadStatus.COLD            # Abhijit
+    assert capped_status(None, _lead()) is LeadStatus.COLD                       # Rutik
+    assert capped_status(LeadStatus.WARM, mayur) is LeadStatus.WARM              # unchanged
+    assert capped_status(None, sachin) is LeadStatus.HOT                         # unchanged
+
+
+def test_the_worker_caps_what_it_stores():
+    """The helper being right is not enough. Read off the assignment rather than grepping,
+    because the comment above it names the module too."""
+    tree = ast.parse(_worker_source("process_extraction").lstrip())
+    assigned = [
+        ast.unparse(n.value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(ast.unparse(t) == "lead.status" for t in n.targets)
+    ]
+    assert any(a.startswith("capped_status(") for a in assigned), assigned
+
+
+def test_the_prompt_resolves_its_own_contradiction():
+    """is_prospect says MUST BE TRUE on ANY genuine interest, and two lines later says FALSE
+    when they never engaged. "Tell me tell me" satisfies both, and the model took the
+    capitalised one. The tie is now called explicitly."""
+    from app.utils.timeutils import utc_now
+
+    prompt = _build_prompt(utc_now())
+    assert "WHEN THE TWO RULES ABOVE DISAGREE" in prompt
+    assert "is_prospect is TRUE and status is COLD" in prompt
+
+
+def test_the_prompt_says_curiosity_is_not_a_requirement():
+    from app.utils.timeutils import utc_now
+
+    prompt = _build_prompt(utc_now())
+    assert "tell me tell me" in prompt.lower()
+    assert "request to hear more" in prompt
+
+
+def _build_prompt(now):
+    from app.worker import _build_system_prompt
+
+    return _build_system_prompt(now)
