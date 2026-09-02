@@ -112,6 +112,36 @@ def budget_is_grounded(budget: Optional[float], transcript: str) -> bool:
     return min(amounts) * 0.99 <= budget <= max(amounts) * 1.01
 
 
+def budget_as_stated(budget: Optional[float], transcript: str) -> Optional[float]:
+    """The budget to record: a figure the prospect actually said, never one between them.
+
+    budget_is_grounded accepts anything inside a range, so a prospect who said "1 to 2 CR"
+    had 1,50,00,000 written down — the midpoint, a number nobody uttered. That happened on a
+    live call on 2 Sep 2026. It reads as a precise answer to whoever opens the lead, and the
+    error runs the expensive way: a rep pitches a 1.5 Cr home to someone who may have meant
+    one Crore.
+
+    So a value that matches no single figure the prospect named is snapped down to the
+    lowest one inside the range. The floor is the claim they actually made — "at least this
+    much" — and understating is the safe direction: a prospect shown cheaper options can say
+    they will go higher, while one shown homes they cannot afford is simply lost.
+
+    Anything already equal to a figure they named passes through untouched, so the ordinary
+    case — one number, said once — is unaffected.
+    """
+    if budget is None:
+        return None
+    amounts = money_in_rupees(prospect_text(transcript))
+    if not amounts:
+        return budget  # ungrounded; budget_is_grounded drops it separately
+    # The same 1% tolerance budget_is_grounded uses, so "1.17 Crores" and 11700000 are one
+    # figure rather than two.
+    if any(abs(budget - amount) <= amount * 0.01 for amount in amounts):
+        return budget
+    inside = [a for a in amounts if a <= budget]
+    return min(inside) if inside else budget
+
+
 def phrase_is_grounded(value: Optional[str], transcript: str) -> bool:
     """True when some distinctive word of `value` appears in what the prospect said.
 

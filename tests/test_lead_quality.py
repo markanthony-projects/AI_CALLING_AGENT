@@ -27,6 +27,7 @@ from app.models.db import CallStatus, Purpose
 from app.models.schemas import LeadExtraction
 from app.utils.answering_machine import is_answering_machine, machine_phrases
 from app.utils.attribution import (
+    budget_as_stated,
     budget_is_grounded,
     money_in_rupees,
     phrase_is_grounded,
@@ -611,3 +612,135 @@ def test_requests_are_refilled_forward_like_tokens(monkeypatch):
     monkeypatch.setattr(llm_budget, "get_arq_pool", lambda: _R())
     room = asyncio.run(llm_budget.headroom())
     assert 2.0 < room.requests < 3.0, f"expected ~2.5 requests refilled, got {room.requests}"
+
+
+# --- grounded is not the same as stated -------------------------------------------------
+#
+# From a live call on 2 Sep 2026. Asked his budget, the prospect said "1 1 to 2 CR"; the
+# lead was written down as 1,50,00,000 — the midpoint of the range, a figure nobody uttered.
+# budget_is_grounded passes it, and correctly: every rupee of it is inside what he said. But
+# it reads to whoever opens the lead as a precise answer, and the error runs the expensive
+# way — a rep pitching a 1.5 Cr home to a man who may have meant one Crore.
+
+MAYUR = "Agent: What budget range are you thinking of?\nProspect: 1 1 to 2 CR.\n"
+
+
+def test_a_midpoint_nobody_said_is_snapped_to_the_figure_they_did_say():
+    assert budget_as_stated(15_000_000.0, MAYUR) == 10_000_000.0
+
+
+@pytest.mark.parametrize("budget", [10_000_000.0, 20_000_000.0])
+def test_either_end_of_the_range_is_left_alone(budget):
+    """Both ends are figures the prospect actually named. Only the space between them is
+    the model's own invention."""
+    assert budget_as_stated(budget, MAYUR) == budget
+
+
+def test_the_ordinary_case_is_untouched():
+    """One number, said once. Nothing to snap, and no rounding drift allowed either."""
+    assert budget_as_stated(6_000_000.0, STATED) == 6_000_000.0
+
+
+def test_a_figure_within_rounding_of_a_stated_one_is_not_snapped():
+    """"60 lakhs" and 6000000.0 are one figure. Snapping here would move a correct value."""
+    assert budget_as_stated(6_000_000.0 * 1.005, STATED) == 6_000_000.0 * 1.005
+
+
+def test_nothing_stated_is_left_for_the_grounding_check_to_drop():
+    """budget_as_stated must not quietly keep a fabricated figure alive by having nothing to
+    compare it to — dropping it is budget_is_grounded's job, and it does drop it."""
+    assert budget_as_stated(11_700_000.0, FABRICATED) == 11_700_000.0
+    assert not budget_is_grounded(11_700_000.0, FABRICATED)
+
+
+def test_a_null_budget_stays_null():
+    assert budget_as_stated(None, MAYUR) is None
+
+
+def test_the_worker_applies_it_to_what_it_records():
+    """The helper being right is not enough: the midpoint reached the database through
+    _drop_ungrounded, which only ever nulled fields and had no opinion about this one."""
+    import inspect
+
+    from app import worker
+
+    assert "budget_as_stated" in inspect.getsource(worker._drop_ungrounded)
+
+
+def test_the_extraction_prompt_asks_for_the_low_end_of_a_range():
+    """Fixing it after the fact is the safety net, not the plan. The model is told."""
+    from app.worker import _build_system_prompt
+    from app.utils.timeutils import utc_now
+
+    prompt = _build_system_prompt(utc_now()).lower()
+    assert "lowest" in prompt and "range" in prompt
+
+
+# --- the status the model kept declining to give ----------------------------------------
+
+
+def test_the_prompt_rules_on_every_lead_status():
+    """Two of the three calls on 2 Sep 2026 logged "Extraction returned no status;
+    defaulting to WARM". The prompt had rules for is_prospect, budget, locality, unit type,
+    appointments and transliteration — and not one word about status, so the field sales
+    sorts by was a constant rather than a judgement."""
+    from app.worker import _build_system_prompt
+    from app.utils.timeutils import utc_now
+
+    prompt = _build_system_prompt(utc_now())
+    assert "CRITICAL RULE FOR status" in prompt
+    for verdict in ("HOT", "WARM", "COLD"):
+        assert f"- {verdict}:" in prompt, f"{verdict} is never defined for the model"
+
+
+def test_a_call_that_was_cut_off_is_not_warm():
+    """WARM is the fallback when the model says nothing, so the prompt has to be explicit
+    that a call which ended before the prospect engaged is not one."""
+    from app.worker import _build_system_prompt
+    from app.utils.timeutils import utc_now
+
+    prompt = _build_system_prompt(utc_now())
+    assert "cut off before they engaged is COLD" in prompt
+
+
+# Three figures, so the lowest and the highest below the model's answer are different
+# numbers. With Mayur's transcript they coincide — there is only one figure under the
+# midpoint — so it cannot tell snapping down from snapping up, and a mutation that reached
+# for the top of the range passed every test above.
+SPREAD = "Prospect: my range is 80 lakhs to 2 crore, ideally around 1 crore.\n"
+
+
+def test_it_snaps_to_the_lowest_stated_figure_not_the_highest():
+    """80 lakhs and 1 crore are both under 1.5 Cr and both were said. The floor is the claim
+    that survives contact with a rep: understating sends them to cheaper stock, overstating
+    sends them to homes the prospect cannot buy."""
+    assert budget_as_stated(15_000_000.0, SPREAD) == 8_000_000.0
+
+
+def test_the_worker_records_the_snapped_figure():
+    """Asserting the name appears in _drop_ungrounded is not enough — it appears in the
+    comment there too, so removing the call outright still read as present. This runs it."""
+    from app.models.schemas import LeadExtraction
+    from app.worker import _drop_ungrounded
+
+    lead = LeadExtraction(is_prospect=True, budget=15_000_000.0)
+    assert _drop_ungrounded(lead, MAYUR, "sid").budget == 10_000_000.0
+
+
+def test_the_worker_leaves_a_stated_figure_alone():
+    """The snapping must not fire on the ordinary case, where the model answered correctly."""
+    from app.models.schemas import LeadExtraction
+    from app.worker import _drop_ungrounded
+
+    lead = LeadExtraction(is_prospect=True, budget=6_000_000.0)
+    assert _drop_ungrounded(lead, STATED, "sid").budget == 6_000_000.0
+
+
+def test_the_worker_still_drops_a_fabricated_budget_entirely():
+    """Snapping is for figures inside what the prospect said. One that came out of the
+    agent's own pitch is not snapped closer — it is removed."""
+    from app.models.schemas import LeadExtraction
+    from app.worker import _drop_ungrounded
+
+    lead = LeadExtraction(is_prospect=True, budget=11_700_000.0)
+    assert _drop_ungrounded(lead, FABRICATED, "sid").budget is None

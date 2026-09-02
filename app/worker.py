@@ -17,6 +17,7 @@ from app.models.db import Call, Campaign, Contact, Lead, LeadStatus, Project, Tr
 from app.models.schemas import LeadExtraction
 from app.services.dial_pump import dial_due_contacts, release_stale_dialing
 from app.utils.attribution import (
+    budget_as_stated,
     budget_is_grounded,
     name_spoken_by_prospect,
     phrase_is_grounded,
@@ -84,7 +85,20 @@ def _build_system_prompt(reference_time: datetime) -> str:
         "they want, need or already own, is_prospect is false.\n"
         "There are three outcomes, not two: interested (true), refused (false), and never engaged (false). "
         "A call that ended before the Prospect said anything of their own belongs in the third.\n"
+        "CRITICAL RULE FOR status: you MUST always set it. It is never null. This is the field sales sorts "
+        "the day's callbacks by, and a lead without one is invisible to them.\n"
+        "- HOT: they agreed to a site visit, asked for a callback at a stated time, gave a budget that fits, "
+        "or asked what the next step is. A concrete commitment.\n"
+        "- WARM: they engaged with the pitch and told you something real about what they want — a budget, a "
+        "locality, a configuration, a timeline — but committed to nothing yet.\n"
+        "- COLD: they refused, they have already bought, their timeline is far away, or the call ended with "
+        "them having said nothing about their own requirements. A call that was cut off before they engaged "
+        "is COLD, not WARM: nothing in it says they are interested.\n"
+        "Judge only what the Prospect said. A polite 'yes' to the Agent's questions is not a commitment.\n"
         "CRITICAL RULE FOR budget: ONLY output a valid numerical float (e.g. 8000000) or null. Convert Lakhs/Crores to full float (e.g. 75 Lakhs = 7500000).\n"
+        "Give the figure the Prospect actually said. If they gave a range ('1 to 2 Crores'), report the LOWEST "
+        "end of it, never a number in between — 1.5 Crores is a figure nobody uttered, and it reads to sales "
+        "as a precise answer.\n"
         "CRITICAL RULE FOR ATTRIBUTION: Extract ONLY facts the Prospect stated about themselves. "
         "Every 'Agent:' line describes the LISTING — its locality, asking price, size and amenities. None of it is prospect data. "
         "Before filling any field, find the 'Prospect:' line it came from. If it only appears on an 'Agent:' line, the value is null.\n"
@@ -296,6 +310,18 @@ def _drop_ungrounded(lead_data: LeadExtraction, transcript: str, call_sid: str) 
                 f"[{call_sid}] Dropping {field}={value!r}: no Prospect line says it. "
                 f"This is the agent's own pitch being read back as the caller's requirement."
             )
+
+    # Grounded is not the same as stated. A budget inside a range the prospect named passes
+    # the check above and can still be a number they never said — see budget_as_stated.
+    if "budget" not in dropped:
+        stated = budget_as_stated(lead_data.budget, transcript)
+        if stated != lead_data.budget:
+            logger.warning(
+                f"[{call_sid}] Budget {lead_data.budget!r} is between the figures the Prospect "
+                f"named, not one of them; recording {stated!r}, the lowest they said."
+            )
+            dropped["budget"] = stated
+
     return lead_data.model_copy(update=dropped) if dropped else lead_data
 
 
