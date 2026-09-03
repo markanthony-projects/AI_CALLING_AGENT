@@ -309,6 +309,21 @@ async def callback_fields(request: Request) -> dict:
         return {}
 
 
+def carrier_call_id(fields: dict) -> str:
+    """The carrier's own id for this call, out of its callback.
+
+    Ours is a UUID we mint; theirs is the one their dashboard and their support desk index
+    by, and the two are unrelated. Without this, asking them about one specific call meant
+    matching it up by phone number and wall-clock time.
+    """
+    lowered = {k.lower(): v for k, v in fields.items()}
+    for key in ("calluuid", "call_uuid", "requestuuid", "request_uuid"):
+        value = str(lowered.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def was_answered(fields: dict) -> bool:
     """Whether the carrier says a human picked up.
 
@@ -374,6 +389,7 @@ async def vobiz_hangup(campaign_id: str, call_sid: str, request: Request):
 
     logger.info(
         f"[{call_sid}] Carrier hung up | answered={answered} | cause={cause or 'unreported'}"
+        f" | vobiz_call_id={carrier_call_id(fields) or 'unreported'}"
         + (" | contact updated" if changed else "")
     )
     return Response(status_code=200)

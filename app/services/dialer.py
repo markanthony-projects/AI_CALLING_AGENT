@@ -1,7 +1,31 @@
+from typing import Optional
+
 import httpx
 from app.core.config import settings
 from app.core.security import issue_call_token
 from loguru import logger
+
+def vobiz_request_uuid(response) -> Optional[str]:
+    """The carrier's own identifier for a call it has just accepted.
+
+    Best effort on purpose: this exists to make a support ticket possible, and a dial that
+    worked must never fail because the reply was shaped differently than expected.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    for key in ("request_uuid", "requestUuid", "RequestUUID", "call_uuid", "CallUUID"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        # Some carriers return one entry per destination number.
+        if isinstance(value, list) and value and isinstance(value[0], str):
+            return value[0].strip()
+    return None
+
 
 async def trigger_vobiz_call(customer_number: str, campaign_id: str, call_sid: str) -> bool:
     """Trigger outbound call via Vobiz AI REST API"""
@@ -47,7 +71,22 @@ async def trigger_vobiz_call(customer_number: str, campaign_id: str, call_sid: s
         "hangup_url": hangup_url,
         "hangup_method": "POST",
         # Stop ringing long before the carrier would. See VOBIZ_RING_SECONDS.
-        "hangup_on_ring": settings.VOBIZ_RING_SECONDS,
+        #
+        # ring_timeout, NOT hangup_on_ring. They sound interchangeable and are not:
+        #
+        #   ring_timeout     how long the destination may ring before the call is abandoned
+        #   hangup_on_ring   "schedules the call for hangup at a specified time after the
+        #                    call starts ringing" — a scheduled hangup, with no condition
+        #                    that the call still be ringing when it fires
+        #
+        # We had the second one, which is why live conversations died. On 2 Sep 2026 a call
+        # rang at 11:53:24, was answered at 11:53:35, and was cut at 11:54:09 with both
+        # parties mid-sentence — 45 seconds after ring start, to the second, which is the
+        # value below. The carrier's own cause code says "Scheduled Hangup", which is this
+        # parameter's own name. Three calls died this way before the arithmetic was spotted,
+        # because the obvious place to measure from is the answer, and from there the times
+        # looked unrelated: 33.9s, 38.8s, 39.1s. From ring start they were all exactly 45.
+        "ring_timeout": settings.VOBIZ_RING_SECONDS,
         # Vobiz defaults this to four hours. Our own pipeline hangs up at
         # MAX_CALL_DURATION_SECS, so this only matters when that pipeline is the thing that
         # died — and then it is the difference between a stuck leg costing seconds and one
@@ -62,7 +101,14 @@ async def trigger_vobiz_call(customer_number: str, campaign_id: str, call_sid: s
         try:
             response = await client.post(url, headers=headers, json=data)
             if response.status_code in (200, 201):
-                logger.info(f"Successfully triggered Vobiz call for {customer_number}")
+                # The carrier's own id for this call, logged beside ours. Vobiz does not know
+                # our call_sid — it is a UUID we mint and put in the callback URLs — so every
+                # support ticket about a specific call meant opening their dashboard by hand
+                # to find their identifier. The reply carries it and we were discarding it.
+                logger.info(
+                    f"Successfully triggered Vobiz call for {customer_number}"
+                    f" | vobiz_request_uuid={vobiz_request_uuid(response) or 'unreported'}"
+                )
                 return True
             else:
                 logger.error(f"Vobiz call failed: {response.text}")

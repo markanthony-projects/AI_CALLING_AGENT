@@ -204,10 +204,39 @@ def test_the_ring_is_capped_and_so_is_the_call():
     from app.services import agent, dialer
 
     src = inspect.getsource(dialer.trigger_vobiz_call)
-    assert '"hangup_on_ring": settings.VOBIZ_RING_SECONDS' in src
+    assert '"ring_timeout": settings.VOBIZ_RING_SECONDS' in src
     assert '"time_limit"' in src
     # Our own cap has to win in the normal case, or the caller loses the goodbye.
     assert settings.VOBIZ_RING_SECONDS < agent.MAX_CALL_DURATION_SECS
+
+
+def test_the_ring_cap_is_never_sent_as_a_scheduled_hangup():
+    """hangup_on_ring is not a ring limit. The carrier documents it as "schedules the call
+    for hangup at a specified time after the call starts ringing" — no condition that the
+    call still be ringing when it fires, which is exactly how it behaved.
+
+    On 2 Sep 2026 a call rang at 11:53:24, was answered at 11:53:35, and was cut at 11:54:09
+    with both parties mid-sentence: 45 seconds after ring start, to the second, which is what
+    we were sending. Three live conversations died before the arithmetic was spotted, because
+    measuring from the answer made the times look unrelated — 33.9s, 38.8s, 39.1s.
+
+    Read off the request body rather than the whole function, so the explanation of the bug
+    in the comment above it cannot make this pass.
+    """
+    import ast
+    import inspect
+
+    from app.services import dialer
+
+    tree = ast.parse(inspect.getsource(dialer.trigger_vobiz_call).lstrip())
+    body = next(
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "data" for t in n.targets)
+    )
+    keys = {k.value for k in body.keys if isinstance(k, ast.Constant)}
+    assert "ring_timeout" in keys
+    assert "hangup_on_ring" not in keys, "this cuts answered calls; ring_timeout is the one"
 
 
 def test_a_slot_outlives_the_carriers_own_time_limit():
@@ -315,3 +344,101 @@ async def test_a_call_with_no_contact_behind_it_is_not_an_error(session):
     """Browser test calls and anything dialled before the queue existed have none."""
     session(_contact(ContactStatus.DIALING))
     assert await dial_pump.record_carrier_outcome(None, "NO_ANSWER", False) is False
+
+
+# --- whose call id is it anyway? ---------------------------------------------------------
+#
+# Our call_sid is a UUID we mint and put in the callback URLs. The carrier has never seen it
+# and cannot look it up. Their dashboard showed a completely different id for the same call:
+#
+#     ours    dd6acaa2-c126-47be-bb85-41a00dd9d3ab
+#     theirs  74e163ce-2109-4024-9dac-f9922e4af1db
+#
+# Which meant that asking their support about one specific call required opening the
+# dashboard by hand and matching on phone number and wall-clock time. Both ends of the call
+# hand us their identifier and we were discarding both.
+
+
+class _Reply:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "call fired", "request_uuid": "74e163ce-2109-4024-9dac-f9922e4af1db"},
+        {"requestUuid": "74e163ce-2109-4024-9dac-f9922e4af1db"},
+        {"RequestUUID": "74e163ce-2109-4024-9dac-f9922e4af1db"},
+        {"CallUUID": "74e163ce-2109-4024-9dac-f9922e4af1db"},
+        {"request_uuid": ["74e163ce-2109-4024-9dac-f9922e4af1db"]},
+    ],
+)
+def test_the_carriers_id_is_read_however_it_is_spelled(payload):
+    """A Plivo-shaped API, so the casing is not ours to rely on — and a list arrives when the
+    request named more than one destination."""
+    from app.services.dialer import vobiz_request_uuid
+
+    assert vobiz_request_uuid(_Reply(payload)) == "74e163ce-2109-4024-9dac-f9922e4af1db"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"message": "call fired"}, {}, "not a dict", ValueError("no body")],
+)
+def test_a_reply_without_one_costs_nothing(payload):
+    """This exists to make a support ticket possible. A dial that worked must never be
+    reported as failed because the reply was shaped differently than expected."""
+    from app.services.dialer import vobiz_request_uuid
+
+    assert vobiz_request_uuid(_Reply(payload)) is None
+
+
+def test_the_dial_still_succeeds_when_the_id_is_missing():
+    """The guard that matters: reading the id is never allowed to decide the dial."""
+    import ast
+    import inspect
+
+    from app.services import dialer
+
+    tree = ast.parse(inspect.getsource(dialer.trigger_vobiz_call).lstrip())
+    success = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.If) and "status_code in (200, 201)" in ast.unparse(n.test)
+    )
+    assert "vobiz_request_uuid" not in ast.unparse(success.test)
+    assert any(isinstance(n, ast.Return) and n.value.value is True for n in success.body)
+
+
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        ({"CallUUID": "74e163ce"}, "74e163ce"),
+        ({"call_uuid": "74e163ce"}, "74e163ce"),
+        ({"RequestUUID": "74e163ce"}, "74e163ce"),
+        ({"calluuid": "74e163ce"}, "74e163ce"),
+        ({"HangupCause": "NORMAL_CLEARING"}, ""),
+        ({}, ""),
+    ],
+)
+def test_the_hangup_callback_yields_the_carriers_id(fields, expected):
+    """The callback is the one place their id arrives on every call, answered or not."""
+    from app.api.routes.webhook import carrier_call_id
+
+    assert carrier_call_id(fields) == expected
+
+
+def test_the_carriers_id_is_logged_where_the_cause_is():
+    """One line carrying both ids and the cause is what a support ticket is written from."""
+    import inspect
+
+    from app.api.routes import webhook
+
+    src = inspect.getsource(webhook.vobiz_hangup)
+    hangup_line = src[src.index("Carrier hung up"):]
+    assert "carrier_call_id(fields)" in hangup_line
