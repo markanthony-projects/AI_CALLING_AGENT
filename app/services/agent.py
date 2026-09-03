@@ -57,6 +57,7 @@ from app.utils.latency import LatencyObserver
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
+from app.utils.socket_witness import SocketWitness
 from app.utils.spoken_text import ToolSyntaxFilter
 from app.utils.timeutils import time_of_day_greeting
 from app.utils.stt_witness import SttWitness
@@ -294,8 +295,15 @@ async def run_voice_agent(
 
     serializer = VobizSerializer(stream_sid=call_sid)
 
+    # Wrapped, not replaced: every call the transport makes falls through to the real socket.
+    # It is here only so the close code survives the close — Pipecat's message iterator sees
+    # the ASGI disconnect frame and raises a bare StopAsyncIteration, discarding the one field
+    # that says whether the peer closed on purpose or the connection died. Two live calls have
+    # now ended this way with nothing in the logs to tell those apart. See socket_witness.py.
+    socket = SocketWitness(websocket)
+
     transport = FastAPIWebsocketTransport(
-        websocket=websocket,
+        websocket=socket,
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
@@ -615,6 +623,9 @@ async def run_voice_agent(
         # record said the hangup source was the carrier. The distinction lives in the
         # carrier's hangup cause, which arrives separately; this line must not pre-empt it.
         logger.info(f"[{call_sid}] Media stream closed — ending pipeline")
+        # The whole point of SocketWitness, on its own line so it can be counted: `SOCKET`
+        # appears nowhere else in these logs.
+        logger.warning(f"[{call_sid}] SOCKET closed | {socket.report()}")
         await task.queue_frames([EndFrame(reason="the media stream closed")])
 
     # ─── Hard Duration Cap ─────────────────────────────────────────────────────
