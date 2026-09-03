@@ -137,6 +137,47 @@ class Settings(BaseSettings):
     # for them is user_turn_stop_timeout on LLMUserAggregatorParams, not this.
     VAD_STOP_SECS: float = 0.2
 
+    # --- speech to text -------------------------------------------------------------
+    #
+    # These carry the values that used to be literals inside run_voice_agent, so an
+    # untouched deployment listens with exactly what it listened with before. They exist
+    # because the next thing on the list is a three-way comparison, and running that by
+    # editing the agent between each attempt measures the deploy rather than the model.
+    STT_PROVIDER: str = "deepgram"
+    STT_MODEL: str = "nova-2-general"
+    # 'hi' natively covers Hinglish and English mixed on nova-2. Worth revisiting when the
+    # provider changes: Deepgram's newer models take 'multi' for real code-switching, and
+    # forcing a single language is why an English name came back in Devanagari.
+    STT_LANGUAGE: str = "hi"
+    # Deepgram's own silence window before it finalises a transcript, in milliseconds. Sits
+    # under TURN_SETTLE_SECS on purpose; see the note there.
+    STT_ENDPOINTING_MS: int = Field(default=300, ge=10, le=5000)
+
+    # Semantic end-of-turn detection, off by default.
+    #
+    # Pipecat's own model, bundled with the package and run locally on CPU. It answers the
+    # one question a silence timer cannot: is this sentence finished? On a live call on
+    # 3 Sep 2026 the prospect said "investment" / "is good or" / "self is good?" with
+    # pauses between, and the agent answered all three fragments separately because each
+    # pause outlasted TURN_SETTLE_SECS.
+    #
+    # It reads the audio rather than the transcript, which matters here more than it would
+    # elsewhere: our Hinglish transcription is the weak part of the stack, and a model that
+    # hears the intonation is not fooled by "3 crore" coming back as "3 year".
+    #
+    # Default off, and deliberately so. It was tried before and ruled "Maybe around in 2" a
+    # finished turn on PSTN; this is v3.2 rather than that build, but the risk is real and
+    # this has to be earned on measured calls, not assumed. Turning it on is one value, and
+    # turning it back off is one value — no deploy either way.
+    SMART_TURN_ENABLED: bool = False
+    # CPU threads for that inference. One is Pipecat's own default and enough for a single
+    # call; the ceiling matters because every concurrent call runs its own.
+    SMART_TURN_CPU_COUNT: int = Field(default=1, ge=1, le=8)
+    # How long to keep waiting when the model keeps saying the sentence is unfinished. This
+    # is the backstop, not the normal path — a prospect who trails off must not hold the
+    # line open. Pipecat's default is 3s.
+    SMART_TURN_STOP_SECS: float = Field(default=2.0, gt=0, le=10)
+
     # Words the prospect must say to cut the agent off while it is speaking. VAD alone
     # treated the "Hello?" on pickup as a barge-in and killed the opening line 0.7s in, so
     # the prospect never heard who was calling and asked "who are you?" two turns later.

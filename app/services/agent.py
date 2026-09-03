@@ -13,7 +13,6 @@ from pipecat.frames.frames import (
     TTSSpeakFrame,
 )
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
@@ -46,6 +45,7 @@ class GreetingOnlyMinWords(MinWordsUserTurnStartStrategy):
     def relax(self) -> None:
         self._min_words = 1
 from app.core.config import settings
+from app.services.stt_provider import build_stt_service
 from app.services.llm_provider import (
     MAX_THROTTLE_WAIT_SECS,
     build_llm_service,
@@ -60,6 +60,7 @@ from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
 from app.utils.spoken_text import ToolSyntaxFilter
 from app.utils.timeutils import time_of_day_greeting
+from app.utils.turn_analyzer import build_turn_analyzer
 from app.utils.stt_witness import SttWitness
 from app.utils.turn_gate import TurnFinalityGate
 from app.prompts.agent_prompts import AGENT_NAME, get_system_prompt
@@ -293,6 +294,8 @@ async def run_voice_agent(
         )
     )
 
+    turn_analyzer = build_turn_analyzer(call_sid, settings)
+
     serializer = VobizSerializer(stream_sid=call_sid)
 
     # Wrapped, not replaced: every call the transport makes falls through to the real socket.
@@ -311,6 +314,9 @@ async def run_voice_agent(
             audio_in_sample_rate=16000,
             audio_out_sample_rate=16000,
             serializer=serializer,
+            # None unless SMART_TURN_ENABLED, and None is what the transport had before —
+            # so an untouched deployment keeps the silence timer it has always used.
+            turn_analyzer=turn_analyzer,
         ),
     )
 
@@ -318,19 +324,7 @@ async def run_voice_agent(
     # inside the same await, so a 429 reached the logs as `groq=14605ms` with no error and
     # the caller sat through all fourteen seconds of it. See app/services/llm_provider.py.
     llm = build_llm_service(call_sid, settings)
-    stt = DeepgramSTTService(
-        api_key=settings.DEEPGRAM_API_KEY,
-        sample_rate=16000,
-        encoding="linear16",
-        channels=1,
-        settings=DeepgramSTTService.Settings(
-            model="nova-2-general",
-            language="hi", # 'hi' model natively supports Hinglish and English mixed
-            interim_results=True,
-            smart_format=True,
-            endpointing=300,
-        ),
-    )
+    stt = build_stt_service(call_sid, settings)
     
     # Low-latency streaming WebSocket Sarvam TTS with pace 1.0
     tts = SarvamTTSService(
