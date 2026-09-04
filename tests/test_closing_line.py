@@ -162,7 +162,17 @@ class _Filter:
         self.lead_in = lead_in
 
 
-def _build(task, farewell, tool_syntax_filter=None):
+class _ClosingGate:
+    """Stands in for ClosingGate, which end_call arms so no further turn is generated."""
+
+    def __init__(self):
+        self.armed = False
+
+    def arm(self):
+        self.armed = True
+
+
+def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
     """Compile the real end_call_handler and its helper together.
 
     They have to be built inside one enclosing function because end_call_handler declares
@@ -190,6 +200,7 @@ def _build(task, farewell, tool_syntax_filter=None):
         "task_ref": [task],
         "farewell": farewell,
         "tool_syntax_filter": tool_syntax_filter or _Filter(),
+        "closing_gate": closing_gate or _ClosingGate(),
         "farewell_timeout": lambda line: 1.0,
         "asyncio": _AsyncioShim,
         "TTSSpeakFrame": _Speak,
@@ -291,6 +302,24 @@ def test_a_lead_in_that_has_already_finished_playing_is_not_waited_for():
     batches = _drive(farewell, _Filter(lead_in=LEAD_IN))
     assert not farewell.waited_for_quiet
     assert batches[0] != ["_Speak"]
+
+
+def test_hanging_up_stops_any_further_turn_being_generated():
+    """A prospect who talks over the goodbye finalizes a turn, an inference runs on it, and
+    its answer is spoken after the farewell. On a live call they heard two sign-offs back to
+    back. _ending guards against a second end_call, which is a different thing."""
+    task = _Task()
+    gate = _ClosingGate()
+    handler, spawned = _build(task, _Farewell(), closing_gate=gate)
+    params = type("P", (), {"arguments": {"closing_line": BOOKING_READBACK}})()
+
+    async def go():
+        await handler(params)
+        for coro in spawned:
+            await coro
+
+    asyncio.run(go())
+    assert gate.armed, "the pipeline can still generate a reply to speak after the goodbye"
 
 
 def test_a_second_hangup_is_refused():

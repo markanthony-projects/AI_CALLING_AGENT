@@ -11,6 +11,7 @@ from pipecat.frames.frames import (
     EndWorkerFrame,
     InterruptionWorkerFrame,
     TTSSpeakFrame,
+    TTSUpdateSettingsFrame,
 )
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.services.sarvam.tts import SarvamTTSService
@@ -54,7 +55,9 @@ from app.services.llm_provider import (
 )
 from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
 from app.utils.asked import REPEAT_LIMIT, AskedSoFar
+from app.utils.closing_gate import ClosingGate
 from app.utils.latency import LatencyObserver
+from app.utils.pace import adjusted_pace, pace_request
 from app.utils.person_name import spoken_name
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
@@ -109,6 +112,11 @@ LLM_BUSY_LINE = "One moment please."
 
 # Spoken before we hang up when the model gives us nothing usable to say.
 FAREWELL_LINE = "Thank you so much for your time. Have a wonderful day!"
+
+# How fast the agent speaks when nobody has asked otherwise. Named rather than inline
+# because it is now two things: the value the call opens with, and the ceiling a
+# prospect can walk back up to after asking for slower. See app/utils/pace.py.
+SPEAKING_PACE = 1.0
 
 
 def caller_identity(project_name: str, developer_name: Optional[str] = None) -> str:
@@ -374,7 +382,7 @@ async def run_voice_agent(
         settings=SarvamTTSService.Settings(
             model="bulbul:v3",
             voice=settings.SARVAM_VOICE_ID,
-            pace=1.0,
+            pace=SPEAKING_PACE,
             **tts_tuning,
             max_chunk_length=150,
             # min_buffer_size is deliberately left at Sarvam's default. Setting it to 25
@@ -503,6 +511,7 @@ async def run_voice_agent(
         if not task_ref or _ending:
             return
         _ending = True
+        closing_gate.arm()
         # Detached on purpose. This handler runs inside the LLM service's function-call
         # machinery, which is waiting to push the tool result; holding it for the length of
         # a spoken sentence would block the very pipeline that has to carry the audio.
@@ -518,6 +527,7 @@ async def run_voice_agent(
         if not task_ref or _ending:
             return
         _ending = True
+        closing_gate.arm()
         if already_spoke:
             # The words before the markup were the goodbye, and they are on the wire now.
             # Speaking the leaked closing line too would be two farewells in a row — but the
@@ -534,6 +544,9 @@ async def run_voice_agent(
     # Above the tool-syntax filter on purpose: a reply to half a sentence must not reach
     # the leaked-end_call path either. See app/utils/turn_gate.py.
     turn_gate = TurnFinalityGate(call_sid)
+    # Armed by end_call. From then on no turn can be generated, so nothing can be
+    # spoken after the goodbye. See app/utils/closing_gate.py.
+    closing_gate = ClosingGate(call_sid)
     stt_witness = SttWitness()
     tool_syntax_filter = ToolSyntaxFilter(
         call_sid, on_leaked_end_call=on_leaked_end_call, campaign_context=campaign_context
@@ -574,6 +587,7 @@ async def run_voice_agent(
         # final never arrived. See app/utils/stt_witness.py.
         stt_witness,
         user_agg,
+        closing_gate,
         llm,
         # Drops a reply generated while the prospect was still talking, before anything
         # downstream can speak it or act on it.
@@ -632,6 +646,8 @@ async def run_voice_agent(
         _asked_shown = brief
         messages[0]["content"] = "\n\n".join([system_prompt, brief]) if brief else system_prompt
 
+    # Moves only when the prospect asks about the speed, and never past SPEAKING_PACE.
+    _pace: float = SPEAKING_PACE
     _turn_start_time: float = 0.0
     _user_has_spoken: bool = False
     _startup_task = None
@@ -834,6 +850,18 @@ async def run_voice_agent(
         if transcript:
             _user_has_spoken = True
             logger.info(f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})")
+
+            # "Can you say it again with... little bit slow hai?" — asked twice on a live
+            # call, and answered twice at exactly the same speed, because the pace was a
+            # constant. Being heard and ignored is worse than not being understood.
+            nonlocal _pace
+            wanted = adjusted_pace(_pace, pace_request(transcript), SPEAKING_PACE)
+            if wanted != _pace:
+                _pace = wanted
+                logger.info(f"[{call_sid}] Prospect asked about the speed; pace now {_pace}")
+                await task.queue_frames(
+                    [TTSUpdateSettingsFrame(delta=SarvamTTSService.Settings(pace=_pace))]
+                )
 
             # Only the opening turns. A recorded greeting is the first thing a machine says;
             # the same words later in a real conversation are a person talking about their

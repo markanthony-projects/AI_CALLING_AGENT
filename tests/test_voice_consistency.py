@@ -142,8 +142,13 @@ def test_the_model_we_send_it_to_is_one_that_accepts_it():
 
 
 def test_pace_is_still_pinned():
-    """Temperature moves the pace on its own. Leaving the base pace unset as well would
-    make a change here impossible to attribute."""
+    """Temperature moves the pace on its own. Leaving the base pace unset as well would make
+    a change here impossible to attribute.
+
+    It is a named constant now rather than a literal, because it became two things: what the
+    call opens with, and the ceiling a prospect can walk back up to after asking for slower.
+    Both have to be the same number or "faster" would drift past where the call started."""
     from app.services import agent
 
-    assert "pace=1.0" in inspect.getsource(agent.run_voice_agent)
+    assert agent.SPEAKING_PACE == 1.0
+    assert "pace=SPEAKING_PACE" in inspect.getsource(agent.run_voice_agent)
