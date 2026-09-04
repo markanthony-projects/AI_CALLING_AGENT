@@ -151,6 +151,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             call_sid,
             client_type=client_type,
             project_name=project["name"],
+            # .get, not [...]: the project dict is cached in Redis for 24 hours, so an entry
+            # written before this field existed will simply not have the key. Missing means
+            # the greeting names the project, which is what it did before either way.
+            developer_name=project.get("developer_name"),
             customer_name=await recall_customer_name(call_sid),
         )
         transcript = result.transcript

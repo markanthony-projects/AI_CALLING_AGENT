@@ -109,10 +109,24 @@ LLM_BUSY_LINE = "One moment please."
 FAREWELL_LINE = "Thank you so much for your time. Have a wonderful day!"
 
 
+def caller_identity(project_name: str, developer_name: Optional[str] = None) -> str:
+    """Who the agent says it is calling from.
+
+    The developer, when the project has one recorded. On a live call the agent said "I am
+    Priya calling you from Abhee Codename New Dimension" — which is the project, not an
+    employer. A person calls from the company and names the project when they describe it.
+
+    Falls back to the project name, which is what every call has said until now, so a
+    project nobody has filled this in for sounds exactly as it did before.
+    """
+    return (developer_name or "").strip() or project_name
+
+
 def build_opening_line(
     project_name: str,
     customer_name: Optional[str] = None,
     now: Optional[datetime] = None,
+    developer_name: Optional[str] = None,
 ) -> str:
     """The first thing the caller hears.
 
@@ -130,7 +144,8 @@ def build_opening_line(
     name = (customer_name or "").strip()
     address = f" {name}" if name else ""
     return (
-        f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from {project_name}. "
+        f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from "
+        f"{caller_identity(project_name, developer_name)}. "
         f"Can I speak to you for a minute?"
     )
 
@@ -280,9 +295,11 @@ async def run_voice_agent(
     client_type: str = "vobiz",
     project_name: str = "your project",
     customer_name: Optional[str] = None,
+    developer_name: Optional[str] = None,
 ):
     logger.info(
         f"[{call_sid}] Voice agent starting | client={client_type} | project='{project_name}' "
+        f"| calling as='{caller_identity(project_name, developer_name)}' "
         f"| lead={customer_name or 'unnamed'} | llm={primary_endpoint(settings)}"
     )
 
@@ -595,7 +612,9 @@ async def run_voice_agent(
             # someone who spoke first, which _user_has_spoken checks on the line below and
             # GreetingOnlyMinWords protects for the rest of the opening line anyway.
             if not _user_has_spoken:
-                opening_line = build_opening_line(project_name, customer_name)
+                opening_line = build_opening_line(
+                    project_name, customer_name, developer_name=developer_name
+                )
                 context.add_message({"role": "assistant", "content": opening_line})
                 logger.info(f"[{call_sid}] AGENT → \"{opening_line}\"")
                 # Alongside the greeting, not before it: the opening line is built locally and

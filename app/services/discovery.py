@@ -94,6 +94,7 @@ async def get_project_by_campaign(db: AsyncSession, campaign_id: str):
         
     project_dict = {
         "name": project.name,
+        "developer_name": project.developer_name,
         "locality": project.locality,
         "min_price": float(project.min_price) if project.min_price else None,
         "max_price": float(project.max_price) if project.max_price else None,

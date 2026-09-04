@@ -134,6 +134,11 @@ class Project(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     campaign_id = Column(String, index=True, nullable=True) # Deprecated, keeping for backwards compat
     name = Column(String, nullable=False)
+    # Who the agent says it is calling from. Separate from name because the agent used to
+    # introduce itself with the project — "I am Priya calling you from Abhee Codename New
+    # Dimension" — and a real person calls from the company, naming the project when they
+    # describe it. Nullable: without one the greeting falls back to name, as before.
+    developer_name = Column(String, nullable=True)
     city = Column(String, nullable=False)
     locality = Column(String, nullable=False)
     min_price = Column(Numeric)

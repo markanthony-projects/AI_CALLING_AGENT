@@ -184,6 +184,9 @@ class UnitConfig(BaseModel):
 class ProjectSummary(BaseModel):
     id: str
     name: str
+    # Who the agent says it is calling from. Optional: without one the greeting names the
+    # project, as it did before this field existed.
+    developer_name: Optional[str] = None
     city: str
     locality: str
     min_price: Optional[float] = None
@@ -954,7 +957,7 @@ async def list_projects(
 ):
     stmt = (
         select(
-            Project.id, Project.name, Project.city, Project.locality,
+            Project.id, Project.name, Project.developer_name, Project.city, Project.locality,
             Project.min_price, Project.max_price, Project.possession_status,
             Project.rera_id, Project.amenities, Project.usps, Project.config_json,
             Project.nearby_facilities,
@@ -963,7 +966,7 @@ async def list_projects(
         .select_from(Project)
         .outerjoin(Campaign, Campaign.project_id == Project.id)
         .group_by(
-            Project.id, Project.name, Project.city, Project.locality,
+            Project.id, Project.name, Project.developer_name, Project.city, Project.locality,
             Project.min_price, Project.max_price, Project.possession_status,
             Project.rera_id, Project.amenities, Project.usps, Project.config_json,
             # jsonb has an equality operator, so it groups; plain json would not.
@@ -1007,6 +1010,7 @@ def _project_from_row(row: Any) -> ProjectSummary:
     return ProjectSummary(
         id=str(row.id),
         name=row.name,
+        developer_name=row.developer_name,
         city=row.city,
         locality=row.locality,
         min_price=_as_float(row.min_price),
@@ -1036,7 +1040,8 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
             **{
                 name: getattr(project, name)
                 for name in (
-                    "id", "name", "city", "locality", "min_price", "max_price",
+                    "id", "name", "developer_name", "city", "locality",
+                    "min_price", "max_price",
                     "possession_status", "rera_id", "amenities", "usps", "config_json",
                     "nearby_facilities",
                 )
@@ -1048,6 +1053,7 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+    developer_name: Optional[str] = Field(default=None, max_length=200)
     city: str = Field(min_length=1, max_length=100)
     locality: str = Field(min_length=1, max_length=100)
     min_price: Optional[float] = None
@@ -1066,6 +1072,7 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    developer_name: Optional[str] = Field(default=None, max_length=200)
     city: Optional[str] = Field(default=None, min_length=1, max_length=100)
     locality: Optional[str] = Field(default=None, min_length=1, max_length=100)
     min_price: Optional[float] = None
@@ -1082,6 +1089,7 @@ class ProjectUpdate(BaseModel):
 async def create_project(req: ProjectCreate, db: AsyncSession = Depends(get_db)):
     project = Project(
         name=req.name,
+        developer_name=req.developer_name,
         city=req.city,
         locality=req.locality,
         min_price=req.min_price,
@@ -1098,7 +1106,8 @@ async def create_project(req: ProjectCreate, db: AsyncSession = Depends(get_db))
     await db.commit()
     await db.refresh(project)
     return _project_from_row(SimpleNamespace(
-        id=project.id, name=project.name, city=project.city, locality=project.locality,
+        id=project.id, name=project.name, developer_name=project.developer_name,
+        city=project.city, locality=project.locality,
         min_price=project.min_price, max_price=project.max_price,
         possession_status=project.possession_status, rera_id=project.rera_id,
         amenities=project.amenities, usps=project.usps, config_json=project.config_json,

@@ -191,6 +191,17 @@ def build_campaign_context(project: dict) -> str:
     context_lines = []
     
     context_lines.append(f"Project Name: {project.get('name')}")
+    # Named separately from the project because the agent introduces itself with one and
+    # describes the other. Omitted rather than guessed when the project has no developer
+    # recorded: a made-up employer is worse than none, and the greeting falls back to the
+    # project name on its own. See build_opening_line.
+    developer = (project.get("developer_name") or "").strip()
+    if developer:
+        context_lines.append(
+            f"Developer — you work for them, and your greeting already said so. The "
+            f"project named above is theirs; name IT when you describe what you are "
+            f"calling about, never this: {developer}"
+        )
     context_lines.append(f"Location: {project.get('locality')}")
     context_lines.append(f"Launch Stage: {_launch_stage(project)}")
     

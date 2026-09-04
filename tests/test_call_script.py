@@ -224,8 +224,11 @@ def test_the_prompt_puts_the_hook_in_the_opening_and_the_money_with_the_price():
     "phrase",
     [
         "Are you looking for any property purchase?",
-        "We are launching a new project in",
-        "We have launched a project in",
+        # The project is named here rather than in the greeting, which introduces the
+        # developer. Told only "a new project in Varthur", the prospect has heard nothing
+        # they can hold on to — that is true of every builder calling them that afternoon.
+        "We are launching [project name] in [location].",
+        "We have launched [project name] in [location].",
         "Do NOT list amenities, prices or configurations before you ask this",
     ],
 )
@@ -432,5 +435,6 @@ def test_the_call_reads_the_name_back_out_of_redis():
 
 def test_the_agent_greets_with_the_lead_name():
     src = inspect.getsource(__import__("app.services.agent", fromlist=["x"]).run_voice_agent)
-    assert "build_opening_line(project_name, customer_name)" in src
+    assert "build_opening_line(" in src
+    assert "project_name, customer_name, developer_name=developer_name" in src
     assert "get_system_prompt(campaign_context, customer_name)" in src
