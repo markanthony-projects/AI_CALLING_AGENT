@@ -137,9 +137,11 @@ class _Task:
 class _Farewell:
     """Stands in for FarewellGate. Reports the goodbye as heard, so the handler proceeds."""
 
-    def __init__(self, heard=True):
+    def __init__(self, heard=True, speaking=False):
         self.heard = heard
         self.armed = False
+        self.is_speaking = speaking
+        self.waited_for_quiet = False
 
     def arm(self):
         self.armed = True
@@ -148,8 +150,19 @@ class _Farewell:
         assert self.armed, "the gate must be armed before the farewell is queued"
         return self.heard
 
+    async def wait_for_quiet(self, timeout):
+        self.waited_for_quiet = True
+        return True
 
-def _build(task, farewell):
+
+class _Filter:
+    """Stands in for ToolSyntaxFilter, which end_call asks what this turn has already said."""
+
+    def __init__(self, lead_in=""):
+        self.lead_in = lead_in
+
+
+def _build(task, farewell, tool_syntax_filter=None):
     """Compile the real end_call_handler and its helper together.
 
     They have to be built inside one enclosing function because end_call_handler declares
@@ -176,6 +189,7 @@ def _build(task, farewell):
         "call_sid": "sid",
         "task_ref": [task],
         "farewell": farewell,
+        "tool_syntax_filter": tool_syntax_filter or _Filter(),
         "farewell_timeout": lambda line: 1.0,
         "asyncio": _AsyncioShim,
         "TTSSpeakFrame": _Speak,
@@ -226,6 +240,57 @@ def test_handler_discards_speech_still_queued_behind_it():
     # something is queued before the farewell, and something after it.
     assert flat.index("_Speak") > 0, "nothing precedes the farewell — stale speech is never flushed"
     assert flat.index("_Speak") < len(flat) - 1, "nothing follows the farewell — the call never ends"
+
+
+def _drive(farewell, tool_syntax_filter):
+    """Run the real end_call handler, including the detached hangup, against fakes."""
+    task = _Task()
+    handler, spawned = _build(task, farewell, tool_syntax_filter)
+    params = type("P", (), {"arguments": {"closing_line": BOOKING_READBACK}})()
+
+    async def go():
+        await handler(params)
+        for coro in spawned:
+            await coro
+
+    asyncio.run(go())
+    return [[type(f).__name__ for f in batch] for batch in task.batches]
+
+
+LEAD_IN = "That works well. I will have our property expert suggest some better options."
+
+
+def test_this_turns_own_words_are_not_cut_off():
+    """Live call c085e397, 4 Sep 2026: one inference produced a reply AND the tool call, and
+    the interruption chopped the reply mid-sentence.
+
+        AGENT initiated call end via tool -> "Thank you for sharing these details..."
+        AGENT -> "That works well. Since you are looking in North Bangalore, I will have
+                  our property expert suggest some better options for you." [interrupted]
+
+    The prospect heard half a sentence and then a farewell."""
+    farewell = _Farewell(speaking=True)
+    batches = _drive(farewell, _Filter(lead_in=LEAD_IN))
+    assert farewell.waited_for_quiet, "the lead-in was not allowed to finish"
+    assert batches[0] == ["_Speak"], f"something was queued before the goodbye: {batches}"
+
+
+def test_a_stale_reply_is_still_discarded():
+    """The case the interruption was written for, which must survive the fix: one inference
+    asked "What time on Sunday?" while another hung up, and both played."""
+    farewell = _Farewell(speaking=True)
+    batches = _drive(farewell, _Filter(lead_in=""))
+    assert not farewell.waited_for_quiet
+    assert batches[0] != ["_Speak"], "nothing was flushed ahead of the goodbye"
+
+
+def test_a_lead_in_that_has_already_finished_playing_is_not_waited_for():
+    """end_call can fire after the whole reply is out. There is nothing left to protect, so
+    the interruption runs and clears anything else in the queue."""
+    farewell = _Farewell(speaking=False)
+    batches = _drive(farewell, _Filter(lead_in=LEAD_IN))
+    assert not farewell.waited_for_quiet
+    assert batches[0] != ["_Speak"]
 
 
 def test_a_second_hangup_is_refused():

@@ -32,7 +32,7 @@ so that is the signal to wait for, with a ceiling so a dead TTS cannot hold the 
 
 import asyncio
 
-from pipecat.frames.frames import BotStoppedSpeakingFrame, Frame
+from pipecat.frames.frames import BotStartedSpeakingFrame, BotStoppedSpeakingFrame, Frame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 # How long to allow for the goodbye before hanging up regardless. Derived from the line
@@ -70,9 +70,31 @@ class FarewellGate(FrameProcessor):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._spoken = asyncio.Event()
+        self._speaking = False
 
     def arm(self) -> None:
         self._spoken.clear()
+
+    @property
+    def is_speaking(self) -> bool:
+        """True while the transport is playing the bot's audio out.
+
+        Read by end_call, which has to know whether there is anything on the wire before it
+        decides between waiting for it and cutting it off.
+        """
+        return self._speaking
+
+    async def wait_for_quiet(self, timeout: float) -> bool:
+        """Let whatever is being spoken right now finish. True if it did, or if nothing was.
+
+        The immediate True matters as much as the wait. end_call fires from inside the LLM
+        service, sometimes before a word of the reply has reached the transport and
+        sometimes after all of it has; blocking on an event in the second case would add
+        the whole timeout to every goodbye.
+        """
+        if not self._speaking:
+            return True
+        return await self.wait_until_spoken(timeout)
 
     async def wait_until_spoken(self, timeout: float) -> bool:
         """True if the bot finished speaking, False if the wait ran out.
@@ -88,6 +110,9 @@ class FarewellGate(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._speaking = True
         if isinstance(frame, BotStoppedSpeakingFrame):
+            self._speaking = False
             self._spoken.set()
         await self.push_frame(frame, direction)

@@ -28,6 +28,8 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from app.utils.money import amounts_in, as_spoken, ungrounded
+
 # Words that, right after a '<', mean the model is writing markup rather than speech.
 # '|' covers Llama's special tokens (<|python_tag|>), '/' the closing tags.
 _MARKUP_WORDS = (
@@ -256,16 +258,30 @@ class ToolSyntaxFilter(FrameProcessor):
         self,
         call_sid: str,
         on_leaked_end_call: Optional[Callable[[Optional[str], bool], Awaitable[None]]] = None,
+        campaign_context: str = "",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._call_sid = call_sid
         self._on_leaked_end_call = on_leaked_end_call
+        # The only figures the agent is allowed to speak, parsed once. See app/utils/money.py
+        # for why this is not re-read per chunk.
+        self._grounded_amounts = amounts_in(campaign_context or "")
         self._buffer = ""
         self._leaked = ""
         self._suppressing = False
         self._spoke_this_response = False
         self._flagged_script = False
+        self._flagged_price = False
+        # Which inference is being read out, and which one produced the words on the wire.
+        # Deliberately not touched by _reset(): end_call is dispatched from inside the LLM
+        # service before LLMFullResponseEndFrame is pushed, but the two are separate tasks
+        # and their order is not guaranteed. A counter that only ever moves on a new
+        # response answers "is this speech from the turn that is hanging up?" the same way
+        # whichever lands first.
+        self._response_seq = 0
+        self._spoken_seq = 0
+        self._spoken_line = ""
 
     def _reset(self) -> None:
         self._buffer = ""
@@ -273,11 +289,13 @@ class ToolSyntaxFilter(FrameProcessor):
         self._suppressing = False
         self._spoke_this_response = False
         self._flagged_script = False
+        self._flagged_price = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, LLMFullResponseStartFrame):
+            self._response_seq += 1
             self._reset()
             await self.push_frame(frame, direction)
             return
@@ -299,7 +317,9 @@ class ToolSyntaxFilter(FrameProcessor):
                 self._leaked = held
             if speak:
                 self._spoke_this_response = True
+                self._record_lead_in(speak)
                 self._report_script(speak)
+                self._report_price()
                 frame.text = speak
                 await self.push_frame(frame, direction)
             return
@@ -329,6 +349,59 @@ class ToolSyntaxFilter(FrameProcessor):
             f"[{self._call_sid}] Non-Latin script sent to TTS ({stray!r}) in "
             f"{spoken.strip()[:80]!r} — Sarvam breaks up mid-word on mixed script, so the "
             f"caller may hear a garbled syllable here"
+        )
+
+    def _record_lead_in(self, spoken: str) -> None:
+        if self._spoken_seq != self._response_seq:
+            self._spoken_seq = self._response_seq
+            self._spoken_line = ""
+        self._spoken_line += spoken
+
+    @property
+    def lead_in(self) -> str:
+        """What the inference now being read out has already sent to the voice engine.
+
+        Empty when the current response has spoken nothing, and empty again as soon as a
+        new response starts -- so anything non-empty here belongs to the turn in progress.
+
+        end_call reads this to tell a lead-in from a leftover. On a live call on 4 Sep 2026
+        one inference produced both a reply and the tool call, and the interruption meant to
+        discard a stale reply from a split turn cut this one off in the middle:
+
+            AGENT initiated call end via tool -> "Thank you for sharing these details..."
+            AGENT -> "That works well. Since you are looking in North Bangalore, I will
+                      have our property expert suggest some better options for you."
+                      [interrupted]
+
+        The prospect heard half a sentence and then a goodbye.
+        """
+        return self._spoken_line if self._spoken_seq == self._response_seq else ""
+
+    def _report_price(self) -> None:
+        """Report, once per response, a money figure the campaign context cannot account for.
+
+        Reads the whole response so far rather than the chunk just pushed. Text is streamed
+        and this processor forwards each piece as it arrives, so "80 Lakhs" reaches here as
+        "from 80" and then " Lakhs " -- neither of which is a price on its own. Checking the
+        chunk would have missed the exact line that prompted this.
+
+        Reports rather than strips, like the script check above and for the same reason:
+        cutting "80 Lakhs" out of "budgets usually start from 80 Lakhs and go up" leaves a
+        sentence that is worse than the invention. The fix belongs in the prompt; this makes
+        the next one countable instead of leaving it to whoever replays the recording.
+        """
+        if self._flagged_price:
+            return
+        line = self._spoken_line
+        invented = ungrounded(line, self._grounded_amounts)
+        if not invented:
+            return
+        self._flagged_price = True
+        figures = ", ".join(as_spoken(v) for v in invented)
+        logger.error(
+            f"[{self._call_sid}] Agent spoke a price that is not in the campaign context "
+            f"({figures}) in {line.strip()[:160]!r} -- the prospect has been quoted a "
+            f"number nobody gave us, and the team will have to walk it back"
         )
 
     async def _flush(self, direction: FrameDirection) -> None:

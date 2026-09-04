@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -236,6 +237,27 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
     SARVAM_API_KEY: str
     SARVAM_VOICE_ID: str = "simran"
+
+    # How much prosody Sarvam is allowed to reinvent per sentence. bulbul:v3 documents this
+    # as "lower values = more deterministic, higher = more random", and its own default is
+    # 0.6 -- which is what every call has run at, because this was never sent.
+    #
+    # It matters more here than the name suggests. Pipecat synthesises a reply one sentence
+    # at a time, so 0.6 is re-rolled at every full stop: within a single answer the pace and
+    # the tone can move, which is heard as the voice slipping out of character rather than
+    # as variety. Reported from live calls as exactly that.
+    #
+    # Unset means the key is left out of the connect payload entirely, which is exactly
+    # what every call so far has sent. Pipecat's docstring says Sarvam then applies 0.6,
+    # but that is their documentation of someone else's server and not something this
+    # repository can check -- and an unexpected value in that payload has already killed
+    # TTS for a whole call once, when min_buffer_size=25 came back as "Input parameters
+    # has to be a valid dictionary". Sending nothing cannot regress a voice; sending a
+    # number we believe to be the default can.
+    #
+    # Lower is steadier and flatter; the two are the same dial, and which trade is right
+    # can only be settled by listening to a call, not by a test. Try 0.3.
+    SARVAM_TEMPERATURE: Optional[float] = Field(default=None, ge=0.01, le=1.0)
     GROQ_API_KEY: str = ""
     DEEPGRAM_API_KEY: str = ""
 

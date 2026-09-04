@@ -100,12 +100,18 @@ def test_the_three_steps_are_separate_and_awaited():
     caller heard the difference. Neither of the two worker frames takes effect on arrival:
     each makes a round trip to the sink and back first, and the worker's push loop does not
     wait for that before queueing the next frame. So the interruption meant to protect the
-    farewell could land after it and cancel it instead."""
+    farewell could land after it and cancel it instead.
+
+    Asserted as one frame per call rather than by position: the interruption now sits in a
+    branch — it is skipped when the words on the wire are this turn's own lead-in — and
+    ast.walk does not report a nested node in source order. The ordering that matters is
+    covered by the flush test below.
+    """
     batches = _frames_in(_nested("say_goodbye_then_hang_up"))
     assert len(batches) >= 3, "the frames must be queued in separate, awaited steps"
-    assert batches[0] == ["InterruptionWorkerFrame"]
-    assert "TTSSpeakFrame" in batches[1] and len(batches[1]) == 1
-    assert batches[-1] == ["EndWorkerFrame"]
+    assert all(len(b) == 1 for b in batches), f"frames batched together again: {batches}"
+    queued = [f for batch in batches for f in batch]
+    assert set(queued) == {"InterruptionWorkerFrame", "TTSSpeakFrame", "EndWorkerFrame"}
 
 
 def test_the_interruption_is_confirmed_landed_before_the_farewell_is_spoken():

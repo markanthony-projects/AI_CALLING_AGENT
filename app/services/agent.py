@@ -326,6 +326,15 @@ async def run_voice_agent(
     llm = build_llm_service(call_sid, settings)
     stt = build_stt_service(call_sid, settings)
     
+    # Passed only when somebody has set it. Unset, the key stays out of the connect payload
+    # exactly as it has on every call so far, so a deployment cannot change the voice on its
+    # own; set, it steadies the prosody Sarvam otherwise re-rolls at every full stop. See
+    # config.py and tests/test_voice_consistency.py.
+    tts_tuning = {}
+    if settings.SARVAM_TEMPERATURE is not None:
+        tts_tuning["temperature"] = settings.SARVAM_TEMPERATURE
+        logger.info(f"[{call_sid}] Voice steadiness set | temperature={settings.SARVAM_TEMPERATURE}")
+
     # Low-latency streaming WebSocket Sarvam TTS with pace 1.0
     tts = SarvamTTSService(
         api_key=settings.SARVAM_API_KEY,
@@ -333,6 +342,7 @@ async def run_voice_agent(
             model="bulbul:v3",
             voice=settings.SARVAM_VOICE_ID,
             pace=1.0,
+            **tts_tuning,
             max_chunk_length=150,
             # min_buffer_size is deliberately left at Sarvam's default. Setting it to 25
             # was rejected at connect time with "Input parameters has to be a valid
@@ -383,6 +393,19 @@ async def run_voice_agent(
         enter the pipeline first and then be cancelled by the very interruption meant to
         protect it. flush_pipeline waits for the lap to finish, so the order is not a guess.
 
+        Stale is the word that had to be earned. On 4 Sep 2026 one inference produced a
+        reply AND the tool call, and this interruption cut the reply off mid-sentence:
+
+            AGENT initiated call end via tool -> "Thank you for sharing these details..."
+            AGENT -> "That works well. Since you are looking in North Bangalore, I will
+                      have our property expert suggest some better options for you."
+                      [interrupted]
+
+        That reply was not stale. It was this turn's own lead-in, and the prospect heard
+        half of it and then a goodbye. So the interruption now applies only when the words
+        on the wire came from some earlier inference; when they came from the one hanging
+        up, they are allowed to finish first, with a ceiling sized to the sentence.
+
         Then the wait. EndWorkerFrame is not enough on its own: its round trip proves the
         frames have travelled, and Sarvam's audio does not travel with them — run_tts sends
         the text and returns, and the voice arrives afterwards on a receive task.
@@ -390,8 +413,20 @@ async def run_voice_agent(
         actually been played out, so that is what is waited on, with a ceiling sized to the
         sentence so a dead TTS cannot hold the carrier leg open.
         """
-        await task_ref[0].queue_frames([InterruptionWorkerFrame()])
-        await task_ref[0].flush_pipeline(timeout=2.0)
+        lead_in = tool_syntax_filter.lead_in
+        if lead_in and farewell.is_speaking:
+            logger.info(
+                f"[{call_sid}] Letting this turn's own words finish before the goodbye: "
+                f"{lead_in.strip()[:80]!r}"
+            )
+            if not await farewell.wait_for_quiet(farewell_timeout(lead_in)):
+                logger.warning(
+                    f"[{call_sid}] The lead-in never finished playing; saying the goodbye "
+                    f"over it rather than holding the line open"
+                )
+        else:
+            await task_ref[0].queue_frames([InterruptionWorkerFrame()])
+            await task_ref[0].flush_pipeline(timeout=2.0)
 
         farewell.arm()
         await task_ref[0].queue_frames([TTSSpeakFrame(line)])
@@ -443,7 +478,9 @@ async def run_voice_agent(
     # the leaked-end_call path either. See app/utils/turn_gate.py.
     turn_gate = TurnFinalityGate(call_sid)
     stt_witness = SttWitness()
-    tool_syntax_filter = ToolSyntaxFilter(call_sid, on_leaked_end_call=on_leaked_end_call)
+    tool_syntax_filter = ToolSyntaxFilter(
+        call_sid, on_leaked_end_call=on_leaked_end_call, campaign_context=campaign_context
+    )
     
     # Pass the dummy function so Pipecat parses the docstring into a ToolSchema
     context = LLMContext(messages=messages, tools=[end_call])
