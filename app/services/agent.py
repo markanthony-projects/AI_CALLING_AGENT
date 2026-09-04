@@ -385,6 +385,30 @@ async def run_voice_agent(
         ),
     )
 
+    # Sarvam's websocket is torn down and reopened on every interruption — Pipecat's own
+    # InterruptibleTTSService does it, to drop audio the prospect has just spoken over. On a
+    # live call four barge-ins in fourteen seconds meant four reconnects, and one of them
+    # timed out during the opening handshake and left the agent mute until the caller hung
+    # up. None of that churn appeared anywhere, so the reconnects had to be inferred from a
+    # docstring. These two lines make it countable.
+    _tts_reconnects: int = 0
+
+    @tts.event_handler("on_connected")
+    async def on_tts_connected(service):
+        nonlocal _tts_reconnects
+        _tts_reconnects += 1
+        # The first is the call opening its voice, which is not news. Every one after it is
+        # a reconnect, and a run of them is the shape that preceded the failure.
+        if _tts_reconnects > 1:
+            logger.info(f"[{call_sid}] TTS reconnected ({_tts_reconnects - 1})")
+
+    @tts.event_handler("on_connection_error")
+    async def on_tts_connection_error(service, message):
+        logger.error(
+            f"[{call_sid}] TTS could not reach Sarvam after {_tts_reconnects} connection(s); "
+            f"the caller hears silence until it comes back: {message}"
+        )
+
     system_prompt = get_system_prompt(campaign_context, customer_name)
     messages = [{"role": "system", "content": system_prompt}]
     
@@ -961,8 +985,14 @@ async def run_voice_agent(
             # one would only race its own shutdown.
             return
         _tts_failures += 1
-        if _tts_failures == 1:
-            logger.error(f"[{call_sid}] TTS failing — caller is hearing silence: {error.error}")
+        # Every one, not only the first. On a live call on 4 Sep the voice engine failed
+        # twice and went silent for twelve seconds; only the first failure carried this line,
+        # so reading the log afterwards the second one existed solely as a Pipecat traceback
+        # with no call id on it. A failure nobody can attribute to a call is not a diagnosis.
+        logger.error(
+            f"[{call_sid}] TTS failing ({_tts_failures}) — caller is hearing silence: "
+            f"{error.error}"
+        )
         # >=, not ==. This used to fire once and never again, so when the one attempt failed
         # to take effect there was nothing behind it.
         if _tts_failures >= MAX_TTS_FAILURES:

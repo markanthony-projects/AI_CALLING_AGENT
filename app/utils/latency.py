@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     Frame,
     LLMFullResponseStartFrame,
     MetricsFrame,
+    TTSSpeakFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import TTFAMetricsData, TTFBMetricsData
@@ -30,6 +31,7 @@ _TRACKED = (
     BotStartedSpeakingFrame,
     MetricsFrame,
     LLMFullResponseStartFrame,
+    TTSSpeakFrame,
 )
 
 # Below this, the remainder is ordinary frame plumbing and saying so on every turn would
@@ -73,6 +75,11 @@ class LatencyObserver(BaseObserver):
         # which is the one boundary the per-service metrics do not cover.
         self._llm_first_token_ns: Optional[int] = None
         self._llm_processor: Optional[str] = None
+        # When the opening line was handed to the voice engine. The stretch between that and
+        # the caller actually hearing something was the one part of a call nothing measured:
+        # everything before it is in the logs to the millisecond, and everything after it is
+        # covered per turn, but the first thing the prospect waits for was invisible.
+        self._greeting_queued_ns: Optional[int] = None
 
     @property
     def turns(self) -> list[float]:
@@ -84,6 +91,18 @@ class LatencyObserver(BaseObserver):
         if not isinstance(frame, _TRACKED) or frame.id in self._seen:
             return
         self._seen.add(frame.id)
+
+        if isinstance(frame, TTSSpeakFrame):
+            # The opening line, which is spoken this way rather than generated. Read off the
+            # frame rather than handed in from the agent: this timestamp is the PIPELINE
+            # clock, nanoseconds since it started, and a monotonic reading taken anywhere
+            # else would be a number from a different epoch subtracted from this one.
+            #
+            # Only before any turn has run, so the goodbye and the recovery lines — queued
+            # the same way, later — cannot claim to be the greeting.
+            if self._greeting_queued_ns is None and not self._turns and self._turn_start_ns is None:
+                self._greeting_queued_ns = data.timestamp
+            return
 
         if isinstance(frame, UserStoppedSpeakingFrame):
             self._turn_start_ns = data.timestamp
@@ -109,9 +128,19 @@ class LatencyObserver(BaseObserver):
                     self._ttfb.setdefault(item.processor, item.value)
             return
 
-        # BotStartedSpeakingFrame. The opening greeting has no preceding user turn, so
-        # there is nothing to measure against and it is skipped rather than recorded as 0.
+        # BotStartedSpeakingFrame. The opening greeting has no preceding user turn, so there
+        # is nothing to measure it against as a turn — but it is not nothing. It is measured
+        # from the moment it was queued instead, which is the synthesis and the trip out to
+        # the carrier: the part of "the opening line started late" that no other line covers.
         if self._turn_start_ns is None:
+            if self._greeting_queued_ns is not None:
+                waited = (data.timestamp - self._greeting_queued_ns) / NS_PER_SEC
+                self._greeting_queued_ns = None
+                if waited >= 0:
+                    logger.info(
+                        f"[{self._call_sid}] GREETING audible after {waited * 1000:.0f}ms "
+                        f"(synthesis and the trip to the carrier)"
+                    )
             return
 
         elapsed = (data.timestamp - self._turn_start_ns) / NS_PER_SEC
