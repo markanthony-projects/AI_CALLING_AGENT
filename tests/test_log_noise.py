@@ -153,6 +153,35 @@ def test_the_latency_lines_can_actually_be_seen():
     assert _log_filter({"level": _Level(20), "name": "app.utils.latency"}) is True
 
 
+@pytest.mark.parametrize(
+    "module,line",
+    [
+        ("app.services.stt_provider", "Listening with deepgram/nova-2-general"),
+        ("app.utils.turn_analyzer", "Semantic turn detection on"),
+    ],
+)
+def test_the_lines_that_prove_a_configuration_took_effect_can_be_seen(module, line):
+    """The same omission, made again. Both of these announce what the call is listening with
+    and whether semantic turn detection is on, and both were dropped by this filter — so the
+    first deploy carrying them was indistinguishable from a deploy that had not happened.
+
+    They exist to be read in production. A line nobody can see is not instrumentation.
+    """
+    from app.main import _CALL_MODULES, _log_filter
+
+    assert module in _CALL_MODULES, line
+    assert _log_filter({"level": _Level(20), "name": module}) is True
+
+
+def test_a_module_outside_the_set_is_still_quiet_at_info():
+    """The set is an allow-list and that is the point — it is what keeps a call's story
+    readable. Widening it to everything would undo the whole file."""
+    from app.main import _log_filter
+
+    assert _log_filter({"level": _Level(20), "name": "app.services.discovery"}) is False
+    assert _log_filter({"level": _Level(30), "name": "app.services.discovery"}) is True
+
+
 class _Level:
     def __init__(self, no):
         self.no = no

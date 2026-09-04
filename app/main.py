@@ -46,6 +46,17 @@ _CALL_MODULES = {
     # and the instrumentation looked broken from outside: hours of production calls with no
     # timing in them at all, and a request for logs that could not exist.
     "app.utils.latency",
+    # The same mistake, made again and caught the same way. These two announce which speech
+    # recogniser the call is listening with and whether semantic turn detection is on — the
+    # only evidence, from outside, that a configuration change took effect at all. Both were
+    # added for a three-way STT comparison and both were silently dropped here, so the first
+    # deploy carrying them looked like a deploy that had not happened.
+    #
+    # Anything whose whole purpose is to be read in production logs belongs in this set. It
+    # is an allow-list, so forgetting is silent, and the symptom is always the same: working
+    # code that cannot be told apart from missing code.
+    "app.services.stt_provider",
+    "app.utils.turn_analyzer",
     "app.worker",
 }
 
