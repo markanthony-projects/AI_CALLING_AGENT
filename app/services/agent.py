@@ -54,6 +54,7 @@ from app.services.llm_provider import (
 )
 from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
 from app.utils.latency import LatencyObserver
+from app.utils.person_name import spoken_name
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
@@ -141,7 +142,10 @@ def build_opening_line(
     take the same time to say. As one comma-spliced line this arrives in a single flat rush.
     """
     part = time_of_day_greeting(now)
-    name = (customer_name or "").strip()
+    # The lead list holds "Abhijit Kumar Singh", "RAHUL" and "mahantesha"; none of those is
+    # how a person is greeted. Idempotent, so applying it here as well as before the prompt
+    # costs nothing and means this line is safe whoever calls it. See app/utils/person_name.
+    name = spoken_name(customer_name)
     address = f" {name}" if name else ""
     return (
         f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from "
@@ -297,6 +301,11 @@ async def run_voice_agent(
     customer_name: Optional[str] = None,
     developer_name: Optional[str] = None,
 ):
+    # Converted once, here, so the greeting and the prompt address the prospect the same
+    # way. Told the full name, the model uses the full name for the rest of the call — and
+    # then the opening line and every turn after it disagree about who it is talking to.
+    customer_name = spoken_name(customer_name) or None
+
     logger.info(
         f"[{call_sid}] Voice agent starting | client={client_type} | project='{project_name}' "
         f"| calling as='{caller_identity(project_name, developer_name)}' "

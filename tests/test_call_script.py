@@ -227,8 +227,9 @@ def test_the_prompt_puts_the_hook_in_the_opening_and_the_money_with_the_price():
         # The project is named here rather than in the greeting, which introduces the
         # developer. Told only "a new project in Varthur", the prospect has heard nothing
         # they can hold on to — that is true of every builder calling them that afternoon.
-        "We are launching [project name] in [location].",
-        "We have launched [project name] in [location].",
+        "We are launching a new project in [location].",
+        "We have launched a new project in [location].",
+        'It is called [project name], and it is',
         "Do NOT list amenities, prices or configurations before you ask this",
     ],
 )
