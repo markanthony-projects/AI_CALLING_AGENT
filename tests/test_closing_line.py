@@ -163,13 +163,18 @@ class _Filter:
 
 
 class _ClosingGate:
-    """Stands in for ClosingGate, which end_call arms so no further turn is generated."""
+    """Stands in for ClosingGate: end_call arms it so no further turn is generated, and
+    shields the closing line so a prospect talking over it cannot cancel it."""
 
     def __init__(self):
         self.armed = False
+        self.protecting = False
 
     def arm(self):
         self.armed = True
+
+    def protect_goodbye(self):
+        self.protecting = True
 
 
 def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
@@ -320,6 +325,46 @@ def test_hanging_up_stops_any_further_turn_being_generated():
 
     asyncio.run(go())
     assert gate.armed, "the pipeline can still generate a reply to speak after the goodbye"
+
+
+def test_the_closing_line_is_shielded_before_it_is_queued():
+    """A prospect who talks over the goodbye interrupts it, and an interrupted TTSSpeakFrame
+    is never spoken. On 4 Sep that left a caller with silence, eleven seconds of the farewell
+    wait running out against audio that was never coming, and then a dead line."""
+    task = _Task()
+    gate = _ClosingGate()
+    handler, spawned = _build(task, _Farewell(), closing_gate=gate)
+    params = type("P", (), {"arguments": {"closing_line": BOOKING_READBACK}})()
+
+    async def go():
+        await handler(params)
+        for coro in spawned:
+            await coro
+
+    asyncio.run(go())
+    assert gate.protecting, "the goodbye can still be cut off by the prospect"
+
+
+def test_the_shield_goes_up_after_end_calls_own_interruption_not_before():
+    """end_call opens by interrupting a stale reply from a split turn. Shielding from arm()
+    onwards would swallow that one too — the pipeline's own, sent by us, three lines up.
+
+    Ordered by line number rather than by position in the text. The docstring of the very
+    function under test names InterruptionWorkerFrame, so a substring search finds it at the
+    top of the function and compares against prose instead of code.
+    """
+    calls = [
+        (n.lineno, ast.unparse(n))
+        for n in ast.walk(_node("say_goodbye_then_hang_up"))
+        if isinstance(n, ast.Call)
+    ]
+
+    def first(name):
+        lines = [line for line, src in calls if name in src]
+        assert lines, f"{name} is not called at all"
+        return min(lines)
+
+    assert first("InterruptionWorkerFrame") < first("protect_goodbye") < first("TTSSpeakFrame")
 
 
 def test_a_second_hangup_is_refused():

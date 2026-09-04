@@ -31,7 +31,7 @@ untouched.
 """
 
 from loguru import logger
-from pipecat.frames.frames import Frame, LLMContextFrame
+from pipecat.frames.frames import Frame, InterruptionFrame, LLMContextFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 
@@ -47,6 +47,8 @@ class ClosingGate(FrameProcessor):
         self._call_sid = call_sid
         self._closing = False
         self._dropped = 0
+        self._protecting = False
+        self._shielded = 0
 
     @property
     def closing(self) -> bool:
@@ -57,12 +59,55 @@ class ClosingGate(FrameProcessor):
         """How many turns were abandoned on the way out, for the log."""
         return self._dropped
 
+    @property
+    def protecting(self) -> bool:
+        return self._protecting
+
+    @property
+    def shielded(self) -> int:
+        """How many times the prospect talked over the goodbye."""
+        return self._shielded
+
     def arm(self) -> None:
         """Called the moment end_call is honoured. There is no way back from here."""
         self._closing = True
 
+    def protect_goodbye(self) -> None:
+        """Called immediately before the closing line is queued, and not before.
+
+        A prospect who talks over the goodbye interrupts it, and an interrupted TTSSpeakFrame
+        is simply never spoken. On 4 Sep that left one caller with silence where the sign-off
+        should have been, then eleven more seconds of it while the farewell wait ran out
+        against audio that was never coming, and then a dead line:
+
+            12:08:34  AGENT initiated call end via tool → "Thank you for sharing..."
+            12:08:34  AGENT → "Thank you for sharing your details, Rahul..."  [interrupted]
+            12:08:35  USER  → "I want to do a busy."
+            12:08:41  USER  → "Hello?"
+            12:08:45  Goodbye never finished playing; hanging up anyway
+
+        Nothing is lost by ignoring an interruption here. The decision to end the call has
+        already been taken, arm() has already stopped any new turn being generated, and there
+        is nothing left for the interruption to protect the prospect from — only the last
+        sentence they are owed. A person talked over while saying goodbye finishes the
+        sentence.
+
+        Deliberately separate from arm(). end_call opens by interrupting a stale reply from
+        a split turn, and blocking interruptions from arm() onwards would swallow that one
+        too — the pipeline's own, sent by us, three lines earlier.
+        """
+        self._protecting = True
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+
+        if self._protecting and isinstance(frame, InterruptionFrame):
+            self._shielded += 1
+            logger.info(
+                f"[{self._call_sid}] Prospect spoke over the goodbye ({self._shielded}); "
+                f"letting it finish rather than cutting it off"
+            )
+            return
 
         if self._closing and isinstance(frame, LLMContextFrame):
             self._dropped += 1

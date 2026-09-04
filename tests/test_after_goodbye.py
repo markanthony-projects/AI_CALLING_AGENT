@@ -23,7 +23,7 @@ import asyncio
 import inspect
 
 import pytest
-from pipecat.frames.frames import Frame, LLMContextFrame, TextFrame
+from pipecat.frames.frames import Frame, InterruptionFrame, LLMContextFrame, TextFrame
 from pipecat.processors.frame_processor import FrameDirection
 
 from app.utils.closing_gate import ClosingGate
@@ -131,6 +131,62 @@ def test_both_ways_out_of_a_call_arm_it(handler):
         if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == handler
     )
     assert "closing_gate.arm()" in ast.unparse(node)
+
+
+def test_an_interruption_passes_through_before_the_goodbye_is_queued():
+    """Every barge-in of every call goes through here, and the one end_call sends itself to
+    clear a stale reply goes through here too."""
+    gate = ClosingGate("sid")
+    gate.arm()
+    assert len(asyncio.run(_feed(gate, [InterruptionFrame()]))) == 1
+
+
+def test_the_prospect_cannot_cut_off_the_goodbye():
+    """An interrupted TTSSpeakFrame is never spoken at all. On 4 Sep a caller heard silence
+    where the sign-off should have been, then eleven seconds of the farewell wait running out
+    against audio that was never coming, and then a dead line."""
+    gate = ClosingGate("sid")
+    gate.arm()
+    gate.protect_goodbye()
+    assert asyncio.run(_feed(gate, [InterruptionFrame()])) == []
+
+
+def test_the_shield_does_not_swallow_the_goodbye_it_exists_to_protect():
+    """The closing line is queued at the task source, so it travels the whole pipeline and
+    passes through here like everything else. A shield that stopped at "are we protecting?"
+    would silence exactly the sentence it was raised for."""
+    from pipecat.frames.frames import TTSSpeakFrame
+
+    gate = ClosingGate("sid")
+    gate.arm()
+    gate.protect_goodbye()
+    passed = asyncio.run(_feed(gate, [TTSSpeakFrame("Thank you for your time, Rahul.")]))
+    assert len(passed) == 1
+
+
+def test_talking_over_the_goodbye_is_counted():
+    gate = ClosingGate("sid")
+    gate.protect_goodbye()
+    asyncio.run(_feed(gate, [InterruptionFrame(), InterruptionFrame()]))
+    assert gate.shielded == 2
+
+
+def test_the_shield_is_not_raised_by_arming_alone():
+    """Two separate moments. end_call opens by interrupting a stale reply from a split turn,
+    and a shield raised at arm() would swallow the pipeline's own interruption — sent by us,
+    three lines before the goodbye."""
+    gate = ClosingGate("sid")
+    gate.arm()
+    assert gate.protecting is False
+
+
+def test_shielding_does_not_also_start_letting_new_turns_through():
+    """The two guards are independent, and the wrong one lifting would put a fresh reply
+    behind the goodbye — which is the bug the gate was written for."""
+    gate = ClosingGate("sid")
+    gate.arm()
+    gate.protect_goodbye()
+    assert asyncio.run(_feed(gate, [_context_frame()])) == []
 
 
 # --- speaking slower when asked -------------------------------------------------------------

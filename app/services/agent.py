@@ -493,6 +493,11 @@ async def run_voice_agent(
             await task_ref[0].queue_frames([InterruptionWorkerFrame()])
             await task_ref[0].flush_pipeline(timeout=2.0)
 
+        # From here nothing may cancel the closing line. See ClosingGate.protect_goodbye:
+        # placed after the branch above so end_call's own interruption, which clears a stale
+        # reply from a split turn, still lands.
+        closing_gate.protect_goodbye()
+
         farewell.arm()
         await task_ref[0].queue_frames([TTSSpeakFrame(line)])
         if not await farewell.wait_until_spoken(farewell_timeout(line)):
