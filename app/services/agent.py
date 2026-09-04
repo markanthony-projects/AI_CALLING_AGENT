@@ -53,6 +53,7 @@ from app.services.llm_provider import (
     primary_endpoint,
 )
 from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
+from app.utils.asked import REPEAT_LIMIT, AskedSoFar
 from app.utils.latency import LatencyObserver
 from app.utils.person_name import spoken_name
 from app.utils.vobiz_serializer import VobizSerializer
@@ -131,15 +132,22 @@ def build_opening_line(
 ) -> str:
     """The first thing the caller hears.
 
-    Greets by time of day and asks for a minute of their time rather than opening with a
-    question about who they are. The name off the dial list is used to address them, so a
-    prospect who does hear their own name knows the call is meant for them; without one the
-    greeting simply omits it and the agent asks in its first reply — never a guessed name.
+    Greets by time of day and says who is calling, and nothing else. The name off the dial
+    list is used to address them, so a prospect who does hear their own name knows the call
+    is meant for them; without one the greeting simply omits it and the agent asks in its
+    first reply — never a guessed name.
 
-    Written as three short sentences rather than the one comma-spliced line it was specified
-    as. Pipecat synthesises one sentence per request, so a full stop is a real gap the caller
-    hears while a comma is not: measured on bulbul:v3, the same words with and without commas
-    take the same time to say. As one comma-spliced line this arrives in a single flat rush.
+    It used to end "Can I speak to you for a minute?", and those eight words did two things
+    wrong. They carried no information, on a line where the prospect had already sat through
+    twenty words before saying anything but hello — and they invited a "no" to a question
+    that was not the one worth asking. The question that follows in the opening gate, "Are
+    you looking for any property purchase?", asks for the same permission and sorts the call
+    at the same time.
+
+    Written as short sentences rather than one comma-spliced line. Pipecat synthesises one
+    sentence per request, so a full stop is a real gap the caller hears while a comma is not:
+    measured on bulbul:v3, the same words with and without commas take the same time to say.
+    As one comma-spliced line this arrives in a single flat rush.
     """
     part = time_of_day_greeting(now)
     # The lead list holds "Abhijit Kumar Singh", "RAHUL" and "mahantesha"; none of those is
@@ -149,8 +157,7 @@ def build_opening_line(
     address = f" {name}" if name else ""
     return (
         f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from "
-        f"{caller_identity(project_name, developer_name)}. "
-        f"Can I speak to you for a minute?"
+        f"{caller_identity(project_name, developer_name)}."
     )
 
 # A sign-off is two or three sentences. Anything longer is the model monologuing into a
@@ -578,6 +585,29 @@ async def run_voice_agent(
     )
     task_ref.append(task)
     
+    # What the agent has already asked about, and what to do instead of asking it again.
+    # On a live call it asked for a site visit nineteen times and lost a three-crore lead to
+    # the repetition. See app/utils/asked.py.
+    asked = AskedSoFar()
+    _asked_shown: str = ""
+
+    def refresh_asked_brief() -> None:
+        """Put the block in front of the model, or take it away again.
+
+        Appended to the system message rather than added as its own. A system turn sitting
+        between the conversation's own would have better recency, but Gemma's chat template
+        is not something this repository controls and a context the provider rejects is a
+        dead call — while a block the model reads a little less closely is a worse call at
+        worst. Mutated in place: LLMContext holds this very list, so there is nothing to
+        re-set.
+        """
+        nonlocal _asked_shown
+        brief = asked.brief()
+        if brief == _asked_shown:
+            return
+        _asked_shown = brief
+        messages[0]["content"] = "\n\n".join([system_prompt, brief]) if brief else system_prompt
+
     _turn_start_time: float = 0.0
     _user_has_spoken: bool = False
     _startup_task = None
@@ -953,6 +983,23 @@ async def run_voice_agent(
             # An interrupted reply is still what the prospect last heard us ask, so it is
             # still the right thing to repeat if their answer then goes missing.
             _last_agent_line = content
+
+            topic = asked.record(content)
+            if topic:
+                count = asked.counts[topic.key]
+                if count == REPEAT_LIMIT:
+                    logger.info(
+                        f"[{call_sid}] Asked about {topic.label} {count} times; telling the "
+                        f"model to stop and what to do instead"
+                    )
+                elif count > REPEAT_LIMIT:
+                    # It was already told. This is the model going round the loop anyway,
+                    # which is the thing worth counting across calls.
+                    logger.warning(
+                        f"[{call_sid}] Asked about {topic.label} {count} times despite being "
+                        f"told not to"
+                    )
+                refresh_asked_brief()
         # The greeting is the agent's first turn, so by the time any assistant turn has
         # finished the line it guards is already spoken. From here a single word starts the
         # prospect's turn, and a short answer can never be swallowed again.

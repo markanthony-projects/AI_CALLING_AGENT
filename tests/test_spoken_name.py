@@ -154,7 +154,7 @@ def test_the_name_still_gets_said_once_they_know_what_it_is():
     from app.prompts.agent_prompts import get_system_prompt
 
     prompt = get_system_prompt("Project Name: X", "Rahul")
-    assert "It is called [project name], and it is" in prompt
+    assert "It is called [project name] —" in prompt
 
 
 def test_the_headline_still_rides_with_the_name():
@@ -163,7 +163,7 @@ def test_the_headline_still_rides_with_the_name():
     from app.prompts.agent_prompts import get_system_prompt
 
     prompt = get_system_prompt("Project Name: X", "Rahul")
-    named = prompt.index("It is called [project name], and it is")
+    named = prompt.index("It is called [project name] —")
     assert 'Headline' in prompt[named:named + 200]
 
 

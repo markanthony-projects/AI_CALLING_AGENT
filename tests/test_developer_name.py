@@ -132,7 +132,7 @@ def test_the_script_names_the_developer_in_the_greeting_and_the_project_in_the_p
     assert "the Developer in the campaign context" in greeting
     assert "[project name]" not in greeting, "the greeting still names the project"
     assert "We are launching a new project in [location]." in pitch
-    assert "It is called [project name], and it is" in pitch
+    assert "It is called [project name] —" in pitch
 
 
 def test_the_fallback_is_written_into_the_rule_the_model_reads():

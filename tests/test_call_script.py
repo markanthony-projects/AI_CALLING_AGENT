@@ -28,8 +28,7 @@ NAMED = get_system_prompt(CONTEXT, "Rahul Sharma")
 
 def test_the_whole_greeting():
     assert build_opening_line("Abhee New Dimension", "Rahul", MORNING) == (
-        "Hi, Good morning Rahul. I am Priya calling you from Abhee New Dimension. "
-        "Can I speak to you for a minute?"
+        "Hi, Good morning Rahul. I am Priya calling you from Abhee New Dimension."
     )
 
 
@@ -43,12 +42,28 @@ def test_the_greeting_follows_the_prospects_clock(when, part):
     assert f"Good {part} " in build_opening_line("X", "Rahul", when)
 
 
-def test_it_asks_for_a_minute_rather_than_interrogating_them():
+def test_it_addresses_them_rather_than_interrogating_them():
     """"Am I speaking with Rahul?" opens by making them account for themselves. Using the
-    name to address them and asking for a minute is how a person opens a call."""
+    name to address them is how a person opens a call."""
     line = build_opening_line("X", "Rahul", MORNING)
-    assert line.endswith("Can I speak to you for a minute?")
     assert "Am I speaking with" not in line
+    assert line.startswith("Hi, Good morning Rahul.")
+
+
+def test_it_does_not_spend_eight_words_asking_for_permission():
+    """"Can I speak to you for a minute?" carried no information and invited a "no" — on a
+    line where the prospect had already sat through twenty words before saying anything but
+    hello. Step 2's question asks for the same permission and sorts the call as well."""
+    line = build_opening_line("X", "Rahul", MORNING)
+    assert "for a minute" not in line
+    assert len(line.split()) <= 13, line
+
+
+def test_the_prompt_does_not_put_it_back_when_the_prospect_speaks_first():
+    """The greeting is cancelled if they speak first and the MODEL introduces itself
+    instead. Told to ask for a minute there, the shorter opening would only apply to the
+    calls where nobody said hello."""
+    assert "do NOT add \"can I speak to you for a minute\"" in PROMPT
 
 
 def test_the_agent_and_the_prompt_agree_on_who_is_calling():
@@ -229,7 +244,7 @@ def test_the_prompt_puts_the_hook_in_the_opening_and_the_money_with_the_price():
         # they can hold on to — that is true of every builder calling them that afternoon.
         "We are launching a new project in [location].",
         "We have launched a new project in [location].",
-        'It is called [project name], and it is',
+        "It is called [project name] —",
         "Do NOT list amenities, prices or configurations before you ask this",
     ],
 )
