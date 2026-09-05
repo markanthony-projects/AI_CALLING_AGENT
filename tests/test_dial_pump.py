@@ -25,7 +25,7 @@ from app.models.db import (
 )
 from app.services import dial_pump
 from app.services.dial_pump import MAX_DIAL_ATTEMPTS, RETRY_BACKOFF, next_attempt_after
-from app.utils.timeutils import BUSINESS_HOURS, utc_now
+from app.utils.timeutils import CALLING_HOURS, utc_now
 
 
 # --- the retry arithmetic -------------------------------------------------------------
@@ -183,18 +183,23 @@ def test_the_oldest_contacts_go_first():
 # --- pacing ---------------------------------------------------------------------------
 
 
-def test_nothing_is_dialled_outside_business_hours():
+def test_nothing_is_dialled_outside_calling_hours():
     """A list uploaded at 9 PM dials in the morning. Enforced here rather than at import so
-    the upload itself is never rejected for the time of day."""
+    the upload itself is never rejected for the time of day.
+
+    This survived the removal of the booking-hours rule on purpose. Site visits are booked
+    at any hour the prospect likes, because the sales team is always reachable — calling a
+    stranger at three in the morning is a different question, and in India outbound
+    telemarketing hours are regulated rather than a preference."""
     src = inspect.getsource(dial_pump.dial_due_contacts)
-    assert "is_within_business_hours" in src
-    assert src.index("is_within_business_hours") < src.index("free_slots")
+    assert "is_within_calling_hours" in src
+    assert src.index("is_within_calling_hours") < src.index("free_slots")
 
 
-def test_business_hours_are_read_in_ist():
+def test_calling_hours_are_read_in_ist():
     """The droplet runs on UTC, where 09:30 IST looks like 04:00 — outside every window."""
     assert "to_ist" in inspect.getsource(dial_pump.dial_due_contacts)
-    assert BUSINESS_HOURS == (10, 20)
+    assert CALLING_HOURS == (10, 20)
 
 
 def test_a_full_carrier_dials_nothing_and_marks_nothing():

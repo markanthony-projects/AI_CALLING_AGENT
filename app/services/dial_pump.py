@@ -47,7 +47,7 @@ from app.models.db import (
 )
 from app.services.call_context import remember_customer_name, remember_dialed_number
 from app.services.dialer import trigger_vobiz_call
-from app.utils.timeutils import is_within_business_hours, to_ist, utc_now
+from app.utils.timeutils import is_within_calling_hours, to_ist, utc_now
 
 # Dials placed per contact before it is EXHAUSTED.
 #
@@ -189,7 +189,7 @@ async def dial_due_contacts() -> int:
     Every failure path here has to leave the queue in a state the next tick can recover from,
     because this runs unattended every few seconds and nobody reads its return value.
     """
-    if not is_within_business_hours(to_ist(utc_now())):
+    if not is_within_calling_hours(to_ist(utc_now())):
         return 0
 
     slots = await call_slots.free_slots()

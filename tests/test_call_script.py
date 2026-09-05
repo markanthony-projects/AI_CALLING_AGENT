@@ -300,7 +300,17 @@ def test_site_visits_run_on_weekdays_too():
 
 def test_the_visit_booking_captures_a_day_and_a_time():
     assert "specific DAY or date" in PROMPT
-    assert "specific TIME between 10 AM and 8 PM" in PROMPT
+    assert "specific TIME" in PROMPT
+
+
+def test_no_hour_is_refused():
+    """The sales team is reachable whenever the prospect is. The window that used to be here
+    also produced its own failure: the agent offered "between 10 AM and 8 PM", the prospect
+    said 8 PM, and the extraction then logged the slot as out of hours."""
+    assert "between 10 AM and 8 PM" not in PROMPT
+    assert "STRICT BUSINESS HOURS" not in PROMPT
+    assert "there are no visiting hours" in PROMPT
+    assert "Never refuse an hour" in PROMPT
 
 
 def test_a_cab_is_offered_only_when_the_project_actually_has_one():

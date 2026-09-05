@@ -4,7 +4,12 @@ from typing import Optional
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-BUSINESS_HOURS = (10, 20)
+# When this system may PLACE a call. Not when a visit may be booked — those were one
+# constant and one function until 5 Sep, and they are two different questions. Site visits
+# are booked whenever the prospect wants because the sales team is always reachable; calling
+# a stranger at three in the morning is a different matter entirely, and in India outbound
+# telemarketing hours are regulated rather than a preference.
+CALLING_HOURS = (10, 20)
 
 _WEEKDAY_INDEX = {
     "MONDAY": 0,
@@ -120,6 +125,13 @@ def resolve_appointment(
     return datetime.combine(day, at)
 
 
-def is_within_business_hours(value: datetime) -> bool:
-    start, end = BUSINESS_HOURS
+def is_within_calling_hours(value: datetime) -> bool:
+    """Whether the dialler may place a call at this moment.
+
+    Read the name carefully. This governs OUR outbound calls and nothing else. It used to be
+    called is_within_business_hours and was asked two questions with one answer — the second
+    being whether a site visit could be booked at a given hour, which is not a question this
+    system has any business refusing.
+    """
+    start, end = CALLING_HOURS
     return start <= value.hour < end

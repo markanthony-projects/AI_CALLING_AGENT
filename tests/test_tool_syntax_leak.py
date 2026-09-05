@@ -21,6 +21,7 @@ from app.utils.spoken_text import (
     ToolSyntaxFilter,
     classify_bracket,
     extract_closing_line,
+    sounds_like_goodbye,
     split_speakable,
     trim_label_tail,
 )
@@ -150,33 +151,33 @@ async def test_the_filter_never_pushes_markup_downstream():
 async def test_a_leaked_end_call_still_hangs_up():
     seen = {}
 
-    async def on_leak(line, already_spoke):
+    async def on_leak(line, spoken_already):
         seen["line"] = line
-        seen["spoke"] = already_spoke
+        seen["spoken"] = spoken_already
 
     filt = ToolSyntaxFilter("sid", on_leaked_end_call=on_leak)
     await _run(filt, [LEAK])
-    assert seen["spoke"] is True, "a goodbye was already spoken; do not speak a second one"
+    assert sounds_like_goodbye(seen["spoken"]), "a goodbye went out; do not speak a second one"
     assert "Understood" in seen["line"]
 
 
 async def test_a_leak_with_nothing_spoken_carries_the_closing_line():
     seen = {}
 
-    async def on_leak(line, already_spoke):
+    async def on_leak(line, spoken_already):
         seen["line"] = line
-        seen["spoke"] = already_spoke
+        seen["spoken"] = spoken_already
 
     filt = ToolSyntaxFilter("sid", on_leaked_end_call=on_leak)
     await _run(filt, ['<function=end_call{"closing_line":"Thank you, have a good day."}>'])
-    assert seen["spoke"] is False, "nothing was said, so the closing line must be spoken"
+    assert seen["spoken"] == "", "nothing was said, so the closing line must be spoken"
     assert seen["line"] == "Thank you, have a good day."
 
 
 async def test_a_clean_response_never_fires_the_hangup():
     fired = []
 
-    async def on_leak(line, already_spoke):
+    async def on_leak(line, spoken_already):
         fired.append(line)
 
     filt = ToolSyntaxFilter("sid", on_leaked_end_call=on_leak)
@@ -432,12 +433,12 @@ async def test_the_bare_leak_still_hangs_the_call_up():
     prospect is left holding a silent line."""
     seen = {}
 
-    async def on_leak(line, already_spoke):
-        seen["line"], seen["spoke"] = line, already_spoke
+    async def on_leak(line, spoken_already):
+        seen["line"], seen["spoken"] = line, spoken_already
 
     filt = ToolSyntaxFilter("sid", on_leaked_end_call=on_leak)
     await _run(filt, [BARE_LEAK])
-    assert seen["spoke"] is True
+    assert sounds_like_goodbye(seen["spoken"])
     assert seen["line"] == "Thank you for your time. Have a great day!"
 
 

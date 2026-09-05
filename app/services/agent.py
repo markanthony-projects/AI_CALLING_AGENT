@@ -63,7 +63,7 @@ from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
-from app.utils.spoken_text import ToolSyntaxFilter
+from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
 from app.utils.timeutils import time_of_day_greeting
 from app.utils.turn_analyzer import build_turn_analyzer
 from app.utils.stt_witness import SttWitness
@@ -533,16 +533,20 @@ async def run_voice_agent(
     # 3. Same intent, wrong channel: the model wrote the tool call into its spoken text.
     # ToolSyntaxFilter has already stopped the caller hearing it, so all that is left is to
     # hang up the way the structured call would have.
-    async def on_leaked_end_call(line: Optional[str], already_spoke: bool):
+    async def on_leaked_end_call(line: Optional[str], spoken_already: str):
         nonlocal _ending
         if not task_ref or _ending:
             return
         _ending = True
         closing_gate.arm()
-        if already_spoke:
-            # The words before the markup were the goodbye, and they are on the wire now.
-            # Speaking the leaked closing line too would be two farewells in a row — but the
-            # first one still has to finish, so this waits on the same signal.
+        # Whether the prospect has already been said goodbye to — not merely whether the
+        # agent spoke, which is what this used to test. On 5 Sep the words in front of the
+        # markup were "Got it. Tuesday at 8 PM. I will book that for you.", read as a
+        # farewell, and the read-back the model had written was thrown away. A prospect who
+        # had just booked a visit was never told it was confirmed, and the line went dead.
+        if sounds_like_goodbye(spoken_already):
+            # It really was a sign-off and it is on the wire now. Speaking the leaked closing
+            # line too would be two farewells in a row, but the first still has to finish.
             logger.info(f"[{call_sid}] Ending call after leaked end_call syntax (goodbye already spoken)")
             farewell.arm()
             await farewell.wait_until_spoken(farewell_timeout(line or ""))

@@ -41,6 +41,10 @@ _MARKUP_WORDS = (
     "tool_use",
     "tooluse",
     "invoke",
+    # From a live call on 5 Sep: "Got it. Tuesday at 8 PM. I will book that for you. <call:"
+    # reached the voice engine and the prospect heard it. The bare-marker check caught the
+    # end_call that followed, but by then the angle bracket had already been spoken.
+    "call",
     "antml",
     "python_tag",
     "|python_tag",
@@ -98,6 +102,33 @@ _TRAILING_LABEL = re.compile(
 # Past Latin Extended-B. Deliberately letters only, so an em dash, a curly quote or a rupee
 # sign — none of which trouble the voice engine — do not cry wolf.
 _LATIN_END = 0x24F
+
+
+# What a sign-off sounds like. Used to decide whether a prospect has already been said
+# goodbye to, which is a different question from whether the agent said anything at all.
+_GOODBYE = re.compile(
+    r"\bthank(?:s| you)\b"
+    r"|\bhave a (?:great|good|nice|lovely|wonderful)\b"
+    r"|\bgood ?bye\b|\bbye\b"
+    r"|\btake care\b",
+    re.I,
+)
+
+
+def sounds_like_goodbye(spoken: str) -> bool:
+    """Whether these words have already sent the prospect off.
+
+    Asked because "did the agent speak?" was standing in for it and is not the same thing.
+    On a live call on 5 Sep the words before the leaked markup were "Got it. Tuesday at 8 PM.
+    I will book that for you." — a booking half-confirmed, and then the line simply died. The
+    read-back the model had written for the closing line was discarded as a duplicate of a
+    goodbye that had never been said.
+
+    Deliberately generous about what counts. Saying goodbye twice is a small rudeness; not
+    saying it at all leaves a booked visit unconfirmed, and the prompt is blunt about what
+    that costs — "a prospect never told the booking is confirmed does not turn up".
+    """
+    return bool(_GOODBYE.search(spoken or ""))
 
 
 def non_latin_letters(text: str) -> str:
@@ -257,7 +288,7 @@ class ToolSyntaxFilter(FrameProcessor):
     def __init__(
         self,
         call_sid: str,
-        on_leaked_end_call: Optional[Callable[[Optional[str], bool], Awaitable[None]]] = None,
+        on_leaked_end_call: Optional[Callable[[Optional[str], str], Awaitable[None]]] = None,
         campaign_context: str = "",
         **kwargs,
     ):
@@ -405,7 +436,8 @@ class ToolSyntaxFilter(FrameProcessor):
         )
 
     async def _flush(self, direction: FrameDirection) -> None:
-        leaked, suppressed, spoke = self._leaked, self._suppressing, self._spoke_this_response
+        leaked, suppressed = self._leaked, self._suppressing
+        spoken_line = self.lead_in
         # A partial '<...' left over at the end of the response was never markup after all.
         if not suppressed and self._buffer:
             frame = LLMTextFrame(self._buffer)
@@ -421,7 +453,10 @@ class ToolSyntaxFilter(FrameProcessor):
             f"suppressed before TTS: {leaked[:200]!r}"
         )
         if "end_call" in leaked and self._on_leaked_end_call:
-            # It meant to hang up. Honour that, but do not speak the leaked closing line
-            # if a goodbye already went out in the same response — the caller would hear
-            # two farewells back to back.
-            await self._on_leaked_end_call(extract_closing_line(leaked), spoke)
+            # It meant to hang up. Honour that, and hand over WHAT was spoken rather than
+            # merely that something was: this used to pass a boolean, the caller read it as
+            # "a goodbye already went out", and on 5 Sep the words in front of the markup
+            # were "Got it. Tuesday at 8 PM. I will book that for you." — a half-finished
+            # confirmation, not a farewell. The read-back the model had written was thrown
+            # away and a prospect who booked a visit was never told it was confirmed.
+            await self._on_leaked_end_call(extract_closing_line(leaked), spoken_line)

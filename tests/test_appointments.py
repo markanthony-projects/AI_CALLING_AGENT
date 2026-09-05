@@ -13,7 +13,7 @@ import pytest
 
 from app.models.schemas import Weekday
 from app.utils.timeutils import (
-    is_within_business_hours,
+    is_within_calling_hours,
     parse_time_of_day,
     resolve_appointment,
 )
@@ -149,11 +149,35 @@ def test_naive_and_aware_references_agree():
     assert naive == aware
 
 
-# --- business hours --------------------------------------------------------------
+# --- when we may call, which is not when they may visit --------------------------
 
 
 @pytest.mark.parametrize(
     "hour,inside", [(9, False), (10, True), (15, True), (19, True), (20, False), (3, False)]
 )
-def test_business_hours_window(hour, inside):
-    assert is_within_business_hours(datetime(2026, 8, 2, hour, 0)) is inside
+def test_calling_hours_window(hour, inside):
+    """Only the dialler asks this. It was called is_within_business_hours and answered two
+    questions with one number, the second being whether a site visit could be booked at a
+    given hour — which this system has no business refusing."""
+    assert is_within_calling_hours(datetime(2026, 8, 2, hour, 0)) is inside
+
+
+@pytest.mark.parametrize("at", ["07:00", "12:00", "20:00", "21:30", "23:00"])
+def test_a_visit_is_booked_at_whatever_hour_they_ask_for(at):
+    """No hour is refused. On 5 Sep the agent offered "between 10 AM and 8 PM", the prospect
+    said 8 PM, and the extraction logged it as outside business hours — a complaint about a
+    slot the agent itself had proposed."""
+    booked = resolve_appointment(MONDAY, weekday=Weekday.TUESDAY, time_of_day=at)
+    assert booked is not None
+    assert f"{booked:%H:%M}" == at
+
+
+def test_nothing_in_the_extraction_path_still_judges_the_hour():
+    """A warning that fires while the booking is stored anyway is noise, and noise in a log
+    that is read for real failures costs more than it says."""
+    import inspect
+
+    from app import worker
+
+    assert "business hours" not in inspect.getsource(worker._resolve)
+    assert "is_within_calling_hours" not in inspect.getsource(worker)

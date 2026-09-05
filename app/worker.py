@@ -23,7 +23,7 @@ from app.utils.attribution import (
     phrase_is_grounded,
 )
 from app.utils.lead_status import capped_status, qualifying_facts
-from app.utils.timeutils import is_within_business_hours, resolve_appointment, to_ist, utc_now
+from app.utils.timeutils import resolve_appointment, to_ist, utc_now
 
 _CALL_MODULES = {
     "app.services.agent",
@@ -266,9 +266,11 @@ def _resolve(reference, weekday, in_days, time_of_day, call_sid: str, label: str
             )
         return None
 
+    # No hour is refused. The sales team is reachable whenever the prospect is, and a
+    # booking we warn about but store anyway was only ever noise: on 5 Sep the agent offered
+    # "between 10 AM and 8 PM", the prospect said 8 PM, and this logged it as outside — a
+    # complaint about a slot the agent itself had proposed.
     logger.info(f"[{call_sid}] {label.capitalize()} resolved to {resolved:%A %Y-%m-%d %H:%M}")
-    if not is_within_business_hours(resolved):
-        logger.warning(f"[{call_sid}] {label.capitalize()} falls outside business hours: {resolved:%H:%M}")
     return resolved
 
 
