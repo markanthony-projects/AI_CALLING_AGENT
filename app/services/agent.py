@@ -145,12 +145,17 @@ def build_opening_line(
     is meant for them; without one the greeting simply omits it and the agent asks in its
     first reply — never a guessed name.
 
-    It used to end "Can I speak to you for a minute?", and those eight words did two things
-    wrong. They carried no information, on a line where the prospect had already sat through
-    twenty words before saying anything but hello — and they invited a "no" to a question
-    that was not the one worth asking. The question that follows in the opening gate, "Are
-    you looking for any property purchase?", asks for the same permission and sorts the call
-    at the same time.
+    It ends by asking for a minute of their time, and that was removed once and put back.
+
+    The argument for removing it was that eight words carried no information and invited a
+    "no" to a question that was not the one worth asking, since the opening gate asks for
+    the same permission and sorts the call as well. Half of that was right and the half that
+    was wrong cost more: nothing replaced them. A greeting that ends on a statement hands
+    the prospect nothing to answer, and on a live call on 5 Sep the line went quiet for
+    three seconds and then they had to ask "What is the purpose?" themselves.
+
+    A question is what passes the turn over. The words are not there for their information;
+    they are there so the other person knows it is their go.
 
     Written as short sentences rather than one comma-spliced line. Pipecat synthesises one
     sentence per request, so a full stop is a real gap the caller hears while a comma is not:
@@ -165,7 +170,8 @@ def build_opening_line(
     address = f" {name}" if name else ""
     return (
         f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from "
-        f"{caller_identity(project_name, developer_name)}."
+        f"{caller_identity(project_name, developer_name)}. "
+        f"Can I speak to you for a minute?"
     )
 
 # A sign-off is two or three sentences. Anything longer is the model monologuing into a

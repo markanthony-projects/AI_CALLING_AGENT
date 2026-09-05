@@ -28,7 +28,8 @@ NAMED = get_system_prompt(CONTEXT, "Rahul Sharma")
 
 def test_the_whole_greeting():
     assert build_opening_line("Abhee New Dimension", "Rahul", MORNING) == (
-        "Hi, Good morning Rahul. I am Priya calling you from Abhee New Dimension."
+        "Hi, Good morning Rahul. I am Priya calling you from Abhee New Dimension. "
+        "Can I speak to you for a minute?"
     )
 
 
@@ -50,20 +51,24 @@ def test_it_addresses_them_rather_than_interrogating_them():
     assert line.startswith("Hi, Good morning Rahul.")
 
 
-def test_it_does_not_spend_eight_words_asking_for_permission():
-    """"Can I speak to you for a minute?" carried no information and invited a "no" — on a
-    line where the prospect had already sat through twenty words before saying anything but
-    hello. Step 2's question asks for the same permission and sorts the call as well."""
+def test_it_ends_on_a_question_so_the_prospect_knows_it_is_their_go():
+    """These eight words were cut once, on the argument that they carried no information and
+    invited a "no" the opening gate asks better. Half right, and the wrong half cost more:
+    nothing replaced them. On a live call on 5 Sep the greeting ended, the line went quiet
+    for three seconds, and the prospect had to ask "What is the purpose?" themselves.
+
+    A greeting that ends on a statement hands them nothing to answer. The question is not
+    there for its information; it is there to pass the turn over."""
     line = build_opening_line("X", "Rahul", MORNING)
-    assert "for a minute" not in line
-    assert len(line.split()) <= 13, line
+    assert line.rstrip().endswith("?")
+    assert "Can I speak to you for a minute?" in line
 
 
-def test_the_prompt_does_not_put_it_back_when_the_prospect_speaks_first():
-    """The greeting is cancelled if they speak first and the MODEL introduces itself
-    instead. Told to ask for a minute there, the shorter opening would only apply to the
-    calls where nobody said hello."""
-    assert "do NOT add \"can I speak to you for a minute\"" in PROMPT
+def test_the_prompt_ends_the_greeting_the_same_way():
+    """The greeting is cancelled if the prospect speaks first and the MODEL introduces itself
+    instead. The two have to end the same way or half the calls open differently."""
+    assert "Can I speak to you for a minute?" in PROMPT
+    assert "same request for a minute of their time" in PROMPT
 
 
 def test_the_agent_and_the_prompt_agree_on_who_is_calling():
