@@ -230,11 +230,45 @@ def test_both_reach_the_model_as_named_lines():
 
 
 def test_the_prompt_puts_the_hook_in_the_opening_and_the_money_with_the_price():
-    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHORT INTRO")]
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
     assert "Headline" in gate
     assert "Price benefit" not in gate, "the discount belongs next to the price, not before"
-    intro = PROMPT[PROMPT.index("3. SHORT INTRO") : PROMPT.index("4. DISCOVERY")]
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
     assert "Price benefit" in intro
+
+
+def test_the_project_is_shown_in_four_turns_and_not_one():
+    """It used to be one reply: location, unit types, starting price and the price benefit,
+    capped at 35 words. The model produced 32 — eleven seconds of speaking — and on two calls
+    the prospect sat through all of it and then said "not interested", having said nothing at
+    all while it was said."""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    for step in ("3a.", "3b.", "3c.", "3d."):
+        assert step in intro, step
+    assert "FOUR SHORT TURNS, NEVER ONE" in intro
+    assert "Under 20 words a turn" in intro
+
+
+def test_each_of_those_turns_ends_by_handing_the_turn_back():
+    """One new thing, one easy question, stop. Four turns that each state a fact and stop is
+    the same monologue with pauses in it."""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "ask ONE easy question, then STOP" in intro
+    assert "they should have spoken four times" in intro
+
+
+def test_the_questions_are_required_to_be_easy():
+    """Simple vocabulary is already the top style rule, but a question can use plain words
+    and still be work to answer. "What are your locality preferences?" is a form."""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "KEEP YOUR QUESTIONS EASY" in intro
+    assert "answerable in two or three words" in intro
+
+
+def test_the_price_quoted_is_for_the_size_they_asked_about():
+    """Reading the whole range back is the old one-breath pitch returning by another door."""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "the price of the size THEY just named, not the whole range" in intro
 
 
 # --- the intent gate ---------------------------------------------------------------

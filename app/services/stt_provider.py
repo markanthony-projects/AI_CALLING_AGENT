@@ -84,13 +84,37 @@ def _deepgram(endpoint: SttEndpoint, settings) -> STTService:
     )
 
 
+# Deepgram takes "hi"; Sarvam wants "hi-IN" and warns on anything it does not recognise,
+# then sends the unrecognised code anyway. One STT_LANGUAGE setting feeds both providers, so
+# the dialect belongs here rather than in the environment file — otherwise switching provider
+# silently changes what language the call is transcribed in.
+_SARVAM_LANGUAGE = {
+    "hi": "hi-IN",
+    "en": "en-IN",
+    "bn": "bn-IN",
+    "gu": "gu-IN",
+    "kn": "kn-IN",
+    "ml": "ml-IN",
+    "mr": "mr-IN",
+    "ta": "ta-IN",
+    "te": "te-IN",
+    "pa": "pa-IN",
+}
+
+
+def sarvam_language(code: str) -> str:
+    """Sarvam's spelling of a language code, or the code unchanged if it already is one."""
+    lowered = (code or "").strip().lower()
+    return _SARVAM_LANGUAGE.get(lowered, code.strip())
+
+
 def _sarvam(endpoint: SttEndpoint, settings) -> STTService:
     return SarvamSTTService(
         api_key=settings.SARVAM_API_KEY,
         sample_rate=SAMPLE_RATE,
         settings=SarvamSTTService.Settings(
             model=endpoint.model,
-            language=endpoint.language,
+            language=sarvam_language(endpoint.language),
         ),
     )
 

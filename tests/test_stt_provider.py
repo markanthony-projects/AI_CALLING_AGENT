@@ -115,6 +115,68 @@ def test_sarvam_is_built_when_it_is_the_one_configured():
     assert type(service).__name__ == "SarvamSTTService"
 
 
+# --- the two providers do not spell a language the same way -------------------------------
+
+
+@pytest.mark.parametrize(
+    "configured,sent",
+    [("hi", "hi-IN"), ("en", "en-IN"), ("kn", "kn-IN"), ("ta", "ta-IN"), ("mr", "mr-IN")],
+)
+def test_sarvam_is_sent_the_dialect_it_expects(configured, sent):
+    """Deepgram takes "hi". Sarvam wants "hi-IN", and given "hi" it logs "Language hi not
+    verified" and sends the unverified code anyway — so the call is transcribed in whatever
+    that turns out to mean, with nothing failing to say so."""
+    from app.services.stt_provider import sarvam_language
+
+    assert sarvam_language(configured) == sent
+
+
+@pytest.mark.parametrize("already", ["hi-IN", "en-IN", "unknown"])
+def test_a_code_that_is_already_sarvams_is_left_alone(already):
+    """"unknown" is Sarvam's own default for saarika:v2.5 and means auto-detect. Mapping it
+    to something would turn auto-detection off."""
+    from app.services.stt_provider import sarvam_language
+
+    assert sarvam_language(already) == already
+
+
+def test_an_unmapped_code_passes_through_rather_than_vanishing():
+    """The map covers the languages this system dials in. A code outside it is more likely a
+    deliberate choice than a mistake, and sending an empty language is worse than sending an
+    unusual one."""
+    from app.services.stt_provider import sarvam_language
+
+    assert sarvam_language("es-ES") == "es-ES"
+    assert sarvam_language("  hi  ") == "hi-IN"
+
+
+def test_the_mapping_is_applied_where_the_service_is_built():
+    """A helper nothing calls is a helper that does not run on a call."""
+    service = build_stt_service(
+        "sid", fake(STT_PROVIDER="sarvam", STT_MODEL="saarika:v2.5", STT_LANGUAGE="hi")
+    )
+    assert service._settings.language == "hi-IN"
+
+
+def test_deepgram_still_gets_the_plain_code():
+    """The dialect belongs to Sarvam. Sending Deepgram "hi-IN" would change what it listens
+    for on every existing call, for a switch nobody made."""
+    service = build_stt_service("sid", fake(STT_LANGUAGE="hi"))
+    assert service._settings.language == "hi"
+
+
+def test_switching_provider_does_not_silently_change_the_language():
+    """One STT_LANGUAGE feeds both, so the dialect has to live in the builder. Left in the
+    env file, flipping STT_PROVIDER would also flip what language the call is in."""
+    settings = fake(STT_LANGUAGE="hi")
+    deepgram = build_stt_service("sid", settings)
+    sarvam = build_stt_service(
+        "sid", fake(STT_PROVIDER="sarvam", STT_MODEL="saarika:v2.5", STT_LANGUAGE="hi")
+    )
+    assert str(deepgram._settings.language).startswith("hi")
+    assert str(sarvam._settings.language).startswith("hi")
+
+
 def test_every_provider_has_a_builder():
     """PROVIDERS is what stt_endpoint accepts. A name accepted there with no builder behind
     it would pass validation and then raise KeyError on a live call."""
