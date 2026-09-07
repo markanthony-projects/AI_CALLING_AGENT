@@ -113,10 +113,7 @@ LLM_BUSY_LINE = "One moment please."
 # Spoken before we hang up when the model gives us nothing usable to say.
 FAREWELL_LINE = "Thank you so much for your time. Have a wonderful day!"
 
-# How fast the agent speaks when nobody has asked otherwise. Named rather than inline
-# because it is now two things: the value the call opens with, and the ceiling a
-# prospect can walk back up to after asking for slower. See app/utils/pace.py.
-SPEAKING_PACE = 1.0
+
 
 
 def caller_identity(project_name: str, developer_name: Optional[str] = None) -> str:
@@ -388,7 +385,7 @@ async def run_voice_agent(
         settings=SarvamTTSService.Settings(
             model="bulbul:v3",
             voice=settings.SARVAM_VOICE_ID,
-            pace=SPEAKING_PACE,
+            pace=settings.SPEAKING_PACE,
             **tts_tuning,
             max_chunk_length=150,
             # min_buffer_size is deliberately left at Sarvam's default. Setting it to 25
@@ -661,8 +658,9 @@ async def run_voice_agent(
         _asked_shown = brief
         messages[0]["content"] = "\n\n".join([system_prompt, brief]) if brief else system_prompt
 
-    # Moves only when the prospect asks about the speed, and never past SPEAKING_PACE.
-    _pace: float = SPEAKING_PACE
+    # Moves only when the prospect asks about the speed, and never past the pace the call
+    # opened with. Both are settings.SPEAKING_PACE: what it starts at, and its ceiling.
+    _pace: float = settings.SPEAKING_PACE
     _turn_start_time: float = 0.0
     _user_has_spoken: bool = False
     _startup_task = None
@@ -870,7 +868,7 @@ async def run_voice_agent(
             # call, and answered twice at exactly the same speed, because the pace was a
             # constant. Being heard and ignored is worse than not being understood.
             nonlocal _pace
-            wanted = adjusted_pace(_pace, pace_request(transcript), SPEAKING_PACE)
+            wanted = adjusted_pace(_pace, pace_request(transcript), settings.SPEAKING_PACE)
             if wanted != _pace:
                 _pace = wanted
                 logger.info(f"[{call_sid}] Prospect asked about the speed; pace now {_pace}")

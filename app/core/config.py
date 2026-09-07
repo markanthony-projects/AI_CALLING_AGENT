@@ -258,6 +258,18 @@ class Settings(BaseSettings):
     # Lower is steadier and flatter; the two are the same dial, and which trade is right
     # can only be settled by listening to a call, not by a test. Try 0.3.
     SARVAM_TEMPERATURE: Optional[float] = Field(default=None, ge=0.01, le=1.0)
+
+    # How fast the agent speaks, before any prospect asks it to slow down.
+    #
+    # Measured off a live call on 7 Sep: 38 words took fifteen seconds, which is 152 words a
+    # minute. Ordinary conversation runs 150 to 160 and a sales call runs 170 to 190, so at
+    # 1.0 this voice sits at the bottom of the range — heard, correctly, as slow. 1.1 is
+    # about 167 a minute and 1.15 about 175.
+    #
+    # A setting rather than a constant because the right value is a judgement made by
+    # listening, and the difference between 1.1 and 1.15 is not something a test can settle.
+    # Bounded by what bulbul:v3 accepts; the useful band is 1.0 to 1.2.
+    SPEAKING_PACE: float = Field(default=1.0, ge=0.5, le=2.0)
     GROQ_API_KEY: str = ""
     DEEPGRAM_API_KEY: str = ""
 

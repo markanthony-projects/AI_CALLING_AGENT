@@ -96,6 +96,43 @@ def test_a_configured_value_does_reach_the_payload():
     assert _tts_settings(0.3).temperature == 0.3
 
 
+def test_the_speaking_pace_can_be_tuned_without_a_deploy():
+    """Measured off a live call on 7 Sep: 38 words in fifteen seconds is 152 words a minute.
+    Ordinary conversation runs 150 to 160 and a sales call runs 170 to 190, so at 1.0 this
+    voice sits at the bottom of the range — and it was reported, correctly, as slow.
+
+    Which of 1.1 and 1.15 is right is a judgement made by listening. A constant would need a
+    deploy per attempt, which is how an experiment ends up measuring the deploy."""
+    assert _settings(SPEAKING_PACE=1.1).SPEAKING_PACE == 1.1
+    assert _settings(SPEAKING_PACE="1.15").SPEAKING_PACE == 1.15
+
+
+def test_the_default_is_the_pace_every_call_has_already_run_at():
+    assert Settings.model_fields["SPEAKING_PACE"].default == 1.0
+
+
+@pytest.mark.parametrize("bad", [0.2, 2.5, 0])
+def test_a_pace_sarvam_would_reject_is_refused_at_startup(bad):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _settings(SPEAKING_PACE=bad)
+
+
+def test_the_bounds_are_the_ones_the_model_documents():
+    """Pipecat forwards this into the connect payload with no range check of its own."""
+    from pipecat.services.sarvam.tts import TTS_MODEL_CONFIGS
+
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    model = next(m for m in TTS_MODEL_CONFIGS if f'model="{m}"' in src)
+    low, high = TTS_MODEL_CONFIGS[model].pace_range
+    bounds = {type(m).__name__: m for m in Settings.model_fields["SPEAKING_PACE"].metadata}
+    assert bounds["Ge"].ge >= low
+    assert bounds["Le"].le <= high
+
+
 def test_the_setting_actually_reaches_the_voice_engine():
     """A dial wired to nothing is worse than no dial: it invites somebody to change it,
     hear no difference, and conclude the voice cannot be steadied."""
@@ -150,5 +187,7 @@ def test_pace_is_still_pinned():
     Both have to be the same number or "faster" would drift past where the call started."""
     from app.services import agent
 
-    assert agent.SPEAKING_PACE == 1.0
-    assert "pace=SPEAKING_PACE" in inspect.getsource(agent.run_voice_agent)
+    from app.core.config import Settings
+
+    assert Settings.model_fields["SPEAKING_PACE"].default == 1.0
+    assert "pace=settings.SPEAKING_PACE" in inspect.getsource(agent.run_voice_agent)

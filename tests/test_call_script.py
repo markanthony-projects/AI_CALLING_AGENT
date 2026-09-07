@@ -260,8 +260,19 @@ def test_the_headline_is_said_once_and_only_in_the_opening():
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
     assert "Headline" in gate, "the hook has to live somewhere"
-    assert 'NOT the "Headline" again' in intro
-    assert "the location and the SIZE of it" in intro
+    assert 'NOT repeat is the "Headline"' in intro
+
+
+def test_the_location_is_said_again_where_the_question_needs_it():
+    """From a live call on 7 Sep. 3a gave only the size, and then asked "Do you know that
+    area?" — twelve seconds after the area had been named in step 2. The prospect replied
+    "Which area?", and the turn after that "For what?".
+
+    Keeping the headline out of 3a was right. Taking the location out with it was not."""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "SAY THE LOCATION" in intro
+    assert "The location is not optional here" in intro
+    assert '"Do you know that area?" gets "Which area?" back' in intro
 
 
 def test_the_project_name_is_actually_spoken():

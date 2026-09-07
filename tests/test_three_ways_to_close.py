@@ -105,6 +105,50 @@ def test_the_visit_is_invited_with_a_reason_rather_than_asked_for():
     assert "is a question a form asks" in CLOSE
 
 
+# --- a prospect who talks themselves back in --------------------------------------------------
+
+
+FLOW = PROMPT[PROMPT.index("5. NOT FOR THEM") : PROMPT.index("OBJECTIONS:")]
+
+
+def test_a_wrong_area_is_checked_before_it_is_believed():
+    """Call 220ce45f, 7 Sep. "Yeah, but not in this area" sent the call to step 5. Four turns
+    later the prospect asked for Sarjapur Road — this project's own address — the agent
+    replied "Sarjapur Road is a very active area for growth", and then hung up on them.
+    Budget 1.5 Crores, buying for investment, inside two months."""
+    assert "FIRST, CHECK THEY ARE ACTUALLY NOT FOR US" in FLOW
+    assert "they are guessing" in FLOW
+
+
+def test_there_is_a_way_back_to_the_pitch():
+    """Step 5 was one-way. Everything in it led to end_call, so a prospect who ruled
+    themselves out by mistake could not be let back in."""
+    assert "GO BACK TO STEP 3" in FLOW
+
+
+@pytest.mark.parametrize(
+    "case", ["the area this project is in", "their budget turns out to fit", "unit type is one we sell"]
+)
+def test_each_way_back_in_is_named(case):
+    """"Not this area" is the one that happened, but a budget quoted before they heard the
+    price, and a unit type guessed at, rule people out the same way."""
+    assert case in FLOW
+
+
+def test_the_call_that_produced_the_rule_is_written_beside_it():
+    """A rule with its own failure attached survives a later rewrite; one without gets
+    tidied away by whoever is shortening the prompt next."""
+    assert "Sarjapur Road" in FLOW
+    assert "hung up on them" in FLOW
+
+
+def test_giving_up_is_still_possible():
+    """The point is to check first, not to never stop. A prospect who really is not for us
+    still gets their questions answered and a warm ending."""
+    assert "Only when they really are not for us" in FLOW
+    assert "never hang up straight away" in FLOW
+
+
 # --- and the rules that were already earned stay earned ---------------------------------------
 
 

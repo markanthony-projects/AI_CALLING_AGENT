@@ -312,7 +312,12 @@ def test_nothing_is_sent_when_nothing_changed():
 
 
 def test_the_ceiling_is_the_pace_the_call_opened_with():
-    from app.services import agent
+    """"Faster" walks back an earlier slow-down and stops there. The ceiling and the opening
+    value have to be the same number, or a prospect who asked for slower and changed their
+    mind ends up somewhere the call never started."""
+    from app.core.config import Settings
 
-    assert "adjusted_pace(_pace, pace_request(transcript), SPEAKING_PACE)" in _agent_source()
-    assert agent.SPEAKING_PACE == 1.0
+    src = _agent_source()
+    assert "adjusted_pace(_pace, pace_request(transcript), settings.SPEAKING_PACE)" in src
+    assert "_pace: float = settings.SPEAKING_PACE" in src
+    assert Settings.model_fields["SPEAKING_PACE"].default == 1.0
