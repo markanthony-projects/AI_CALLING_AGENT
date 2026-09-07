@@ -59,6 +59,52 @@ def test_the_visit_is_only_offered_after_they_have_shown_interest():
     assert "only after they have shown interest in something specific" in CLOSE
 
 
+# --- warm rather than merely short ------------------------------------------------------------
+
+
+ACKNOWLEDGE = PROMPT[PROMPT.index("ACKNOWLEDGE BEFORE YOU ASK") : PROMPT.index("NEVER JUDGE")]
+
+
+def test_the_reaction_has_to_be_about_what_they_said():
+    """From a live call on 7 Sep, reported as cold: "That works well." opened two different
+    replies, and "That is good to know." opened a third. The list of canned reactions was
+    being used as a slot to fill rather than as a reaction."""
+    assert "THE REACTION MUST BE ABOUT WHAT THEY ACTUALLY SAID" in ACKNOWLEDGE
+    assert '"That works well" fits any answer to any question' in ACKNOWLEDGE
+
+
+def test_the_same_reaction_may_not_be_used_twice():
+    """One repetition is what makes a whole conversation sound automated — more than any
+    single sentence in it does."""
+    assert "NEVER USE THE SAME REACTION TWICE IN ONE CALL" in ACKNOWLEDGE
+
+
+def test_the_examples_show_the_specific_form_beside_the_generic_one():
+    """A rule saying "be specific" with generic examples underneath teaches the examples."""
+    assert 'NOT "That works well."' in ACKNOWLEDGE
+    assert "Six months is a comfortable time to plan this." in ACKNOWLEDGE
+
+
+def test_warmth_is_not_loudness():
+    """The old rule already banned the showy words. Asking for warmth without repeating that
+    is how "excellent!" comes back."""
+    assert "Warm is not loud" in ACKNOWLEDGE
+    assert "excellent" in ACKNOWLEDGE
+
+
+def test_the_budget_reaction_stays_neutral_while_the_others_get_specific():
+    """The non-judging rule is the one place where generic is correct. Naming the amount at
+    all — high or low — is what ends the relationship."""
+    assert "Never label the amount, high or low." in ACKNOWLEDGE
+
+
+def test_the_visit_is_invited_with_a_reason_rather_than_asked_for():
+    """"That works well. Would you like to come and see it once?" was reported as
+    unprofessional, and it is: the reason is what turns a form question into an invitation."""
+    assert "Give a REASON first, tied to something they told you" in CLOSE
+    assert "is a question a form asks" in CLOSE
+
+
 # --- and the rules that were already earned stay earned ---------------------------------------
 
 

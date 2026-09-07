@@ -249,6 +249,29 @@ def test_the_project_is_shown_in_four_turns_and_not_one():
     assert "Under 20 words a turn" in intro
 
 
+def test_the_headline_is_said_once_and_only_in_the_opening():
+    """From a live call on 7 Sep, both of these went out four seconds apart:
+
+        step 2 -> "It is Bengaluru's first Scotland-themed residential township."
+        3a     -> "It is a Scotland-themed township over 45 acres."
+
+    Both steps were pulling from the same Headline field. Repeating the one line that was
+    meant to be the hook is the first thing that makes an agent sound automated."""
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "Headline" in gate, "the hook has to live somewhere"
+    assert 'NOT the "Headline" again' in intro
+    assert "the location and the SIZE of it" in intro
+
+
+def test_the_project_name_is_actually_spoken():
+    """On the same call it was never said at all until the closing read-back. Step 2 is the
+    one place it belongs, and a prospect who never hears it cannot ask anyone about it."""
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    assert "SAY THE PROJECT NAME HERE" in gate
+    assert "cannot ask anyone about it later" in gate
+
+
 def test_each_of_those_turns_ends_by_handing_the_turn_back():
     """One new thing, one easy question, stop. Four turns that each state a fact and stop is
     the same monologue with pauses in it."""
@@ -268,7 +291,21 @@ def test_the_questions_are_required_to_be_easy():
 def test_the_price_quoted_is_for_the_size_they_asked_about():
     """Reading the whole range back is the old one-breath pitch returning by another door."""
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
-    assert "the price of the size THEY just named, not the whole range" in intro
+    assert "if they named a size in 3c, give the price of THAT size" in intro
+
+
+def test_a_size_they_never_named_is_never_put_in_their_mouth():
+    """From a live call on 7 Sep. Asked which size they wanted, the prospect said "that
+    totally depends on the budget, may I know the price ranges?" — and the agent replied
+    "Since you are looking for a 3 BHK, the price is 1.46 Crores." They had not said 3 BHK,
+    and they had asked for ranges.
+
+    The rule that produced it was mine: quote the size THEY named, with nothing said about
+    what to do when they name none."""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "If they did NOT name one" in intro
+    assert "give the range, from the lowest to the highest" in intro
+    assert 'NEVER say "since you are looking for a 3 BHK" unless they said 3 BHK' in intro
 
 
 # --- the intent gate ---------------------------------------------------------------
