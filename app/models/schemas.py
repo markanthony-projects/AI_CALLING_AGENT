@@ -27,11 +27,11 @@ class LeadExtraction(BaseModel):
 
     is_prospect: bool = Field(default=False, description="True if the caller is a genuine prospect interested in real estate. False if spam, wrong number, or completely uninterested.")
     customer_name: Optional[str] = Field(None, description="Customer's name ALWAYS written in English/Latin script. Transliterate Indic scripts: कुंदन becomes 'Kundan', राहुल becomes 'Rahul'. Never output Devanagari here.")
-    preferred_location: Optional[str] = Field(None, description="Locality or city the PROSPECT said they want. Null if only the Agent mentioned a location.")
-    preferred_unit_type: Optional[str] = Field(None, description="Unit configuration the PROSPECT showed interest in, exactly as the project names it, e.g. '2 BHK', '3 BHK', 'Villament'. Set this when they accept or ask about a specific unit. Null if no particular unit was discussed or only the Agent named one without the prospect responding to it.")
+    preferred_location: Optional[str] = Field(None, description="Locality or city the PROSPECT said they want, ALWAYS written in English/Latin script. Transliterate Indic scripts: सरजापुर becomes 'Sarjapur', कोरमंगला becomes 'Koramangala'. Never output Devanagari here. Null if only the Agent mentioned a location.")
+    preferred_unit_type: Optional[str] = Field(None, description="Unit configuration the PROSPECT showed interest in, exactly as the project names it, e.g. '2 BHK', '3 BHK', 'Villament', ALWAYS in English/Latin script and never Devanagari. Set this when they accept or ask about a specific unit. Null if no particular unit was discussed or only the Agent named one without the prospect responding to it.")
     budget: Optional[float] = Field(None, description="Customer budget as a number in rupees. 75 Lakhs is 7500000, 1.5 Crores is 15000000.")
     purpose: Optional[Purpose] = Field(None, description="Why the PROSPECT is buying: SELF_USE if for themselves or their family to live in, INVESTMENT if to rent out or resell. Null unless they said which.")
-    timeline: Optional[str] = Field(None, description="Purchase timeline in the prospect's own words")
+    timeline: Optional[str] = Field(None, description="Purchase timeline in the prospect's own words, ALWAYS written in English/Latin script. Transliterate Indic scripts: दो महीने में becomes 'do mahine mein'. Never output Devanagari here.")
     timeline_months: Optional[int] = Field(None, description="The prospect's purchase timeline as a whole number of months: 'in 2 months' is 2, 'next month' is 1, 'immediately' or 'this month' is 0, 'within a year' is 12, 'in 2 years' is 24. Null if they gave no timeframe.")
 
     site_visit_weekday: Optional[Weekday] = Field(None, description="Weekday the prospect named for a site visit, e.g. SUNDAY when they said 'Sunday works'. Null if they named no weekday.")

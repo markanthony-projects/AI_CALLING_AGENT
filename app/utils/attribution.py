@@ -179,3 +179,46 @@ def name_spoken_by_prospect(name: Optional[str], transcript: str) -> bool:
         return False
     said = set(_TOKEN.findall(prospect_text(transcript).lower()))
     return any(token in said for token in _TOKEN.findall(name.lower()))
+
+
+# --- what script the answer came back in ------------------------------------------------
+
+# The scripts speech-to-text can return, which is the set of languages STT_LANGUAGE can
+# name. Listed rather than inferred from "is it ASCII": a value is allowed to hold an
+# accent or a rupee sign, and only an Indic script means the model skipped transliteration.
+_INDIC = re.compile(
+    "["
+    "\u0900-\u097f"  # Devanagari — Hindi, Marathi
+    "\u0980-\u09ff"  # Bengali
+    "\u0a00-\u0a7f"  # Gurmukhi — Punjabi
+    "\u0a80-\u0aff"  # Gujarati
+    "\u0b80-\u0bff"  # Tamil
+    "\u0c00-\u0c7f"  # Telugu
+    "\u0c80-\u0cff"  # Kannada
+    "\u0d00-\u0d7f"  # Malayalam
+    "]"
+)
+
+
+def is_readable(value: Optional[str]) -> bool:
+    """True when this value is in a script the people who open the lead can read.
+
+    A live call on 7 Sep recorded preferred_location as 'सरजापुर road'. The prospect really
+    did ask for Sarjapur Road, so nothing here was invented — the model transliterated the
+    transcript as instructed and left the extracted field in Devanagari, because only
+    customer_name's description told it not to.
+
+    That is a second bug, and worse than an unreadable lead. phrase_is_grounded looks for
+    distinctive words with `[a-z0-9]+`, so a Devanagari value yields no tokens at all,
+    falls into the "nothing long enough to check" branch, and is passed as grounded without
+    being checked against anything. A locality the prospect never said gets in the same way
+    a real one does, which is precisely what that module exists to prevent.
+
+    So the script is checked separately from the attribution, and a value we cannot read is
+    treated the way this file treats everything it cannot verify: dropped, and logged. The
+    transliterated transcript is stored beside the lead, so the answer is not lost — it is
+    one line further down the page, in letters sales can read.
+    """
+    if not value:
+        return True
+    return not _INDIC.search(value)

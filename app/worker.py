@@ -19,6 +19,7 @@ from app.services.dial_pump import dial_due_contacts, release_stale_dialing
 from app.utils.attribution import (
     budget_as_stated,
     budget_is_grounded,
+    is_readable,
     name_spoken_by_prospect,
     phrase_is_grounded,
 )
@@ -295,6 +296,47 @@ def resolve_customer_name(extracted, said_it_themselves: bool, known):
     return known or extracted
 
 
+# Every free-text field that reaches the lead sheet. The rest are enums, numbers and
+# times, which have no script of their own.
+_WRITTEN_FIELDS = ("customer_name", "preferred_location", "preferred_unit_type", "timeline")
+
+
+def _drop_unreadable(lead_data: LeadExtraction, call_sid: str) -> LeadExtraction:
+    """Null any field the model left in an Indic script.
+
+    Live call, 7 Sep 2026: preferred_location was stored as 'सरजापुर road'. The prospect
+    really did ask for Sarjapur Road, so this was never a wrong answer — only an unreadable
+    one. customer_name's description says "ALWAYS written in English/Latin script ... Never
+    output Devanagari here" and comes back romanised every time; preferred_location said
+    nothing about script, so it did not.
+
+    The descriptions now say it for all four, and this is the same rule as code, for the
+    reason app/utils/attribution.py gives at the top of the file: that prompt already had
+    the instruction twice, in capitals, and was ignored anyway.
+
+    Dropping rather than transliterating here. A hand-rolled table turns सरजापुर into
+    "sarajapura", which is a spelling nobody searches for and reads like a real answer;
+    the transliterated transcript is stored on the same record and holds the words the
+    prospect actually used. Empty and honest beats populated and approximate.
+
+    This runs BEFORE the attribution check, because an unreadable value defeats it. Its
+    tokens are matched with `[a-z0-9]+`, so Devanagari yields none, and a value with no
+    checkable tokens is deliberately passed through as "unverifiable is not wrong". That
+    branch is right for '2 BHK' and wrong for a locality the model invented in Devanagari,
+    which would otherwise reach the CRM having been checked against nothing at all.
+    """
+    dropped = {}
+    for field in _WRITTEN_FIELDS:
+        value = getattr(lead_data, field, None)
+        if not is_readable(value):
+            dropped[field] = None
+            logger.warning(
+                f"[{call_sid}] Dropping {field}={value!r}: left in a script the lead sheet "
+                f"cannot be read in. The transliterated transcript still holds what they said."
+            )
+    return lead_data.model_copy(update=dropped) if dropped else lead_data
+
+
 def _drop_ungrounded(lead_data: LeadExtraction, transcript: str, call_sid: str) -> LeadExtraction:
     """Null any prospect-owned field the prospect is not on record as having said.
 
@@ -361,6 +403,8 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
         # come back in Latin script, so checking them against a Devanagari transcript would
         # find nothing and discard everything the prospect said in Hindi.
         grounding_text = lead_data.transliterated_transcript or transcript_record.full_text
+        # Script first: a value the attribution check cannot read is passed by it unchecked.
+        lead_data = _drop_unreadable(lead_data, call_sid)
         lead_data = _drop_ungrounded(lead_data, grounding_text, call_sid)
 
         if lead_data.transliterated_transcript:
