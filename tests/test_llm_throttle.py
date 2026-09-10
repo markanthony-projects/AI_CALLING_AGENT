@@ -250,10 +250,45 @@ def test_a_response_without_the_headers_is_ignored():
 
 
 def test_the_fallback_is_off_until_it_is_fully_configured():
-    """Half-configured insurance fails at the one moment it is needed."""
+    """Half-configured insurance fails at the one moment it is needed. A key with no model
+    is half; a model with no key for its provider is half."""
     assert build_llm_service("sid", _settings())._fallback is None
     assert build_llm_service("sid", _settings(LLM_FALLBACK_API_KEY="k"))._fallback is None
-    assert build_llm_service("sid", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini"))._fallback is None
+    assert build_llm_service(
+        "sid", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini", OPENAI_API_KEY="")
+    )._fallback is None
+
+
+def test_the_fallback_key_resolves_from_the_providers_own_key():
+    """The fallback defaults to OpenAI, and this deployment already holds an OpenAI key for
+    the extraction worker. On 10 Sep 2026 production had that key in the file and no
+    fallback configured, because the same key had to be typed again under a second name;
+    the primary's model 404ed and every call failed. Naming the model is now enough."""
+    svc = build_llm_service("sid", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini", OPENAI_API_KEY="sk-openai"))
+    assert isinstance(svc._fallback, LLMEndpoint)
+    assert svc._fallback.api_key == "sk-openai"
+    assert svc._fallback.model == "gpt-4o-mini"
+
+
+def test_an_explicit_fallback_key_still_wins():
+    svc = build_llm_service(
+        "sid", _settings(LLM_FALLBACK_MODEL="gpt-4o-mini", LLM_FALLBACK_API_KEY="k-explicit", OPENAI_API_KEY="sk-openai")
+    )
+    assert svc._fallback.api_key == "k-explicit"
+
+
+def test_the_fallback_key_follows_the_fallback_url_not_the_primarys():
+    """Pointing the fallback at Groq must not hand it the OpenAI key, and vice versa."""
+    svc = build_llm_service(
+        "sid",
+        _settings(
+            LLM_FALLBACK_MODEL="llama-3.3-70b",
+            LLM_FALLBACK_BASE_URL="https://api.groq.com/openai/v1",
+            GROQ_API_KEY="gsk-groq",
+            OPENAI_API_KEY="sk-openai",
+        ),
+    )
+    assert svc._fallback.api_key == "gsk-groq"
 
 
 def test_a_fully_configured_fallback_is_wired():

@@ -345,8 +345,31 @@ class Settings(BaseSettings):
     LLM_FALLBACK_MODEL: str = ""
 
     @property
+    def llm_fallback_api_key(self) -> str:
+        """The key for whichever provider LLM_FALLBACK_BASE_URL points at.
+
+        Resolved the same way llm_api_key is, for the same reason, and for one more: the
+        fallback was meant to be OpenAI, whose key this deployment already holds for the
+        extraction worker. Requiring it to be typed a second time under a second name is
+        how production reached 10 Sep 2026 with no fallback at all — the primary's model
+        404ed and every call failed, with a working OpenAI key sitting in the same file.
+        """
+        if self.LLM_FALLBACK_API_KEY:
+            return self.LLM_FALLBACK_API_KEY
+        if "openai.com" in self.LLM_FALLBACK_BASE_URL:
+            return self.OPENAI_API_KEY
+        if "groq.com" in self.LLM_FALLBACK_BASE_URL:
+            return self.GROQ_API_KEY
+        if "cerebras.ai" in self.LLM_FALLBACK_BASE_URL:
+            return self.CEREBRAS_API_KEY
+        return ""
+
+    @property
     def llm_fallback_enabled(self) -> bool:
-        return bool(self.LLM_FALLBACK_API_KEY and self.LLM_FALLBACK_MODEL)
+        """On when a model is named and a key resolves for its provider. Half-configured
+        is still off: a fallback that looks like insurance and fails when needed is worse
+        than none — but "half" now means no model, not a key typed under a second name."""
+        return bool(self.llm_fallback_api_key and self.LLM_FALLBACK_MODEL)
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

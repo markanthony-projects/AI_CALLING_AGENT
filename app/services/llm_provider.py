@@ -421,14 +421,16 @@ def primary_endpoint(settings) -> LLMEndpoint:
 def fallback_endpoint(settings) -> Optional[LLMEndpoint]:
     """The second provider, or None.
 
-    Off unless both its key and its model are set. A half-configured fallback is worse than
-    none: it looks like insurance and fails at the one moment it is needed.
+    Off unless a model is named and a key resolves for its provider — the provider's own
+    key where LLM_FALLBACK_API_KEY is blank, exactly as the primary resolves its own. A
+    half-configured fallback is worse than none: it looks like insurance and fails at the
+    one moment it is needed.
     """
     if not settings.llm_fallback_enabled:
         return None
     return LLMEndpoint(
         name=settings.LLM_FALLBACK_NAME,
-        api_key=settings.LLM_FALLBACK_API_KEY,
+        api_key=settings.llm_fallback_api_key,
         base_url=settings.LLM_FALLBACK_BASE_URL,
         model=settings.LLM_FALLBACK_MODEL,
     )
