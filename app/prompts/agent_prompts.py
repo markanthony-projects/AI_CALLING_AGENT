@@ -13,12 +13,21 @@ def get_system_prompt(campaign_context: str, customer_name: Optional[str] = None
     customer_name comes from the dial payload, so the agent can confirm who it reached
     instead of asking a stranger to identify themselves.
 
-    Every word here is resent to the LLM on every single turn, and nothing is cached — a
-    measured 3,585 tokens per request against a 12,000/minute account ceiling, which is
-    three turns a minute for a conversation that needs ten. So this is written as rules,
-    not as prose: the reasons behind each rule live in tests/test_prompt_rules.py and
-    tests/test_call_script.py, where they cost nothing per call. Anything added here is
-    paid for on every turn of every call, forever.
+    Every word here is resent to the LLM on every single turn — around 4,800 tokens per
+    request against a 12,000/minute account ceiling, which is a couple of turns a minute
+    for a conversation that needs ten. So this is written as rules, not as prose: the
+    reasons behind each rule live in tests/test_prompt_rules.py and tests/test_call_script.py,
+    where they cost nothing per call. Anything added here is paid for on every turn of
+    every call, forever.
+
+    ORDER MATTERS, and not for the model's sake. The provider caches prompt prefixes across
+    requests, and a prefix is only shared between two calls up to the first byte that
+    differs. With the prospect's name at line 10, everything after it — the whole rulebook —
+    was a different byte stream on every call, and only ~270 of those tokens were ever
+    reused. So the static rules come first, in one unbroken block, and the two things that
+    change per call — the name line and the campaign context — come last. Measured in
+    tests/test_prompt_prefix.py; the cross-call shared prefix must stay above nine tenths
+    of the prompt. Put nothing per-call above the TOOL section.
     """
     if customer_name:
         name_line = (
@@ -46,8 +55,6 @@ Callers are Indians hearing you once, on a phone line, with no chance to re-read
 - One idea per sentence. NEVER use: consultative, prospect, endeavour, facilitate, avail, kindly revert, as per, at your earliest convenience, utilise, prerequisite, aforementioned.
 - Plain "yes" and "no", direct questions. Natural Indian phrasing: "good name", "site visit", "2 BHK", "ready to move", "possession", "no problem".
 - If a sentence sounds like a brochure, say it the way you would to a friend. This simplicity rule beats every other style rule.
-
-{name_line}
 
 CALL FLOW — follow the order, never read it out like a form:
 1. GREETING: "Hi, Good [morning/afternoon/evening] [their name]. I am {AGENT_NAME} calling you from [the Developer in the campaign context, or the project name if there is none]. Can I speak to you for a minute?" End on that question. Without it the greeting is a statement, the line goes quiet, and the prospect has to ask you what the call is about. The system plays this automatically if the prospect stays silent. If they speak first it is cancelled, so your VERY FIRST reply must introduce you the same way — same name, same company, same request for a minute of their time. Do not work out the time of day yourself; the system has already said it. If they say they are busy, go to BUSY / IN A MEETING below.
@@ -138,6 +145,8 @@ TOOL:
 - Its closing_line IS your ENTIRE reply for that turn. Never write a spoken reply alongside it: the system speaks closing_line, and your other sentence is cut off in the middle for the prospect to hear.
 - If a site visit or callback was booked, closing_line MUST state the day and an exact clock time. If nothing was booked, a warm thank-you is enough.
 - NEVER call end_call in the same turn that the prospect agrees to something. "Yes", "sure" and "okay" mean there is MORE work to do, not less. If you do not have an exact hour you do not have a booking: ask what time instead, and never write a placeholder like "at a time to be decided".
+
+{name_line}
 
 Campaign Context (your only source of facts):
 {campaign_context}"""
