@@ -59,6 +59,7 @@ from app.utils.closing_gate import ClosingGate
 from app.utils.latency import LatencyObserver
 from app.utils.pace import adjusted_pace, pace_request
 from app.utils.person_name import spoken_name
+from app.utils.sentences import sentences
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
@@ -154,10 +155,14 @@ def build_opening_line(
     A question is what passes the turn over. The words are not there for their information;
     they are there so the other person knows it is their go.
 
-    Written as short sentences rather than one comma-spliced line. Pipecat synthesises one
-    sentence per request, so a full stop is a real gap the caller hears while a comma is not:
+    Written as short sentences rather than one comma-spliced line, and SPOKEN as short
+    sentences too — see spoken() below. Pipecat synthesises the model's replies one sentence
+    per request, so there a full stop is a real gap the caller hears while a comma is not:
     measured on bulbul:v3, the same words with and without commas take the same time to say.
-    As one comma-spliced line this arrives in a single flat rush.
+    But a TTSSpeakFrame skips that per-sentence cut, and this line was going to the voice
+    engine as one request, three sentences in one flat breath. On 10 Sep 2026 it was the
+    one line on the call reported as sounding like a machine. The full stops only became
+    real gaps once the line was queued one sentence per frame.
     """
     part = time_of_day_greeting(now)
     # The lead list holds "Abhijit Kumar Singh", "RAHUL" and "mahantesha"; none of those is
@@ -165,11 +170,29 @@ def build_opening_line(
     # costs nothing and means this line is safe whoever calls it. See app/utils/person_name.
     name = spoken_name(customer_name)
     address = f" {name}" if name else ""
+    # "Prestige Pvt. Ltd." already ends in a full stop; the sentence supplies its own.
+    identity = caller_identity(project_name, developer_name).rstrip(".")
     return (
-        f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from "
-        f"{caller_identity(project_name, developer_name)}. "
+        f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from {identity}. "
         f"Can I speak to you for a minute?"
     )
+
+def spoken(text: str, *, append_to_context: bool = True) -> list[TTSSpeakFrame]:
+    """The frames to queue so the system says `text` the way the model's replies are said.
+
+    One TTSSpeakFrame per sentence. A single frame holding three sentences reaches the
+    voice engine as one request and comes back as one breath — no gap at the full stops,
+    and the next sentence not begun until the whole block is done. The model's replies never
+    sound like that because Pipecat cuts them at sentence boundaries before synthesis; this
+    gives the lines the system speaks itself — the greeting, the nudges, the sign-offs, the
+    goodbye — the same treatment. See app/utils/sentences.py for the call that showed it.
+
+    append_to_context is passed through to every frame. The greeting sets it False because
+    run_voice_agent adds the whole line to the context by hand; letting the engine append
+    each sentence as well would put it there twice, in pieces.
+    """
+    return [TTSSpeakFrame(s, append_to_context=append_to_context) for s in sentences(text)]
+
 
 # A sign-off is two or three sentences. Anything longer is the model monologuing into a
 # hangup, and the caller waits through all of it before the line clears.
@@ -502,7 +525,7 @@ async def run_voice_agent(
         closing_gate.protect_goodbye()
 
         farewell.arm()
-        await task_ref[0].queue_frames([TTSSpeakFrame(line)])
+        await task_ref[0].queue_frames(spoken(line))
         if not await farewell.wait_until_spoken(farewell_timeout(line)):
             logger.warning(
                 f"[{call_sid}] Goodbye never finished playing; hanging up anyway so the "
@@ -715,7 +738,7 @@ async def run_voice_agent(
                 # lands on the first thing the prospect actually waits for — measured at 3382ms
                 # for a first turn against 1247ms for the second on the same call.
                 asyncio.create_task(llm.warm_up())
-                await task.queue_frames([TTSSpeakFrame(opening_line)])
+                await task.queue_frames(spoken(opening_line, append_to_context=False))
             else:
                 # They spoke first, so the greeting was cancelled and there is nothing left
                 # to protect. Lifting it here matters: otherwise the gate stays armed for a
@@ -925,7 +948,7 @@ async def run_voice_agent(
         _dead_air_nudges += 1
         _last_nudged = nudge
         logger.info(f"[{call_sid}] Nothing heard back; asking again → \"{nudge}\"")
-        await task.queue_frames([TTSSpeakFrame(nudge)])
+        await task.queue_frames(spoken(nudge))
 
     # The two edges of "a reply is being generated". Together they bound the window in
     # which a new user turn makes the in-flight inference worthless.
@@ -962,7 +985,7 @@ async def run_voice_agent(
         # A rejected tool call is the model trying to hang up, not a lost turn.
         if FUNCTION_CALL_FAILURE in (error.error or "").lower():
             logger.info(f"[{call_sid}] Tool call rejected upstream; closing the call as intended")
-            await task.queue_frames([TTSSpeakFrame(FAREWELL_LINE), EndWorkerFrame(reason="provider rejected the tool call")])
+            await task.queue_frames([*spoken(FAREWELL_LINE), EndWorkerFrame(reason="provider rejected the tool call")])
             return
 
         # How long the provider asked us to wait, taken from its Retry-After header where it
@@ -985,9 +1008,9 @@ async def run_voice_agent(
                 f"to ride these out instead of losing the turn."
             )
             if _llm_failures >= MAX_LLM_TURN_FAILURES:
-                await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm throttled past recovery")])
+                await task.queue_frames([*spoken(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm throttled past recovery")])
             else:
-                await task.queue_frames([TTSSpeakFrame(LLM_BUSY_LINE)])
+                await task.queue_frames(spoken(LLM_BUSY_LINE))
             return
 
         # Out of budget, or throttled for longer than the caller will stay on the line —
@@ -1001,7 +1024,7 @@ async def run_voice_agent(
                 f"[{call_sid}] LLM quota exhausted; signing off without asking the caller "
                 f"to repeat. Provider said: {error.error}"
             )
-            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm quota exhausted")])
+            await task.queue_frames([*spoken(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm quota exhausted")])
             return
 
         _llm_failures += 1
@@ -1010,9 +1033,9 @@ async def run_voice_agent(
         )
         if _llm_failures >= MAX_LLM_TURN_FAILURES:
             logger.error(f"[{call_sid}] LLM unrecoverable; signing off to avoid dead air")
-            await task.queue_frames([TTSSpeakFrame(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm turn failures exhausted")])
+            await task.queue_frames([*spoken(LLM_SIGNOFF_LINE), EndWorkerFrame(reason="llm turn failures exhausted")])
         else:
-            await task.queue_frames([TTSSpeakFrame(LLM_RECOVERY_LINE)])
+            await task.queue_frames(spoken(LLM_RECOVERY_LINE))
 
     # ─── TTS Failure ───────────────────────────────────────────────────────────
     # Sarvam reports "No credits available" per synthesis attempt, so this fires many

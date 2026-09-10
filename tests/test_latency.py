@@ -394,7 +394,7 @@ def test_the_llm_is_warmed_while_the_greeting_plays():
     src = inspect.getsource(agent.run_voice_agent)
     greeting = src[src.index("async def startup_greeting") : src.index("nonlocal _startup_task")]
     assert "llm.warm_up()" in greeting
-    assert greeting.index("llm.warm_up()") < greeting.index("TTSSpeakFrame(opening_line)")
+    assert greeting.index("llm.warm_up()") < greeting.index("spoken(opening_line")
 
 
 def test_the_warm_up_cannot_take_a_call_down():

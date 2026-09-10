@@ -18,6 +18,7 @@ import pytest
 
 from app.services import agent
 from app.services.agent import FAREWELL_LINE, MAX_CLOSING_CHARS, closing_line
+from app.utils.sentences import sentences
 
 BOOKING_READBACK = "Perfect Kumar, that's Sunday at 3 PM at Lakeview Residency. I'll send you the details. Thank you!"
 
@@ -119,8 +120,11 @@ class _Speak(_Frame):
 
 
 def _spoken(batches):
-    """The line the caller actually hears, wherever it sits in the batch."""
-    return next(f.text for batch in batches for f in batch if isinstance(f, _Speak))
+    """The line the caller actually hears, wherever it sits in the batch.
+
+    Joined back together: the goodbye is queued one sentence per frame since 10 Sep 2026,
+    so the words are the same and the frames are several."""
+    return " ".join(f.text for batch in batches for f in batch if isinstance(f, _Speak))
 
 
 class _Task:
@@ -209,6 +213,9 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "farewell_timeout": lambda line: 1.0,
         "asyncio": _AsyncioShim,
         "TTSSpeakFrame": _Speak,
+        # The goodbye is queued one sentence per frame now — see app/services/agent.py
+        # spoken(). Same stub frame, same cut the real helper makes.
+        "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "EndFrame": _Frame,
         # The farewell is followed by EndWorkerFrame, not EndFrame: EndFrame stops the
         # transport in queue order and cut a live goodbye off after 425ms.
@@ -288,7 +295,7 @@ def test_this_turns_own_words_are_not_cut_off():
     farewell = _Farewell(speaking=True)
     batches = _drive(farewell, _Filter(lead_in=LEAD_IN))
     assert farewell.waited_for_quiet, "the lead-in was not allowed to finish"
-    assert batches[0] == ["_Speak"], f"something was queued before the goodbye: {batches}"
+    assert set(batches[0]) == {"_Speak"}, f"something was queued before the goodbye: {batches}"
 
 
 def test_a_stale_reply_is_still_discarded():
@@ -297,7 +304,7 @@ def test_a_stale_reply_is_still_discarded():
     farewell = _Farewell(speaking=True)
     batches = _drive(farewell, _Filter(lead_in=""))
     assert not farewell.waited_for_quiet
-    assert batches[0] != ["_Speak"], "nothing was flushed ahead of the goodbye"
+    assert set(batches[0]) != {"_Speak"}, "nothing was flushed ahead of the goodbye"
 
 
 def test_a_lead_in_that_has_already_finished_playing_is_not_waited_for():
@@ -306,7 +313,7 @@ def test_a_lead_in_that_has_already_finished_playing_is_not_waited_for():
     farewell = _Farewell(speaking=False)
     batches = _drive(farewell, _Filter(lead_in=LEAD_IN))
     assert not farewell.waited_for_quiet
-    assert batches[0] != ["_Speak"]
+    assert set(batches[0]) != {"_Speak"}
 
 
 def test_hanging_up_stops_any_further_turn_being_generated():
@@ -364,7 +371,7 @@ def test_the_shield_goes_up_after_end_calls_own_interruption_not_before():
         assert lines, f"{name} is not called at all"
         return min(lines)
 
-    assert first("InterruptionWorkerFrame") < first("protect_goodbye") < first("TTSSpeakFrame")
+    assert first("InterruptionWorkerFrame") < first("protect_goodbye") < first("spoken(line)")
 
 
 def test_a_second_hangup_is_refused():
@@ -384,8 +391,10 @@ def test_a_second_hangup_is_refused():
             await coro
 
     asyncio.run(drive())
-    spoken = [f for batch in task.batches for f in batch if isinstance(f, _Speak)]
-    assert len(spoken) == 1, f"the farewell was queued {len(spoken)} times"
+    heard = " ".join(f.text for batch in task.batches for f in batch if isinstance(f, _Speak))
+    # One farewell's worth of words, not two: the frames are per sentence now, so the
+    # count that matters is how many times the line was said, not how many frames it took.
+    assert heard == BOOKING_READBACK, f"the farewell was queued more than once: {heard!r}"
 
 
 def test_the_goodbye_is_hung_up_on_even_if_it_never_plays():

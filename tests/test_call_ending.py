@@ -63,17 +63,30 @@ def _nested(name):
 
 
 def _frames_in(node) -> list[list[str]]:
+    """The frame kinds each queue_frames call queues, one list per call.
+
+    Speech is queued through spoken(line) since 10 Sep 2026 — one TTSSpeakFrame per
+    sentence — so `queue_frames(spoken(...))` and a `*spoken(...)` inside a list both
+    count as the TTSSpeakFrame step. The assertions below are about which steps exist and
+    in what order, which the cut into sentences does not change.
+    """
+
+    def kind(el):
+        if isinstance(el, ast.Starred):
+            el = el.value
+        if isinstance(el, ast.Call):
+            name = getattr(el.func, "id", None)
+            return "TTSSpeakFrame" if name == "spoken" else name
+        return None
+
     out = []
     for n in ast.walk(node):
-        if (
-            isinstance(n, ast.Call)
-            and getattr(n.func, "attr", None) == "queue_frames"
-            and n.args
-            and isinstance(n.args[0], ast.List)
-        ):
-            out.append(
-                [getattr(el.func, "id", None) for el in n.args[0].elts if isinstance(el, ast.Call)]
-            )
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "queue_frames" and n.args:
+            arg = n.args[0]
+            if isinstance(arg, ast.List):
+                out.append([k for k in (kind(el) for el in arg.elts) if k])
+            elif kind(arg):
+                out.append([kind(arg)])
     return out
 
 
@@ -117,7 +130,7 @@ def test_the_three_steps_are_separate_and_awaited():
 def test_the_interruption_is_confirmed_landed_before_the_farewell_is_spoken():
     src = _body("say_goodbye_then_hang_up")
     assert "flush_pipeline" in src
-    assert src.index("flush_pipeline") < src.index("TTSSpeakFrame")
+    assert src.index("flush_pipeline") < src.index("spoken(line)")
 
 
 def test_it_waits_for_the_goodbye_to_be_heard_not_merely_queued():
