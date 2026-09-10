@@ -60,11 +60,15 @@ def captured(level="INFO"):
 # --- how long the caller waits for the first word -------------------------------------
 
 
-async def test_the_opening_line_is_measured_from_queue_to_audible():
-    """The stretch nothing covered. Everything before it is logged to the millisecond and
-    everything after it is covered per turn, but the first thing the prospect waits for —
-    synthesis, then the trip out to the carrier — was invisible."""
-    obs = LatencyObserver("sid")
+async def test_the_first_word_is_measured_from_the_stream_opening():
+    """"GREETING audible after 404ms" was true and useless: it measured synthesis and the
+    trip to the carrier, and the caller had by then been holding a live line for seconds.
+    Between the stream opening and that queue sit two database round trips, the services
+    being built, and the voice engine's handshake — all ours, none of it on any line, and
+    the caller telling us the greeting came very late while the log said 404ms."""
+    import time
+
+    obs = LatencyObserver("sid", stream_open_at=time.monotonic() - 3.0)
     seen, sink = captured()
     try:
         await drive(obs, [
@@ -73,8 +77,27 @@ async def test_the_opening_line_is_measured_from_queue_to_audible():
         ])
     finally:
         logger.remove(sink)
-    line = next(m for m in seen if "GREETING audible" in m)
-    assert "1400ms" in line
+    line = next(m for m in seen if "FIRST WORD" in m)
+    assert "after the stream opened" in line
+    assert "300" in line.split("after the stream opened")[0], line  # ~3000ms, ±rounding
+    # The parts are still there, and still named for what they are.
+    assert "pipeline=2400ms" in line, line
+    assert "synthesis=1400ms" in line, line
+
+
+async def test_the_first_word_says_so_when_nobody_supplied_a_stream_time():
+    """Rather than reporting a wait measured from an epoch it does not have."""
+    obs = LatencyObserver("sid")
+    seen, sink = captured()
+    try:
+        await drive(obs, [
+            (TTSSpeakFrame("Hi."), 1.0),
+            (BotStartedSpeakingFrame(), 2.4),
+        ])
+    finally:
+        logger.remove(sink)
+    line = next(m for m in seen if "FIRST WORD" in m)
+    assert "stream-open time not supplied" in line
 
 
 async def test_it_is_not_reported_as_a_turn():
@@ -104,7 +127,7 @@ async def test_a_later_spoken_line_cannot_claim_to_be_the_greeting():
         ])
     finally:
         logger.remove(sink)
-    assert len([m for m in seen if "GREETING audible" in m]) == 1
+    assert len([m for m in seen if "FIRST WORD" in m]) == 1
 
 
 async def test_the_turn_measurement_still_works_around_it():

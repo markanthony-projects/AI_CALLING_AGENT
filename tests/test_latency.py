@@ -13,6 +13,8 @@ from pipecat.frames.frames import (
     MetricsFrame,
     TextFrame,
     UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import TTFAMetricsData, TTFBMetricsData
 from pipecat.observers.base_observer import FramePushed
@@ -258,7 +260,11 @@ async def test_metrics_are_cleared_between_turns():
         (BotStartedSpeakingFrame(), 1.0),
         (UserStoppedSpeakingFrame(), 5.0),
     ])
-    assert obs._breakdown(0.0) == "", "stale timings must not be attributed to the next turn"
+    # turn_decision is always on the line — it is the point of the line — so the check is
+    # that no SERVICE timing survived, not that the breakdown is empty.
+    stale = obs._breakdown(0.0)
+    assert "groq" not in stale, "stale timings must not be attributed to the next turn"
+    assert stale == "  |  turn_decision=0ms", stale
 
 
 @pytest.mark.parametrize(
@@ -419,3 +425,171 @@ def test_the_timing_line_names_the_provider_that_answered():
     groq = LLMEndpoint(name="groq", model="m", base_url="u", api_key="k")
     assert _short(processor_name(cerebras)) == "cerebras"
     assert _short(processor_name(groq)) == "groq"
+
+
+# --- the six hundred milliseconds that were not on any line -------------------------------------
+
+
+def captured():
+    seen = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="INFO")
+    return seen, sink
+
+
+def _vad_stop(at):
+    return (VADUserStoppedSpeakingFrame(stop_secs=0.2, timestamp=int(at * NS_PER_SEC)), at)
+
+
+def _vad_start(at):
+    return (VADUserStartedSpeakingFrame(timestamp=int(at * NS_PER_SEC)), at)
+
+
+async def test_the_turn_is_timed_from_when_their_voice_stopped():
+    """Not from when the turn was declared over. Pipecat broadcasts UserStoppedSpeakingFrame
+    out of _on_user_turn_stopped, which is AFTER the VAD's stop_secs and AFTER the blind
+    settle — 600ms on this deployment. Timed from there, a call that made the prospect wait
+    1.33 seconds reported 729ms, and the metric was called voice-to-voice while it was
+    nothing of the sort."""
+    obs = LatencyObserver("sid")
+    await drive(obs, [
+        _vad_stop(1.0),                          # their voice actually stops
+        (UserStoppedSpeakingFrame(), 1.6),       # 600ms later the turn is declared over
+        (BotStartedSpeakingFrame(), 2.33),       # and 730ms after that they hear something
+    ])
+    assert obs.turns == pytest.approx([1.33])
+
+
+async def test_the_decision_is_named_on_the_line():
+    obs = LatencyObserver("sid")
+    seen, sink = captured()
+    try:
+        await drive(obs, [
+            _vad_stop(1.0),
+            (UserStoppedSpeakingFrame(), 1.6),
+            (BotStartedSpeakingFrame(), 2.33),
+        ])
+    finally:
+        logger.remove(sink)
+    line = next(m for m in seen if "LATENCY turn 1" in m)
+    assert "1330ms voice-to-voice" in line
+    assert "turn_decision=600ms" in line
+
+
+async def test_a_pause_for_breath_is_not_the_end_of_their_turn():
+    """They stop, start again, and stop again. Only the last stop is when they finished —
+    timing from the first would report a turn that includes their own second sentence."""
+    obs = LatencyObserver("sid")
+    await drive(obs, [
+        _vad_stop(1.0),
+        _vad_start(1.3),                        # still talking
+        _vad_stop(2.0),                         # this is the one
+        (UserStoppedSpeakingFrame(), 2.6),
+        (BotStartedSpeakingFrame(), 3.0),
+    ])
+    assert obs.turns == pytest.approx([1.0])
+
+
+async def test_their_own_speaking_is_never_counted_as_our_delay():
+    """The case the VADUserStartedSpeakingFrame handler exists for, and the only one that
+    can tell it is there: they resume speaking and the turn is then declared over WITHOUT a
+    second stop — the stop strategy has a fallback path that ends a turn on transcripts
+    alone. Left holding the stale stop, the observer would bill their own two seconds of
+    talking to us and report a turn that never happened.
+
+    Mutation testing found this: with a stop after the restart, the later stop overwrites
+    the earlier one anyway and the handler is invisible."""
+    obs = LatencyObserver("sid")
+    await drive(obs, [
+        _vad_stop(1.0),
+        _vad_start(1.3),                       # off again, and no stop after it
+        (UserStoppedSpeakingFrame(), 3.3),     # turn declared while the VAD says speaking
+        (BotStartedSpeakingFrame(), 3.7),
+    ])
+    assert obs.turns == pytest.approx([0.4]), "their speech was billed as our latency"
+
+
+async def test_without_vad_frames_it_measures_what_it_always_measured():
+    """A transport that sends none must keep working rather than reporting nothing."""
+    obs = LatencyObserver("sid")
+    await drive(obs, [
+        (UserStoppedSpeakingFrame(), 1.0),
+        (BotStartedSpeakingFrame(), 1.8),
+    ])
+    assert obs.turns == pytest.approx([0.8])
+
+
+async def test_the_voice_stop_does_not_carry_into_the_next_turn():
+    obs = LatencyObserver("sid")
+    await drive(obs, [
+        _vad_stop(1.0),
+        (UserStoppedSpeakingFrame(), 1.6),
+        (BotStartedSpeakingFrame(), 2.0),
+        (UserStoppedSpeakingFrame(), 6.0),       # no VAD frame this time
+        (BotStartedSpeakingFrame(), 6.5),
+    ])
+    assert obs.turns == pytest.approx([1.0, 0.5])
+
+
+async def test_the_decision_counts_towards_what_is_accounted_for():
+    """unattributed is elapsed minus everything named. Leaving the decision out of the sum
+    would report it twice — once as turn_decision and again as unattributed."""
+    obs = LatencyObserver("sid")
+    seen, sink = captured()
+    try:
+        await drive(obs, [
+            _vad_stop(1.0),
+            (UserStoppedSpeakingFrame(), 1.6),
+            (MetricsFrame(data=[TTFBMetricsData(processor="GroqLLMService#0", value=0.4)]), 1.7),
+            (BotStartedSpeakingFrame(), 2.1),
+        ])
+    finally:
+        logger.remove(sink)
+    line = next(m for m in seen if "LATENCY turn 1" in m)
+    assert "turn_decision=600ms" in line
+    assert "unattributed" not in line, line
+
+
+async def test_the_summary_reports_what_deciding_cost_across_the_call():
+    obs = LatencyObserver("sid")
+    seen, sink = captured()
+    try:
+        await drive(obs, [
+            _vad_stop(1.0), (UserStoppedSpeakingFrame(), 1.6), (BotStartedSpeakingFrame(), 2.0),
+            _vad_stop(5.0), (UserStoppedSpeakingFrame(), 5.6), (BotStartedSpeakingFrame(), 6.0),
+        ])
+        stats = obs.log_summary()
+    finally:
+        logger.remove(sink)
+    assert stats["decision_p50_ms"] == 600
+    assert any("turn_decision_p50=600ms" in m for m in seen)
+
+
+# --- and the wiring, because an unwired measurement measures nothing ---------------------------
+
+
+def test_the_agent_hands_the_stream_open_time_to_the_observer():
+    """A measurement nobody connects is what SMART_TURN_ENABLED turned out to be: a setting
+    that built an object, passed it to a parameter that no longer existed, and was dropped
+    in silence. Mutation testing found both ends of this one unwireable-by-any-test until
+    these two existed."""
+    import inspect
+
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    assert "stream_open_at: Optional[float] = None" in src
+    assert "LatencyObserver(call_sid, stream_open_at=stream_open_at)" in src
+
+
+def test_the_webhook_takes_the_time_at_the_moment_the_stream_opens():
+    """After accept() and before anything else — the Call row, reading the project, building
+    the services. All of that is ours and all of it is on the caller's clock."""
+    import inspect
+
+    from app.api.routes import webhook
+
+    src = inspect.getsource(webhook._handle_call)
+    assert "stream_open_at = time.monotonic()" in src
+    assert src.index("await websocket.accept()") < src.index("stream_open_at = time.monotonic()")
+    assert src.index("stream_open_at = time.monotonic()") < src.index("db.add(Call(")
+    assert "stream_open_at=stream_open_at," in src, "taken and then not passed on"

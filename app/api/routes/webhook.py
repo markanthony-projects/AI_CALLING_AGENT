@@ -1,3 +1,4 @@
+import time
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -117,6 +118,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         return
 
     await websocket.accept()
+    # The caller's clock for the greeting. Everything after this point is ours: the Call row,
+    # reading the project, building the services, the voice engine's handshake. Monotonic
+    # rather than wall clock because it is only ever used as a difference.
+    stream_open_at = time.monotonic()
     _STREAMING_CALLS.add(call_sid)
     started_at = utc_now()
     # Deliberately not reporting the in-flight count here. Reading it is another round trip
@@ -161,6 +166,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             # the greeting names the project, which is what it did before either way.
             developer_name=project.get("developer_name"),
             customer_name=await recall_customer_name(call_sid),
+            # So the first word can be timed from the moment the media stream opened rather
+            # than from the pipeline, which starts two database round trips later. The
+            # difference is the part of "the greeting came very late" that nothing measured.
+            stream_open_at=stream_open_at,
         )
         transcript = result.transcript
         # Alongside the status, because "COMPLETED" answers whether the call worked and this

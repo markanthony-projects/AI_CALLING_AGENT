@@ -6,10 +6,31 @@ time. Reply length changes moved that number by seconds while latency was unchan
 
 This measures the only delay the caller actually experiences: the silence from the moment
 they stop talking to the moment they hear the agent, attributed across STT, LLM and TTS.
+
+AND IT USED TO START THE CLOCK TOO LATE. Until 10 Sep 2026 the turn was timed from
+UserStoppedSpeakingFrame, which Pipecat broadcasts from `_on_user_turn_stopped` — that is,
+once the turn has already been DECLARED over. Two waits happen before that and neither
+appeared anywhere:
+
+    0.20s   VAD stop_secs        the VAD making up its mind that the voice stopped
+    0.40s   TURN_SETTLE_SECS     the blind wait for them to maybe say more
+    ─────
+    0.60s   invisible, on every turn of every call
+
+So a reported p50 of 729ms was about 1,330ms of silence for the prospect, and the number
+was named "voice-to-voice" while measuring nothing of the sort. config.py said as much in a
+comment about TURN_SETTLE_SECS — "it does not appear in the LATENCY log lines" — and the
+metric kept its flattering name anyway. The caller told us it felt slower than the logs
+said, and the caller was right.
+
+The clock now starts at the last VADUserStoppedSpeakingFrame — the moment their voice
+actually stopped — and `turn_decision` reports what the two waits cost, so the thing worth
+optimising is on the line rather than under it.
 """
 
 import math
 import statistics
+import time
 from typing import Optional
 
 from loguru import logger
@@ -20,6 +41,8 @@ from pipecat.frames.frames import (
     MetricsFrame,
     TTSSpeakFrame,
     UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMUsageMetricsData, TTFAMetricsData, TTFBMetricsData
 from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -27,6 +50,8 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 NS_PER_SEC = 1_000_000_000
 
 _TRACKED = (
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
     UserStoppedSpeakingFrame,
     BotStartedSpeakingFrame,
     MetricsFrame,
@@ -62,13 +87,23 @@ def percentile(values: list[float], fraction: float) -> float:
 class LatencyObserver(BaseObserver):
     """Collects per-turn response latency without sitting in the audio path."""
 
-    def __init__(self, call_sid: str):
+    def __init__(self, call_sid: str, stream_open_at: Optional[float] = None):
         super().__init__()
         self._call_sid = call_sid
+        # time.monotonic() at websocket accept, if the caller has it. The pipeline clock
+        # starts much later — after two database round trips and the services being built —
+        # so it cannot see the part of the wait that happens before it exists.
+        self._stream_open_at = stream_open_at
+        # The last moment their voice actually stopped. The honest start of a turn: what
+        # follows is the VAD settling, the blind wait, and only then the turn being declared.
+        self._voice_stopped_ns: Optional[int] = None
         self._turn_start_ns: Optional[int] = None
         self._ttfb: dict[str, float] = {}
         self._ttfa: dict[str, TTFAMetricsData] = {}
         self._turns: list[float] = []
+        # What the VAD settle plus the blind wait cost on each turn, kept so the summary can
+        # say how much of the call's latency was spent deciding the prospect had finished.
+        self._decisions: list[float] = []
         self._seen: set[int] = set()
         # When the LLM's first token came back, and which processor produced it. Together
         # with that processor's TTFB they give the moment the request was actually sent,
@@ -115,6 +150,16 @@ class LatencyObserver(BaseObserver):
                 self._greeting_queued_ns = data.timestamp
             return
 
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            # Talking again, so the last stop was a pause for breath and not the end of
+            # anything. Only the final stop before the turn is declared is the turn's start.
+            self._voice_stopped_ns = None
+            return
+
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._voice_stopped_ns = data.timestamp
+            return
+
         if isinstance(frame, UserStoppedSpeakingFrame):
             self._turn_start_ns = data.timestamp
             self._ttfb.clear()
@@ -159,25 +204,52 @@ class LatencyObserver(BaseObserver):
             return
 
         # BotStartedSpeakingFrame. The opening greeting has no preceding user turn, so there
-        # is nothing to measure it against as a turn — but it is not nothing. It is measured
-        # from the moment it was queued instead, which is the synthesis and the trip out to
-        # the carrier: the part of "the opening line started late" that no other line covers.
+        # is nothing to measure it against as a turn — but it is not nothing.
+        #
+        # This used to report only "queued -> audible", which was the synthesis and the trip
+        # to the carrier and read as 404ms while the caller sat through seconds. What the
+        # caller waits through is everything from the media stream opening: two database
+        # round trips to write the Call row and read the project, the services being built,
+        # the Sarvam websocket handshake — which happens on StartFrame, so the first word
+        # cannot be spoken until it completes — and only then the synthesis. All of it is
+        # ours, and none of it was on any line.
         if self._turn_start_ns is None:
             if self._greeting_queued_ns is not None:
-                waited = (data.timestamp - self._greeting_queued_ns) / NS_PER_SEC
+                synthesis = (data.timestamp - self._greeting_queued_ns) / NS_PER_SEC
                 self._greeting_queued_ns = None
-                if waited >= 0:
+                # The pipeline clock counts from pipeline start, so a BotStartedSpeaking
+                # timestamp IS "pipeline start -> first audio".
+                since_pipeline = data.timestamp / NS_PER_SEC
+                if synthesis >= 0:
+                    since_open = (
+                        f"{(time.monotonic() - self._stream_open_at) * 1000:.0f}ms after the "
+                        f"stream opened"
+                        if self._stream_open_at is not None
+                        else "stream-open time not supplied"
+                    )
                     logger.info(
-                        f"[{self._call_sid}] GREETING audible after {waited * 1000:.0f}ms "
-                        f"(synthesis and the trip to the carrier)"
+                        f"[{self._call_sid}] FIRST WORD {since_open} | "
+                        f"pipeline={since_pipeline * 1000:.0f}ms "
+                        f"synthesis={synthesis * 1000:.0f}ms"
                     )
             return
 
-        elapsed = (data.timestamp - self._turn_start_ns) / NS_PER_SEC
-        breakdown = self._breakdown(elapsed)
+        # From when their voice actually stopped, not from when the turn was declared over.
+        # The fallback keeps a transport that sends no VAD frames measuring what it always
+        # measured, rather than measuring nothing.
+        began_ns = (
+            self._voice_stopped_ns
+            if self._voice_stopped_ns is not None
+            else self._turn_start_ns
+        )
+        elapsed = (data.timestamp - began_ns) / NS_PER_SEC
+        decision = (self._turn_start_ns - began_ns) / NS_PER_SEC
+        breakdown = self._breakdown(elapsed, decision)
         self._turn_start_ns = None
+        self._voice_stopped_ns = None
         if elapsed < 0:
             return
+        self._decisions.append(decision)
         self._turns.append(elapsed)
         logger.info(
             f"[{self._call_sid}] LATENCY turn {len(self._turns)}: "
@@ -203,8 +275,13 @@ class LatencyObserver(BaseObserver):
             return None
         return max(0.0, (self._llm_first_token_ns - self._turn_start_ns) / NS_PER_SEC - ttfb)
 
-    def _breakdown(self, elapsed: float) -> str:
-        parts = [f"{_short(p)}={v * 1000:.0f}ms" for p, v in sorted(self._ttfb.items())]
+    def _breakdown(self, elapsed: float, decision: float = 0.0) -> str:
+        # First, because it is first in time and because it is the largest fixed cost in the
+        # system: VAD stop_secs plus the blind settle, paid on every turn, and invisible
+        # until 10 Sep 2026. Shown even at zero — a zero here means the VAD frames did not
+        # arrive, which is worth knowing, not worth hiding.
+        parts = [f"turn_decision={decision * 1000:.0f}ms"]
+        parts += [f"{_short(p)}={v * 1000:.0f}ms" for p, v in sorted(self._ttfb.items())]
         for processor, item in sorted(self._ttfa.items()):
             parts.append(
                 f"{_short(processor)}_audio={item.ttfa * 1000:.0f}ms"
@@ -218,7 +295,7 @@ class LatencyObserver(BaseObserver):
         before_llm = self._before_the_llm()
         if before_llm is not None and before_llm >= _WORTH_REPORTING_SECS:
             parts.append(f"before_llm={before_llm * 1000:.0f}ms")
-        accounted = sum(self._ttfb.values()) + (before_llm or 0.0)
+        accounted = decision + sum(self._ttfb.values()) + (before_llm or 0.0)
         rest = elapsed - accounted
         if rest >= _WORTH_REPORTING_SECS:
             parts.append(f"unattributed={rest * 1000:.0f}ms")
@@ -241,6 +318,8 @@ class LatencyObserver(BaseObserver):
             "min_ms": round(min(self._turns) * 1000),
             "max_ms": round(max(self._turns) * 1000),
         }
+        if self._decisions:
+            stats["decision_p50_ms"] = round(statistics.median(self._decisions) * 1000)
         if self._prompt_total:
             stats["prompt_tokens"] = self._prompt_total
             stats["cached_tokens"] = self._cached_total
@@ -258,9 +337,14 @@ class LatencyObserver(BaseObserver):
                 f" cache={stats['cached_tokens']}/{stats['prompt_tokens']}tok "
                 f"({stats['cached_share'] * 100:.0f}%)"
             )
+        decision = (
+            f" turn_decision_p50={stats['decision_p50_ms']}ms"
+            if "decision_p50_ms" in stats
+            else ""
+        )
         logger.info(
             f"[{self._call_sid}] LATENCY summary | turns={stats['turns']} "
             f"p50={stats['p50_ms']}ms p95={stats['p95_ms']}ms "
-            f"min={stats['min_ms']}ms max={stats['max_ms']}ms{cache}"
+            f"min={stats['min_ms']}ms max={stats['max_ms']}ms{decision}{cache}"
         )
         return stats

@@ -349,6 +349,7 @@ async def run_voice_agent(
     project_name: str = "your project",
     customer_name: Optional[str] = None,
     developer_name: Optional[str] = None,
+    stream_open_at: Optional[float] = None,
 ):
     # Converted once, here, so the greeting and the prompt address the prospect the same
     # way. Told the full name, the model uses the full name for the rest of the call — and
@@ -701,7 +702,7 @@ async def run_voice_agent(
 
     # enable_metrics makes each service report its TTFB; the observer correlates those
     # with the turn boundaries to produce the caller's actual wait.
-    latency = LatencyObserver(call_sid)
+    latency = LatencyObserver(call_sid, stream_open_at=stream_open_at)
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(
