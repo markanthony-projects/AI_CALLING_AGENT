@@ -238,6 +238,50 @@ class Call(Base):
     lead = relationship("Lead", back_populates="calls")
     transcript = relationship("Transcript", back_populates="call", uselist=False)
 
+class DialAttempt(Base):
+    """One request to the carrier to ring one number. Written once, never overwritten.
+
+    On 9 Sep 2026 the user reported a call from the agent at night. It could not be answered
+    from the data. A Call row exists only once the media websocket opens, which is on
+    answer — a dial that rang and was not picked up leaves none. The contact's
+    last_attempt_at is overwritten by the next attempt, so a night-time dial followed by a
+    daytime retry has no trace. And the worker's logs are replaced on every --build. All
+    three records had their hole in the same place.
+
+    So this is the ledger: every time _place asks Vobiz to dial, a row, whatever comes of
+    it. The carrier's hangup callback fills in what happened, once; nothing here is ever
+    updated after that or deleted. It is the answer to "did we ring this number, when, and
+    what did the carrier say" without a Call row, a log line, or a contact still in the
+    state it was in at the time.
+
+    campaign_id is copied rather than joined so the row outlives a deleted campaign; the
+    contact link is kept but nulled on delete for the same reason.
+    """
+
+    __tablename__ = "dial_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # The sid _place minted for this dial — the same one the Call row carries if it was
+    # answered, so the two can be joined, and the one the carrier's callbacks are keyed on.
+    call_sid = Column(String, unique=True, index=True, nullable=False)
+    contact_id = Column(
+        UUID(as_uuid=True), ForeignKey("contacts.id", ondelete="SET NULL"), index=True
+    )
+    campaign_id = Column(UUID(as_uuid=True), index=True)
+    phone_number = Column(String, nullable=False, index=True)
+    # The contact's attempt count at the time: 1 for the first dial, 2 for the retry.
+    attempt_no = Column(Integer, nullable=False)
+    dialed_at = Column(DateTime, nullable=False, default=utc_now, index=True)
+    # Whether the carrier accepted the request. False is still a row: we asked.
+    carrier_accepted = Column(Boolean, nullable=False)
+
+    # From the carrier's hangup callback. Null until it reports; a dial it never reports on
+    # stays null, which is itself information.
+    answered = Column(Boolean)
+    hangup_cause = Column(String)
+    ended_at = Column(DateTime)
+
+
 class Contact(Base):
     """One number to dial on one campaign, and everything the queue needs to know about it.
 

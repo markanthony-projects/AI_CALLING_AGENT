@@ -43,6 +43,7 @@ from app.models.db import (
     CampaignStatus,
     Contact,
     ContactStatus,
+    DialAttempt,
     Suppression,
 )
 from app.services.call_context import remember_customer_name, remember_dialed_number
@@ -285,6 +286,19 @@ async def _place(db: AsyncSession, contact: Contact) -> bool:
         ok = False
         logger.error(f"[{call_sid}] Dial raised for {contact.phone_number}: {e}")
 
+    # The ledger row, whatever the carrier said. Before the refusal branch on purpose: a
+    # refused dial is still a dial we asked for, and "we asked and were refused at 20:03"
+    # is exactly the kind of fact this table exists to keep. Same session as the contact,
+    # so the tick's commit writes both or neither.
+    db.add(DialAttempt(
+        call_sid=call_sid,
+        contact_id=contact.id,
+        campaign_id=contact.campaign_id,
+        phone_number=contact.phone_number,
+        attempt_no=contact.attempts or 1,
+        carrier_accepted=ok,
+    ))
+
     if not ok:
         await call_slots.release(call_sid)
         contact.status = ContactStatus.FAILED
@@ -459,6 +473,31 @@ async def record_carrier_outcome(
             return False
 
         contact.status, contact.next_attempt_at, contact.last_outcome = verdict
+        await db.commit()
+        return True
+
+
+async def record_dial_outcome(call_sid: str, answered: bool, hangup_cause: Optional[str]) -> bool:
+    """Complete the ledger row for this dial with what the carrier reported. True if written.
+
+    Once only: Vobiz retries a failed callback up to three times, and the first report is
+    the one that describes the call. A row that is already complete is left alone, and a
+    call_sid with no row — a call placed by hand, or one older than the ledger — is nothing
+    to record. Separate from record_carrier_outcome, which decides the CONTACT's fate and is
+    guarded on the contact still being DIALING: this row is written whether or not the
+    contact has since been marked DND, retried, or deleted, because it is history, not state.
+    """
+    if not call_sid:
+        return False
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(select(DialAttempt).where(DialAttempt.call_sid == call_sid))
+        ).scalars().first()
+        if row is None or row.ended_at is not None:
+            return False
+        row.answered = answered
+        row.hangup_cause = (hangup_cause or "").strip().upper() or None
+        row.ended_at = utc_now()
         await db.commit()
         return True
 

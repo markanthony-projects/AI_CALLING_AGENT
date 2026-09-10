@@ -13,7 +13,12 @@ from app.core.security import issue_call_token, require_call_token, require_call
 from app.models.db import Call, CallStatus, Transcript
 from app.services.agent import run_voice_agent
 from app.services.call_context import recall_customer_name, recall_dialed_number
-from app.services.dial_pump import recall_contact, record_carrier_outcome, record_outcome
+from app.services.dial_pump import (
+    recall_contact,
+    record_carrier_outcome,
+    record_dial_outcome,
+    record_outcome,
+)
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
 from app.utils.attribution import prospect_text
@@ -390,6 +395,14 @@ async def vobiz_hangup(campaign_id: str, call_sid: str, request: Request):
     except Exception as e:
         # The reaper still returns the contact to the queue, so this is a delay, not a loss.
         logger.error(f"[{call_sid}] Could not record the carrier's hangup verdict: {e}")
+
+    # The ledger, separately from the contact: this is what the carrier said about this
+    # dial, kept whether or not the contact's state still admits it. Its own try, so a
+    # failure here cannot undo the contact update above or the 200 below.
+    try:
+        await record_dial_outcome(call_sid, answered, cause)
+    except Exception as e:
+        logger.error(f"[{call_sid}] Could not complete the dial ledger row: {e}")
 
     logger.info(
         f"[{call_sid}] Carrier hung up | answered={answered} | cause={cause or 'unreported'}"
