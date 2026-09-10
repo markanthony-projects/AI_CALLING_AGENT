@@ -61,6 +61,16 @@ def test_a_dash_between_numbers_is_the_word_to(text, expected):
     assert spoken_punctuation(text) == expected
 
 
+def test_a_spaced_hyphen_between_words_is_a_comma():
+    """From call 6a58a7f4: qwen writes "Varthur - Sarjapur Road" where gpt-oss wrote an
+    en-dash, and a plain hyphen went to the engine untouched. Spaces are the whole test —
+    a dash standing alone between two words is a clause break to the ear."""
+    assert spoken_punctuation("We are launching a new project in Varthur - Sarjapur Road.") == (
+        "We are launching a new project in Varthur, Sarjapur Road."
+    )
+    assert spoken_punctuation("a well-known builder - a good one") == "a well-known builder, a good one"
+
+
 def test_a_hyphen_between_a_number_and_a_word_stays_a_hyphen():
     """"3-acre golf course" is not a range."""
     assert spoken_punctuation("a 3-acre golf course") == "a 3-acre golf course"

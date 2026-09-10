@@ -551,3 +551,27 @@ def test_the_agent_greets_with_the_lead_name():
     assert "build_opening_line(" in src
     assert "project_name, customer_name, developer_name=developer_name" in src
     assert "get_system_prompt(campaign_context, customer_name)" in src
+
+
+# --- what a live call on 10 Sep cost, written where the model reads it -------------------------
+
+
+def test_the_opening_has_a_word_budget_and_the_reason_is_in_seconds():
+    """Call 6a58a7f4: step 2 ran twelve seconds — the prospect's first chance to speak came
+    after twelve seconds of listening. The reply cap was already there and it is written in
+    words, while this voice speaks about two and a half words a second. A cap the model
+    reads as "35" and the caller hears as "fourteen seconds" is a cap in the wrong unit."""
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    assert "ALL OF STEP 2 TOGETHER IS UNDER 30 WORDS" in gate
+    assert "twelve seconds" in gate
+    assert "the headline is what gets shorter" in gate, "a budget with nothing to cut is a wish"
+
+
+def test_3a_must_name_the_place_in_the_same_breath_as_the_question():
+    """The rule was already there and was ignored again on 10 Sep: the whole turn was "It
+    sits on 45 acres with 14 towers. Do you know Varthur?" — Varthur is not in it. The
+    prospect had last heard the name twenty seconds earlier and answered "Sorry, I did not
+    catch that.\""""
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "NAME THE PLACE IN THE SAME BREATH AS THE QUESTION ABOUT IT." in intro
+    assert "It sits on 45 acres with 14 towers" in intro, "the failure has to travel with the rule"

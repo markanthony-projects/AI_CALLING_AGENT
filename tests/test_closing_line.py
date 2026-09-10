@@ -200,7 +200,13 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
             return coro
 
     outer = ast.parse(
-        "def _outer():\n    _ending = False\n    return end_call_handler\n"
+        "def _outer():\n"
+        "    _ending = False\n"
+        # end_call refuses to hang up when the prospect asked to hear something again, and
+        # counts its refusals. Both are closure variables of run_voice_agent.
+        "    _repeat_refusals = 0\n"
+        "    _last_agent_line = 'It sits on 45 acres. Do you know Varthur?'\n"
+        "    return end_call_handler\n"
     ).body[0]
     outer.body[1:1] = [_node("say_goodbye_then_hang_up"), _node("end_call_handler")]
 
@@ -210,6 +216,11 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         # The read-back these tests use is "Sunday at 3 PM", so the prospect has said it.
         "context": type("Ctx", (), {"messages": [{"role": "user", "content": "Sunday at 3 PM works for me"}]})(),
         "unagreed_booking": agent.unagreed_booking,
+        "wants_repeat": agent.wants_repeat,
+        "say_again": agent.say_again,
+        "MAX_REPEAT_REFUSALS": agent.MAX_REPEAT_REFUSALS,
+        "REFUSAL_REASON": agent.REFUSAL_REASON,
+        "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "FAREWELL_LINE": FAREWELL_LINE,
         "logger": agent.logger,
         "call_sid": "sid",

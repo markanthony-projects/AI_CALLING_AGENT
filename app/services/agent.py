@@ -64,6 +64,12 @@ from app.utils.person_name import spoken_name
 from app.utils.sentences import sentences
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
+from app.utils.repeat_request import (
+    MAX_REPEAT_REFUSALS,
+    REFUSAL_REASON,
+    say_again,
+    wants_repeat,
+)
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
@@ -545,18 +551,48 @@ async def run_voice_agent(
 
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
-        nonlocal _ending
-        spoken = getattr(params, "arguments", None) or {}
-        line = closing_line(spoken.get("closing_line") if isinstance(spoken, dict) else None)
+        nonlocal _ending, _repeat_refusals
+        if not task_ref or _ending:
+            return
+
+        prospect_lines = [
+            m["content"] for m in context.messages
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+        ]
+
+        # "Say it again" is not a goodbye. On call 6a58a7f4 the prospect had said they were
+        # interested, then said "Sorry, I did not catch that. Can you say it again?" — and
+        # the model offered a callback and hung up on them. Both the OBJECTIONS section and
+        # the tool's own description forbid it; neither was obeyed. So the turn goes back to
+        # the model with the reason, and it repeats itself in its own words rather than
+        # hearing a canned line from us. See app/utils/repeat_request.py.
+        if _repeat_refusals < MAX_REPEAT_REFUSALS and wants_repeat(
+            prospect_lines[-1] if prospect_lines else None
+        ):
+            _repeat_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Refusing to hang up: the prospect asked to hear it again "
+                f"({prospect_lines[-1].strip()[:80]!r}). Repeating instead "
+                f"({_repeat_refusals}/{MAX_REPEAT_REFUSALS})"
+            )
+            callback = getattr(params, "result_callback", None)
+            if callback is not None:
+                await callback({"refused": REFUSAL_REASON})
+            else:
+                # No way to hand the turn back. Saying it again ourselves is worse than the
+                # model saying it, and far better than hanging up.
+                await task_ref[0].queue_frames(spoken(say_again(_last_agent_line)))
+            return
+
+        call_args = getattr(params, "arguments", None) or {}
+        line = closing_line(
+            call_args.get("closing_line") if isinstance(call_args, dict) else None
+        )
         # A day or an hour in the goodbye has to be one the prospect said. On a live call
         # the model closed with "Your visit is confirmed for Saturday at 11 AM" to a prospect
         # who had never been offered one; the caller heard it and the lead sheet recorded
         # it. See app/utils/booking_claim.py.
-        claim = unagreed_booking(
-            line,
-            [m["content"] for m in context.messages
-             if m.get("role") == "user" and isinstance(m.get("content"), str)],
-        )
+        claim = unagreed_booking(line, prospect_lines)
         if claim:
             logger.warning(
                 f"[{call_sid}] Closing line announces {claim!r}, which the prospect never "
@@ -564,8 +600,6 @@ async def run_voice_agent(
             )
             line = FAREWELL_LINE
         logger.info(f"[{call_sid}] AGENT initiated call end via tool → \"{line}\"")
-        if not task_ref or _ending:
-            return
         _ending = True
         closing_gate.arm()
         # Detached on purpose. This handler runs inside the LLM service's function-call
@@ -732,6 +766,9 @@ async def run_voice_agent(
     # The agent's last finalized reply, kept so its question can be asked again without an
     # LLM round trip when the answer never reaches us.
     _last_agent_line: str = ""
+    # How many times end_call has been refused because the prospect asked to hear something
+    # again. Bounded: a guard meant to save a lead must not become a call nobody can leave.
+    _repeat_refusals: int = 0
     _dead_air_nudges: int = 0
     _last_nudged: str = ""
     # Counted so the machine check only ever runs on the opening turn.

@@ -604,21 +604,21 @@ def test_the_default_model_is_one_the_provider_still_serves():
     it now 404s, so it cannot be the default however well it scored: a default nobody can
     call is a fresh deploy that fails on its first call.
 
-    qwen-3.8-27b is the provider's own replacement recommendation and it is NOT measured
-    against that bake-off. Whoever measures it should say so here."""
+    Of the two still on the public endpoint, gpt-oss-120b is the faster: measured on 10 Sep
+    against qwen-3.8-27b on the same prompt and the same voice, TTFB 363-661ms against
+    459-691ms and p50 782ms against 970ms. Neither is as fast as gemma was."""
     endpoint = primary_endpoint(_settings())
     assert "cerebras.ai" in endpoint.base_url
-    assert endpoint.model == "qwen-3.8-27b"
+    assert endpoint.model == "gpt-oss-120b"
     assert endpoint.model != "gemma-4-31b", "withdrawn from public endpoints on 3 Sep 2026"
 
 
 def test_the_default_reasoning_effort_matches_the_default_model():
-    """These two are a pair. qwen reasons at high when reasoning_effort is not sent, and its
-    clear_thinking defaults to false, so each turn's thinking stays in the context for the
-    next one — on a phone call whose every reply is one sentence and a question. Left to the
-    provider's default this is the 1396ms of silence that call 2eeb48a0 opened with, every
-    turn, growing."""
-    assert primary_endpoint(_settings()).reasoning_effort == "none"
+    """These two are a pair, and the pairing is per model: gpt-oss takes low|medium|high and
+    refuses "none", while qwen takes "none" and needs it — sent nothing, qwen spent its whole
+    token budget thinking and never reached the tool call. Changing LLM_MODEL without
+    checking this against the new model's page is a 400 on every turn of every call."""
+    assert primary_endpoint(_settings()).reasoning_effort == "low"
 
 
 def test_a_reasoning_effort_no_provider_takes_is_refused_at_startup():

@@ -50,14 +50,15 @@ def _endpoint(**over):
 
 
 def test_blank_sends_nothing():
-    """Blank is for a model that does not reason. Distinct from "none", which is a value
-    qwen understands and gpt-oss refuses — see the default, which is "none" because the
-    default model is qwen."""
+    """Blank is for a model that does not reason at all. Distinct from "none", which is a
+    value qwen understands and gpt-oss refuses."""
     assert primary_endpoint(_settings(LLM_REASONING_EFFORT="")).extra_params == {}
 
 
-def test_the_default_turns_qwens_thinking_off():
-    assert primary_endpoint(_settings()).extra_params == {"reasoning_effort": "none"}
+def test_the_default_keeps_gpt_oss_thinking_short():
+    """"low", not "none": gpt-oss refuses "none". The default model and this value are a
+    pair and must be changed together."""
+    assert primary_endpoint(_settings()).extra_params == {"reasoning_effort": "low"}
 
 
 def test_low_is_sent_as_reasoning_effort():

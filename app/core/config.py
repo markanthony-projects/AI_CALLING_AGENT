@@ -308,7 +308,11 @@ class Settings(BaseSettings):
     # prospect was told twice "Sorry, I missed that" and then hung up on. See
     # https://inference-docs.cerebras.ai/support/deprecation — Cerebras' own replacement
     # recommendation for public workloads is qwen-3.8-27b, which is what this is.
-    LLM_MODEL: str = "qwen-3.8-27b"
+    # qwen-3.8-27b is Cerebras' own replacement recommendation and it was tried on 10 Sep:
+    # it tool-calls correctly, but its TTFB ran 459-691ms against gpt-oss's 363-661ms and a
+    # p50 of 970ms against 782ms, on the same prompt and the same voice. gpt-oss is the
+    # faster of the two models still on the public endpoint, so it is the one here.
+    LLM_MODEL: str = "gpt-oss-120b"
     # How hard the model may think before it answers. THIS SETTING AND LLM_MODEL ARE A PAIR:
     # every model takes a different set, and a value one of them does not know is a 400 on
     # every turn of every call.
@@ -317,12 +321,13 @@ class Settings(BaseSettings):
     #   gpt-oss-120b   low | medium | high            (does not take "none")
     #   a model that does not reason at all           leave this blank; nothing is sent
     #
-    # "none" for qwen, and the default is not a detail. Left unset, qwen reasons at high on
-    # a phone call whose every reply is one sentence and a question — and its clear_thinking
-    # defaults to false, so each turn's thinking stays in the context for the next one. On
-    # gpt-oss with nothing set, call 2eeb48a0 turn 1 had a 473ms first token and then 1396ms
-    # of silence before the first sentence. That silence is this setting.
-    LLM_REASONING_EFFORT: str = "none"
+    # "low" pairs with gpt-oss above, and the pairing is not a detail. With nothing set,
+    # call 2eeb48a0 turn 1 had a 473ms first token and then 1396ms of silence before the
+    # first sentence — the model thinking, on the caller's clock. Setting it to "low" took
+    # the same turn to 867ms. qwen is worse again: measured on 10 Sep, sent no
+    # reasoning_effort at all, it spent its entire 60-token budget thinking and never
+    # reached the tool call, so on qwen this must be "none", not "low".
+    LLM_REASONING_EFFORT: str = "low"
 
     @property
     def llm_api_key(self) -> str:

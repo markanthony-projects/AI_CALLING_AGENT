@@ -37,8 +37,11 @@ from pipecat.utils.text.base_text_filter import BaseTextFilter
 # leaving it as two numbers is the same wrong sentence.
 _RANGE_DASH = re.compile(r"(?<=\d)\s*[-–—―‑‐‒]\s*(?=\d)")
 # En dash, em dash, and the horizontal bar between anything else: a clause break to the ear,
-# which is a comma.
-_CLAUSE_DASH = re.compile(r"\s*[–—―]\s*")
+# which is a comma. The plain hyphen joins that list ONLY when it stands alone between
+# spaces — "Varthur - Sarjapur Road", which qwen writes where gpt-oss wrote an en-dash, and
+# which reached the voice engine untouched because this pattern did not know about it.
+# Spaces are the whole test: "Scotland-themed" has none and must stay one word.
+_CLAUSE_DASH = re.compile(r"\s*[–—―]\s*|\s+-\s+")
 # The hyphen-like characters the engine does not read, joining two words. A prospect hears
 # "Scotland-themed" either way; the engine only reads one of them.
 _WORD_DASH = re.compile(r"[‑‐‒]")
