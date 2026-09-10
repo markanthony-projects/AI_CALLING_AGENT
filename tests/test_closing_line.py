@@ -204,6 +204,11 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
 
     ns = {
         "closing_line": closing_line,
+        # The handler checks the goodbye's day and hour against what the prospect said.
+        # The read-back these tests use is "Sunday at 3 PM", so the prospect has said it.
+        "context": type("Ctx", (), {"messages": [{"role": "user", "content": "Sunday at 3 PM works for me"}]})(),
+        "unagreed_booking": agent.unagreed_booking,
+        "FAREWELL_LINE": FAREWELL_LINE,
         "logger": agent.logger,
         "call_sid": "sid",
         "task_ref": [task],

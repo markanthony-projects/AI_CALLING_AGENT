@@ -331,7 +331,7 @@ def test_a_size_they_never_named_is_never_put_in_their_mouth():
         # they can hold on to — that is true of every builder calling them that afternoon.
         "We are launching a new project in [location].",
         "We have launched a new project in [location].",
-        "It is called [project name] —",
+        "It is called [project name].",
         "Do NOT list amenities, prices or configurations before you ask this",
     ],
 )

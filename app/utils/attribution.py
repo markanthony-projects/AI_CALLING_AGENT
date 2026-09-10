@@ -222,3 +222,81 @@ def is_readable(value: Optional[str]) -> bool:
     if not value:
         return True
     return not _INDIC.search(value)
+
+
+# --- whether an appointment was agreed, or announced ------------------------------------
+
+# How a prospect names a day. Weekday names and their short forms, plus the relative words
+# the extractor maps onto site_visit_in_days / callback_in_days.
+_DAY_WORDS = {
+    "MONDAY": ("monday", "mon"),
+    "TUESDAY": ("tuesday", "tue", "tues"),
+    "WEDNESDAY": ("wednesday", "wed"),
+    "THURSDAY": ("thursday", "thu", "thurs"),
+    "FRIDAY": ("friday", "fri"),
+    "SATURDAY": ("saturday", "sat"),
+    "SUNDAY": ("sunday", "sun"),
+}
+_RELATIVE_DAY_WORDS = {
+    0: ("today", "tonight", "this evening", "this afternoon", "this morning"),
+    1: ("tomorrow", "kal"),
+    2: ("day after", "parso", "parson"),
+}
+_HOUR_WORDS = {
+    1: ("one",), 2: ("two",), 3: ("three",), 4: ("four",), 5: ("five",), 6: ("six",),
+    7: ("seven",), 8: ("eight",), 9: ("nine",), 10: ("ten",), 11: ("eleven",),
+    12: ("twelve", "noon", "midday"),
+}
+
+
+def _said(text: str, words) -> bool:
+    return any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", text) for w in words)
+
+
+def day_is_grounded(weekday: Optional[str], in_days: Optional[int], transcript: str) -> bool:
+    """True when the prospect can be heard naming the day this appointment is on.
+
+    Live call 2eeb48a0, 10 Sep 2026. The prospect said "I said it is for investment" and the
+    model called end_call with "Your visit is confirmed for Saturday at 11 AM." No visit had
+    been offered, let alone agreed. The extractor then read that closing line — the agent's
+    own words — as a booking, and the lead sheet said Saturday 11:00. Same fault as the
+    budget and the location before it, and dearer: a colleague waits at the site for someone
+    who was never asked.
+
+    Nothing to check is grounded, as elsewhere: an appointment with no day is not one the
+    resolver will produce anyway.
+    """
+    if weekday is None and in_days is None:
+        return True
+    said = prospect_text(transcript).lower()
+    if weekday is not None:
+        name = str(getattr(weekday, "value", weekday)).upper()
+        if _said(said, _DAY_WORDS.get(name, ())):
+            return True
+    if in_days is not None and _said(said, _RELATIVE_DAY_WORDS.get(int(in_days), ())):
+        return True
+    return False
+
+
+def time_is_grounded(at: Optional[str], transcript: str) -> bool:
+    """True when the prospect can be heard naming the hour, in figures or in words.
+
+    "11 AM", "11", "eleven", "11:30" all ground an `at` of 11:00 or 11:30 — the hour is the
+    claim; minutes are not second-guessed. Word-level, so "at eleven" and "11 o'clock" both
+    count and "1" inside "1.17 Cr" does not.
+    """
+    if not at:
+        return True
+    try:
+        hour = int(str(at).split(":")[0])
+    except ValueError:
+        return False
+    said = prospect_text(transcript).lower()
+    twelve_hour = hour % 12 or 12
+    # Standalone numbers only. "1" and "17" both sit inside "1.17 Cr", and neither is an
+    # hour; "11am", "11:30" and "at 11" all yield 11. A number is standalone when no digit
+    # or decimal point touches it on either side — letters may, so "11am" counts.
+    numbers = {int(n) for n in re.findall(r"(?<![0-9.])(\d{1,2})(?![0-9.])", said)}
+    if hour in numbers or twelve_hour in numbers:
+        return True
+    return _said(said, _HOUR_WORDS.get(twelve_hour, ()))

@@ -88,12 +88,17 @@ def run_worker(monkeypatch):
 
 
 async def test_booked_site_visit_is_upgraded_to_hot(run_worker):
-    """The model called Santosh WARM after he booked a Sunday 3PM visit."""
+    """The model called Santosh WARM after he booked a Sunday 3PM visit.
+
+    The transcript has to show him booking it: since 10 Sep an appointment the prospect
+    cannot be heard agreeing to is dropped before it reaches the lead, because on a live
+    call the agent announced one nobody had agreed to and the extractor recorded it."""
     lead = await run_worker(
         LeadExtraction(
             is_prospect=True, customer_name="Santosh", status=LeadStatus.WARM,
             site_visit_weekday=Weekday.SUNDAY, site_visit_at="15:00",
-        )
+        ),
+        transcript="Agent: Would Sunday work?\nProspect: Sunday at 3 PM is fine.",
     )
     assert lead.site_visit_time == datetime(2026, 8, 2, 15, 0)
     assert lead.status is LeadStatus.HOT
@@ -134,7 +139,8 @@ async def test_callback_resolves_independently_of_site_visit(run_worker):
         LeadExtraction(
             is_prospect=True, customer_name="Asha", status=LeadStatus.WARM,
             callback_in_days=1, callback_at="18:00",
-        )
+        ),
+        transcript="Agent: When should we call?\nProspect: Call me tomorrow at 6 in the evening.",
     )
     assert lead.callback_time == datetime(2026, 7, 28, 18, 0)
     assert lead.site_visit_time is None

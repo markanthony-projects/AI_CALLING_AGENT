@@ -19,9 +19,11 @@ from app.services.dial_pump import dial_due_contacts, release_stale_dialing
 from app.utils.attribution import (
     budget_as_stated,
     budget_is_grounded,
+    day_is_grounded,
     is_readable,
     name_spoken_by_prospect,
     phrase_is_grounded,
+    time_is_grounded,
 )
 from app.utils.lead_status import capped_status, qualifying_facts
 from app.utils.timeutils import resolve_appointment, to_ist, utc_now
@@ -337,6 +339,45 @@ def _drop_unreadable(lead_data: LeadExtraction, call_sid: str) -> LeadExtraction
     return lead_data.model_copy(update=dropped) if dropped else lead_data
 
 
+_APPOINTMENTS = (
+    ("site visit", "site_visit_weekday", "site_visit_in_days", "site_visit_at"),
+    ("callback", "callback_weekday", "callback_in_days", "callback_at"),
+)
+
+
+def _drop_unagreed_appointments(lead_data: LeadExtraction, transcript: str, call_sid: str) -> LeadExtraction:
+    """Null any appointment the prospect is not on record as having agreed to.
+
+    Live call 2eeb48a0, 10 Sep 2026. No visit was offered and none agreed; the prospect's
+    last words were "I said it is for investment". The model's closing line was "Your visit
+    is confirmed for Saturday at 11 AM", and the extractor — told in capitals never to invent
+    an appointment — read the agent's own sentence as the booking. The lead sheet said
+    Saturday 11:00 and a colleague would have waited at the site.
+
+    The same rule as the budget and the location, applied to the day and the hour: is there
+    a Prospect line this could have come from? The day decides the appointment — no day the
+    prospect said, no appointment. An hour they did not say is dropped on its own, which
+    resolve_appointment then treats as no booking, correctly: a day without an agreed time
+    was never one.
+    """
+    dropped = {}
+    for label, weekday_f, in_days_f, at_f in _APPOINTMENTS:
+        weekday, in_days, at = (getattr(lead_data, f) for f in (weekday_f, in_days_f, at_f))
+        if not day_is_grounded(weekday, in_days, transcript):
+            dropped.update({weekday_f: None, in_days_f: None, at_f: None})
+            logger.warning(
+                f"[{call_sid}] Dropping {label} {weekday or in_days!r} {at or ''}: no Prospect "
+                f"line names that day. This is the agent's own words being read as a booking."
+            )
+        elif not time_is_grounded(at, transcript):
+            dropped[at_f] = None
+            logger.warning(
+                f"[{call_sid}] Dropping {label} time {at!r}: the Prospect named the day but "
+                f"never that hour, so there is no appointment to resolve."
+            )
+    return lead_data.model_copy(update=dropped) if dropped else lead_data
+
+
 def _drop_ungrounded(lead_data: LeadExtraction, transcript: str, call_sid: str) -> LeadExtraction:
     """Null any prospect-owned field the prospect is not on record as having said.
 
@@ -406,6 +447,7 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
         # Script first: a value the attribution check cannot read is passed by it unchecked.
         lead_data = _drop_unreadable(lead_data, call_sid)
         lead_data = _drop_ungrounded(lead_data, grounding_text, call_sid)
+        lead_data = _drop_unagreed_appointments(lead_data, grounding_text, call_sid)
 
         if lead_data.transliterated_transcript:
             transcript_record.full_text = lead_data.transliterated_transcript

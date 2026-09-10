@@ -55,7 +55,9 @@ from app.services.llm_provider import (
 )
 from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
 from app.utils.asked import REPEAT_LIMIT, AskedSoFar
+from app.utils.booking_claim import unagreed_booking
 from app.utils.closing_gate import ClosingGate
+from app.utils.dashes import DashFilter
 from app.utils.latency import LatencyObserver
 from app.utils.pace import adjusted_pace, pace_request
 from app.utils.person_name import spoken_name
@@ -405,6 +407,9 @@ async def run_voice_agent(
     # Low-latency streaming WebSocket Sarvam TTS with pace 1.0
     tts = SarvamTTSService(
         api_key=settings.SARVAM_API_KEY,
+        # Dashes the engine misreads become commas and hyphens on the way in. See
+        # app/utils/dashes.py for the call that showed it.
+        text_filters=[DashFilter()],
         settings=SarvamTTSService.Settings(
             model="bulbul:v3",
             voice=settings.SARVAM_VOICE_ID,
@@ -538,6 +543,21 @@ async def run_voice_agent(
         nonlocal _ending
         spoken = getattr(params, "arguments", None) or {}
         line = closing_line(spoken.get("closing_line") if isinstance(spoken, dict) else None)
+        # A day or an hour in the goodbye has to be one the prospect said. On a live call
+        # the model closed with "Your visit is confirmed for Saturday at 11 AM" to a prospect
+        # who had never been offered one; the caller heard it and the lead sheet recorded
+        # it. See app/utils/booking_claim.py.
+        claim = unagreed_booking(
+            line,
+            [m["content"] for m in context.messages
+             if m.get("role") == "user" and isinstance(m.get("content"), str)],
+        )
+        if claim:
+            logger.warning(
+                f"[{call_sid}] Closing line announces {claim!r}, which the prospect never "
+                f"said; saying goodbye without it. Was: \"{line}\""
+            )
+            line = FAREWELL_LINE
         logger.info(f"[{call_sid}] AGENT initiated call end via tool → \"{line}\"")
         if not task_ref or _ending:
             return
