@@ -160,9 +160,16 @@ class LLMEndpoint:
     api_key: str
     base_url: str
     model: str
+    # Sent as reasoning_effort when set. Only the primary carries one: the fallback is a
+    # different model on a different provider, and a parameter it does not know is a 400.
+    reasoning_effort: str = ""
 
     def __str__(self) -> str:
         return f"{self.name}/{self.model}"
+
+    @property
+    def extra_params(self) -> dict:
+        return {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
 
 
 class BudgetWatcher:
@@ -261,7 +268,7 @@ class ResilientLLMService(OpenAILLMService):
         super().__init__(
             api_key=endpoint.api_key,
             base_url=endpoint.base_url,
-            settings=OpenAILLMService.Settings(model=endpoint.model),
+            settings=OpenAILLMService.Settings(model=endpoint.model, extra=endpoint.extra_params),
             **kwargs,
         )
         if fallback:
@@ -396,6 +403,10 @@ class ResilientLLMService(OpenAILLMService):
             )
         )
         params["model"] = self._fallback.model
+        # The primary's reasoning_effort is the primary's. gpt-4o-mini answers a request
+        # carrying it with a 400, which would turn a rescued turn into a lost one.
+        params.pop("reasoning_effort", None)
+        params.update(self._fallback.extra_params)
         return await self._fallback_client.chat.completions.create(**params)
 
     async def stop(self, frame):
@@ -415,6 +426,7 @@ def primary_endpoint(settings) -> LLMEndpoint:
         api_key=settings.llm_api_key,
         base_url=settings.LLM_BASE_URL,
         model=settings.LLM_MODEL,
+        reasoning_effort=(settings.LLM_REASONING_EFFORT or "").strip().lower(),
     )
 
 

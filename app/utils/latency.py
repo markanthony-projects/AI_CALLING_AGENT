@@ -88,6 +88,7 @@ class LatencyObserver(BaseObserver):
         # else in this codebase read it.
         self._prompt_tokens: Optional[int] = None
         self._cached_tokens: Optional[int] = None
+        self._reasoning_tokens: Optional[int] = None
         self._prompt_total = 0
         self._cached_total = 0
 
@@ -122,6 +123,7 @@ class LatencyObserver(BaseObserver):
             self._llm_processor = None
             self._prompt_tokens = None
             self._cached_tokens = None
+            self._reasoning_tokens = None
             return
 
         if isinstance(frame, LLMFullResponseStartFrame):
@@ -147,6 +149,13 @@ class LatencyObserver(BaseObserver):
                     self._cached_tokens = (self._cached_tokens or 0) + cached
                     self._prompt_total += prompt
                     self._cached_total += cached
+                    # Tokens the model spent thinking before it said anything. On call
+                    # 2eeb48a0 (gpt-oss-120b) turn 1 had 1396ms unattributed after a 473ms
+                    # first token; a reasoning model's silence sits exactly there, and
+                    # nothing else in the log could name it.
+                    self._reasoning_tokens = (self._reasoning_tokens or 0) + (
+                        item.value.reasoning_tokens or 0
+                    )
             return
 
         # BotStartedSpeakingFrame. The opening greeting has no preceding user turn, so there
@@ -216,6 +225,10 @@ class LatencyObserver(BaseObserver):
         # Always shown when known, including cached=0: a zero on every turn is the finding.
         if self._prompt_tokens:
             parts.append(f"prompt={self._prompt_tokens}tok cached={self._cached_tokens or 0}")
+        # Only when the model reported some: for a non-reasoning model the field is absent
+        # and a permanent reasoning=0 would read as a claim the log cannot make.
+        if self._reasoning_tokens:
+            parts.append(f"reasoning={self._reasoning_tokens}tok")
         return "  |  " + "  ".join(parts) if parts else ""
 
     def summary(self) -> Optional[dict]:

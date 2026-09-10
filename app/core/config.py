@@ -297,6 +297,12 @@ class Settings(BaseSettings):
     # setting keeps working on whichever key it already had.
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "gemma-4-31b"
+    # For reasoning models only — gpt-oss-120b on Cerebras takes "low", "medium" or "high".
+    # Blank sends nothing, which is what a model that does not reason needs. On call
+    # 2eeb48a0 (gpt-oss, nothing set) the first turn had a 473ms first token and then
+    # 1396ms of silence before the first sentence: the model thinking, on the caller's
+    # clock, for a reply that is one short sentence and a question.
+    LLM_REASONING_EFFORT: str = ""
 
     @property
     def llm_api_key(self) -> str:

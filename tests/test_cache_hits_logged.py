@@ -137,3 +137,47 @@ def test_a_call_with_no_usage_metrics_summarises_as_before():
     stats = obs.summary()
     assert "prompt_tokens" not in stats
     assert "cached_share" not in stats
+
+
+# --- and what the model spent thinking before it spoke ------------------------------------
+
+
+def _usage_with_reasoning(prompt: int, cached: int, reasoning: int) -> MetricsFrame:
+    return MetricsFrame(
+        data=[
+            LLMUsageMetricsData(
+                processor="OpenAILLMService#0",
+                value=LLMTokenUsage(
+                    prompt_tokens=prompt, completion_tokens=200, total_tokens=prompt + 200,
+                    cache_read_input_tokens=cached, reasoning_tokens=reasoning,
+                ),
+            )
+        ]
+    )
+
+
+def test_reasoning_tokens_are_shown_when_the_model_reports_them():
+    """Call 2eeb48a0, gpt-oss-120b: turn 1 had a 473ms first token and then 1396ms of
+    silence before the first sentence. A reasoning model thinks in that gap, and the only
+    thing that can name it is the reasoning_tokens count the API returns."""
+    obs = LatencyObserver("sid")
+    _push(obs, UserStoppedSpeakingFrame(), 1.0)
+    _push(obs, _usage_with_reasoning(5559, 0, 180), 2.4)
+    assert "reasoning=180tok" in obs._breakdown(2.0)
+
+
+def test_reasoning_is_omitted_when_the_model_reports_none():
+    """gemma does not reason and reports nothing. A standing reasoning=0 would read as a
+    measurement the log never took."""
+    obs = LatencyObserver("sid")
+    _push(obs, UserStoppedSpeakingFrame(), 1.0)
+    _push(obs, _usage(4800, 4700), 1.6)
+    assert "reasoning=" not in obs._breakdown(0.8)
+
+
+def test_reasoning_resets_with_the_turn():
+    obs = LatencyObserver("sid")
+    _push(obs, UserStoppedSpeakingFrame(), 1.0)
+    _push(obs, _usage_with_reasoning(5559, 0, 180), 2.4)
+    _push(obs, UserStoppedSpeakingFrame(), 5.0)
+    assert "reasoning=" not in obs._breakdown(0.8)
