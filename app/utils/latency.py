@@ -21,7 +21,7 @@ from pipecat.frames.frames import (
     TTSSpeakFrame,
     UserStoppedSpeakingFrame,
 )
-from pipecat.metrics.metrics import TTFAMetricsData, TTFBMetricsData
+from pipecat.metrics.metrics import LLMUsageMetricsData, TTFAMetricsData, TTFBMetricsData
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 
 NS_PER_SEC = 1_000_000_000
@@ -80,6 +80,16 @@ class LatencyObserver(BaseObserver):
         # everything before it is in the logs to the millisecond, and everything after it is
         # covered per turn, but the first thing the prospect waits for was invisible.
         self._greeting_queued_ns: Optional[int] = None
+        # Prompt tokens this turn, and how many the provider served from its prefix cache.
+        # The prompt is ~4,800 tokens and is resent every turn; the rules were reordered on
+        # 10 Sep so that all but the last ~70 are a prefix shared by every call. Whether the
+        # provider actually reuses it is only knowable from here — pipecat maps the API's
+        # prompt_tokens_details.cached_tokens onto cache_read_input_tokens, and nothing
+        # else in this codebase read it.
+        self._prompt_tokens: Optional[int] = None
+        self._cached_tokens: Optional[int] = None
+        self._prompt_total = 0
+        self._cached_total = 0
 
     @property
     def turns(self) -> list[float]:
@@ -110,6 +120,8 @@ class LatencyObserver(BaseObserver):
             self._ttfa.clear()
             self._llm_first_token_ns = None
             self._llm_processor = None
+            self._prompt_tokens = None
+            self._cached_tokens = None
             return
 
         if isinstance(frame, LLMFullResponseStartFrame):
@@ -126,6 +138,15 @@ class LatencyObserver(BaseObserver):
                     self._ttfa.setdefault(item.processor, item)
                 elif isinstance(item, TTFBMetricsData):
                     self._ttfb.setdefault(item.processor, item.value)
+                elif isinstance(item, LLMUsageMetricsData):
+                    # Summed rather than set: a split turn runs two inferences, and both
+                    # are prompt tokens the caller waited on.
+                    prompt = item.value.prompt_tokens or 0
+                    cached = item.value.cache_read_input_tokens or 0
+                    self._prompt_tokens = (self._prompt_tokens or 0) + prompt
+                    self._cached_tokens = (self._cached_tokens or 0) + cached
+                    self._prompt_total += prompt
+                    self._cached_total += cached
             return
 
         # BotStartedSpeakingFrame. The opening greeting has no preceding user turn, so there
@@ -192,27 +213,41 @@ class LatencyObserver(BaseObserver):
         rest = elapsed - accounted
         if rest >= _WORTH_REPORTING_SECS:
             parts.append(f"unattributed={rest * 1000:.0f}ms")
+        # Always shown when known, including cached=0: a zero on every turn is the finding.
+        if self._prompt_tokens:
+            parts.append(f"prompt={self._prompt_tokens}tok cached={self._cached_tokens or 0}")
         return "  |  " + "  ".join(parts) if parts else ""
 
     def summary(self) -> Optional[dict]:
         if not self._turns:
             return None
-        return {
+        stats = {
             "turns": len(self._turns),
             "p50_ms": round(statistics.median(self._turns) * 1000),
             "p95_ms": round(percentile(self._turns, 0.95) * 1000),
             "min_ms": round(min(self._turns) * 1000),
             "max_ms": round(max(self._turns) * 1000),
         }
+        if self._prompt_total:
+            stats["prompt_tokens"] = self._prompt_total
+            stats["cached_tokens"] = self._cached_total
+            stats["cached_share"] = round(self._cached_total / self._prompt_total, 3)
+        return stats
 
     def log_summary(self) -> Optional[dict]:
         stats = self.summary()
         if stats is None:
             logger.info(f"[{self._call_sid}] LATENCY no measurable turns")
             return None
+        cache = ""
+        if "prompt_tokens" in stats:
+            cache = (
+                f" cache={stats['cached_tokens']}/{stats['prompt_tokens']}tok "
+                f"({stats['cached_share'] * 100:.0f}%)"
+            )
         logger.info(
             f"[{self._call_sid}] LATENCY summary | turns={stats['turns']} "
             f"p50={stats['p50_ms']}ms p95={stats['p95_ms']}ms "
-            f"min={stats['min_ms']}ms max={stats['max_ms']}ms"
+            f"min={stats['min_ms']}ms max={stats['max_ms']}ms{cache}"
         )
         return stats
