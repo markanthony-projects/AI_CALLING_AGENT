@@ -224,6 +224,15 @@ async def dial_due_contacts() -> int:
             await db.commit()
 
             for contact in to_dial:
+                if not is_within_calling_hours(to_ist(utc_now())):
+                    # The hour was checked once, at the top of the tick. A tick that began at
+                    # 19:59:58 would otherwise carry on into 20:00 — the rest of this batch,
+                    # then the next campaign's. Seconds rather than hours, but it is the
+                    # calling window, and in India that window is regulated. So it holds
+                    # per dial, and a contact claimed for a dial that never went out is put
+                    # back exactly as the slot-full path puts one back.
+                    _unclaim(contact)
+                    continue
                 if not await _place(db, contact):
                     continue
                 placed += 1
@@ -237,6 +246,20 @@ async def dial_due_contacts() -> int:
     return placed
 
 
+def _unclaim(contact: Contact) -> None:
+    """Undo claim() for a contact that was never actually dialled.
+
+    claim() marks the row DIALING, adds an attempt and stamps the time before any dial goes
+    out, so that a crash mid-batch leaves rows the sweep can time out. When the dial then
+    does not happen — the carrier filled up, or the calling window closed — all three have
+    to come back, or the number is charged an attempt for a call nobody made and the
+    last-attempt time says it was rung when it was not.
+    """
+    contact.status = ContactStatus.PENDING
+    contact.attempts = max(0, (contact.attempts or 1) - 1)
+    contact.last_attempt_at = None
+
+
 async def _place(db: AsyncSession, contact: Contact) -> bool:
     """Reserve a slot and ask Vobiz to dial. False if the call was not placed.
 
@@ -247,9 +270,7 @@ async def _place(db: AsyncSession, contact: Contact) -> bool:
     if not await call_slots.acquire(call_sid):
         # The carrier filled up between the count and here. Put it back untouched — the
         # attempt was never made, so it must not be charged one.
-        contact.status = ContactStatus.PENDING
-        contact.attempts = max(0, (contact.attempts or 1) - 1)
-        contact.last_attempt_at = None
+        _unclaim(contact)
         return False
 
     await remember_dialed_number(call_sid, contact.phone_number)

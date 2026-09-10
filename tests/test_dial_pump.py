@@ -572,3 +572,83 @@ def test_the_websocket_closing_does_not_claim_the_caller_hung_up():
     assert reasons, "no EndFrame carries a reason any more"
     assert "the caller hung up" not in reasons
     assert "the media stream closed" in reasons
+
+
+# --- the calling window closes mid-tick -------------------------------------------------
+
+
+def test_the_hour_is_checked_again_before_each_dial():
+    """The check at the top of the tick is not enough. A tick that begins at 19:59:58 claims
+    a batch and then dials it; with only the top check, the dials after 20:00:00 go out.
+    Seconds, but the window is regulated, and "a few seconds past" is still past.
+
+    Found by an AST walk: the guard must be inside the per-contact loop, not merely
+    somewhere in the function — the top-of-tick check already satisfies a substring test."""
+    tree = ast.parse(inspect.getsource(dial_pump.dial_due_contacts).lstrip())
+    contact_loop = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.For) and ast.unparse(n.target) == "contact"
+        and "_place" in ast.unparse(n)
+    )
+    guards = [
+        n for n in ast.walk(contact_loop)
+        if isinstance(n, ast.If) and "is_within_calling_hours" in ast.unparse(n.test)
+    ]
+    assert len(guards) == 1, ast.unparse(contact_loop)
+    assert "_unclaim(contact)" in ast.unparse(guards[0].body)
+    assert "continue" in ast.unparse(guards[0].body)
+
+
+def test_the_mid_tick_check_reads_the_clock_in_ist():
+    tree = ast.parse(inspect.getsource(dial_pump.dial_due_contacts).lstrip())
+    contact_loop = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.For) and ast.unparse(n.target) == "contact"
+        and "_place" in ast.unparse(n)
+    )
+    guard = next(
+        n for n in ast.walk(contact_loop)
+        if isinstance(n, ast.If) and "is_within_calling_hours" in ast.unparse(n.test)
+    )
+    assert ast.unparse(guard.test) == "not is_within_calling_hours(to_ist(utc_now()))"
+
+
+def test_a_contact_not_dialled_for_the_hour_is_not_charged_an_attempt():
+    """Same rule as a suppressed or slot-starved contact: claim() charged it, the dial never
+    went out, so the charge comes back. Otherwise every 8 PM cut-off eats one of the two
+    attempts a number gets, for a call nobody made."""
+    from datetime import datetime
+
+    from app.models.db import Contact, ContactStatus
+
+    contact = Contact(
+        phone_number="+911234567890",
+        status=ContactStatus.DIALING,
+        attempts=1,
+        last_attempt_at=datetime(2026, 9, 10, 14, 29, 59),
+    )
+    dial_pump._unclaim(contact)
+    assert contact.status == ContactStatus.PENDING
+    assert contact.attempts == 0
+    assert contact.last_attempt_at is None
+
+
+def test_unclaim_at_zero_stays_at_zero():
+    """A row that somehow reaches here at zero attempts stays at zero. Note what this does
+    NOT prove: `(attempts or 1) - 1` cannot go negative on any input, so the max(0, ...)
+    around it is belt-and-braces and a mutation removing it survives every test — it is
+    equivalent code. Kept because the eligibility query compares attempts to
+    MAX_DIAL_ATTEMPTS, and a future edit to the `or 1` would otherwise grant an extra dial."""
+    from app.models.db import Contact, ContactStatus
+
+    contact = Contact(phone_number="+911234567890", status=ContactStatus.DIALING, attempts=0)
+    dial_pump._unclaim(contact)
+    assert contact.attempts == 0
+
+
+def test_the_slot_full_path_uses_the_same_undo():
+    """Two hand-written copies of the same three lines is how one of them drifts. The
+    carrier-full branch in _place and the hour branch in the tick share _unclaim."""
+    assert "_unclaim(contact)" in inspect.getsource(dial_pump._place)
+    src = inspect.getsource(dial_pump._place)
+    assert "contact.attempts = max(0" not in src, "the undo is inlined again in _place"

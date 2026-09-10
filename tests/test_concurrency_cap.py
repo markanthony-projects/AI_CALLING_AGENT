@@ -52,8 +52,12 @@ def test_an_abandoned_dial_is_not_charged_an_attempt():
         if isinstance(n, ast.If) and "call_slots.acquire" in ast.unparse(n.test)
     )
     body = ast.unparse(guard)
-    assert "ContactStatus.PENDING" in body, "the contact is not returned to the queue"
-    assert "attempts" in body, "the attempt increment is not undone"
+    # The undo lives in _unclaim now, shared with the calling-hours branch in the tick, so
+    # the guard is checked for the call and _unclaim for what the call does.
+    assert "_unclaim(contact)" in body, "the claim is not undone"
+    undo = inspect.getsource(dial_pump._unclaim)
+    assert "ContactStatus.PENDING" in undo, "the contact is not returned to the queue"
+    assert "attempts" in undo, "the attempt increment is not undone"
 
 
 def test_the_stream_still_refuses_over_capacity():
