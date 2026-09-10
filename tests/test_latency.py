@@ -436,8 +436,17 @@ def captured():
     return seen, sink
 
 
+VAD_STOP_SECS = 0.2
+
+
 def _vad_stop(at):
-    return (VADUserStoppedSpeakingFrame(stop_secs=0.2, timestamp=int(at * NS_PER_SEC)), at)
+    """A VAD stop frame ARRIVING at `at`. Their voice stopped stop_secs earlier — that is
+    what stop_secs means, and the frame carries the number so the observer can subtract it.
+    So `_vad_stop(1.0)` is a voice that fell silent at 0.8."""
+    return (
+        VADUserStoppedSpeakingFrame(stop_secs=VAD_STOP_SECS, timestamp=int(at * NS_PER_SEC)),
+        at,
+    )
 
 
 def _vad_start(at):
@@ -456,7 +465,7 @@ async def test_the_turn_is_timed_from_when_their_voice_stopped():
         (UserStoppedSpeakingFrame(), 1.6),       # 600ms later the turn is declared over
         (BotStartedSpeakingFrame(), 2.33),       # and 730ms after that they hear something
     ])
-    assert obs.turns == pytest.approx([1.33])
+    assert obs.turns == pytest.approx([1.53])
 
 
 async def test_the_decision_is_named_on_the_line():
@@ -471,8 +480,8 @@ async def test_the_decision_is_named_on_the_line():
     finally:
         logger.remove(sink)
     line = next(m for m in seen if "LATENCY turn 1" in m)
-    assert "1330ms voice-to-voice" in line
-    assert "turn_decision=600ms" in line
+    assert "1530ms voice-to-voice" in line
+    assert "turn_decision=800ms" in line
 
 
 async def test_a_pause_for_breath_is_not_the_end_of_their_turn():
@@ -486,7 +495,7 @@ async def test_a_pause_for_breath_is_not_the_end_of_their_turn():
         (UserStoppedSpeakingFrame(), 2.6),
         (BotStartedSpeakingFrame(), 3.0),
     ])
-    assert obs.turns == pytest.approx([1.0])
+    assert obs.turns == pytest.approx([1.2])
 
 
 async def test_their_own_speaking_is_never_counted_as_our_delay():
@@ -527,7 +536,7 @@ async def test_the_voice_stop_does_not_carry_into_the_next_turn():
         (UserStoppedSpeakingFrame(), 6.0),       # no VAD frame this time
         (BotStartedSpeakingFrame(), 6.5),
     ])
-    assert obs.turns == pytest.approx([1.0, 0.5])
+    assert obs.turns == pytest.approx([1.2, 0.5])
 
 
 async def test_the_decision_counts_towards_what_is_accounted_for():
@@ -545,7 +554,7 @@ async def test_the_decision_counts_towards_what_is_accounted_for():
     finally:
         logger.remove(sink)
     line = next(m for m in seen if "LATENCY turn 1" in m)
-    assert "turn_decision=600ms" in line
+    assert "turn_decision=800ms" in line
     assert "unattributed" not in line, line
 
 
@@ -560,8 +569,8 @@ async def test_the_summary_reports_what_deciding_cost_across_the_call():
         stats = obs.log_summary()
     finally:
         logger.remove(sink)
-    assert stats["decision_p50_ms"] == 600
-    assert any("turn_decision_p50=600ms" in m for m in seen)
+    assert stats["decision_p50_ms"] == 800
+    assert any("turn_decision_p50=800ms" in m for m in seen)
 
 
 # --- and the wiring, because an unwired measurement measures nothing ---------------------------

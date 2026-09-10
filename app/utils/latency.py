@@ -157,7 +157,13 @@ class LatencyObserver(BaseObserver):
             return
 
         if isinstance(frame, VADUserStoppedSpeakingFrame):
-            self._voice_stopped_ns = data.timestamp
+            # The frame is emitted only once stop_secs of silence has ALREADY passed, so its
+            # arrival is not the moment the voice stopped — it is stop_secs afterwards.
+            # Subtracting it is the difference between "turn_decision=401ms" and the 601ms
+            # the prospect actually sat through, and the frame carries the number itself so
+            # this stays right if the setting moves.
+            stop_secs = getattr(frame, "stop_secs", None) or 0.0
+            self._voice_stopped_ns = data.timestamp - int(stop_secs * NS_PER_SEC)
             return
 
         if isinstance(frame, UserStoppedSpeakingFrame):

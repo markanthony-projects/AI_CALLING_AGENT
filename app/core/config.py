@@ -132,8 +132,14 @@ class Settings(BaseSettings):
     # line noise clear the bar and cut the agent off mid-sentence, leaving callers saying
     # "Hello?" into a line that had gone quiet. Tunable without a code change so these can
     # be measured against real calls.
+    #
+    # min_volume went 0.1 -> 0.4 after that, and stayed a fifth below Pipecat's own default
+    # while every barge-in on this stack costs a Sarvam websocket reconnect. On call
+    # 5023ff25 four of those left the agent mute and the prospect hung up. Back to the
+    # default: being slightly harder to interrupt is cheap, and being interrupted by line
+    # noise is not.
     VAD_CONFIDENCE: float = 0.7
-    VAD_MIN_VOLUME: float = 0.4
+    VAD_MIN_VOLUME: float = 0.6
 
     # Must stay below the STT's p99 transcript latency. Pipecat waits
     # `max(0, stt_p99 - stop_secs)` for transcripts before its turn analyzer decides the

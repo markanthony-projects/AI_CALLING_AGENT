@@ -25,7 +25,10 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+from pipecat.turns.types import ProcessFrameResult
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+from app.utils.barge_in import takes_the_floor
 
 
 class GreetingOnlyMinWords(MinWordsUserTurnStartStrategy):
@@ -41,10 +44,41 @@ class GreetingOnlyMinWords(MinWordsUserTurnStartStrategy):
     The gate only ever existed to stop the "Hello?" on pickup from cutting the greeting off
     at 0.7 seconds. Once that line is out there is nothing left to protect, so it relaxes to
     one word and the prospect can interrupt whenever they like for the rest of the call.
+
+    Whenever they like, with one exception earned on call 5023ff25: "Hello?" spoken while
+    the agent is talking is not somebody taking the floor, it is somebody who cannot hear —
+    and Sarvam reopens its websocket on every interruption, so four of those left the agent
+    mute and the prospect hung up. Those words wait for the sentence to finish instead of
+    cutting it off, and are then answered rather than discarded. See app/utils/barge_in.py.
     """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._deferred_line_check = False
 
     def relax(self) -> None:
         self._min_words = 1
+
+    async def reset(self):
+        await super().reset()
+        self._deferred_line_check = False
+
+    async def _handle_transcription(self, frame):
+        if self._bot_speaking and not takes_the_floor(getattr(frame, "text", "")):
+            # Held, not dropped. The base class would call trigger_reset_aggregation() and
+            # the words would be gone; leaving the aggregation alone keeps them for the turn
+            # that starts as soon as the agent stops speaking.
+            self._deferred_line_check = True
+            return ProcessFrameResult.CONTINUE
+        self._deferred_line_check = False
+        return await super()._handle_transcription(frame)
+
+    async def _handle_bot_stopped_speaking(self, frame):
+        await super()._handle_bot_stopped_speaking(frame)
+        if self._deferred_line_check:
+            # The sentence is finished and they are still owed an answer.
+            self._deferred_line_check = False
+            await self.trigger_user_turn_started()
 from app.core.config import settings
 from app.services.stt_provider import build_stt_service
 from app.services.llm_provider import (

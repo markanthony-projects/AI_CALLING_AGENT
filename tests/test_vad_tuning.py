@@ -19,9 +19,15 @@ from app.core.config import settings
 from app.services import agent
 
 
-def test_min_volume_is_not_wildly_below_pipecat_default():
-    """0.1 against a 0.6 default is six times more sensitive than Silero expects."""
-    assert settings.VAD_MIN_VOLUME >= VAD_MIN_VOLUME / 2
+def test_min_volume_is_at_least_pipecat_default():
+    """It was 0.1 against a 0.6 default — six times more sensitive than Silero expects — and
+    was raised to 0.4, which is still a third below. On this stack that is not a free
+    setting: Sarvam's TTS reopens its websocket on every interruption, and on call 5023ff25
+    four of those left the agent mute until the prospect hung up. Being slightly harder to
+    interrupt is cheap; being interrupted by line noise is not.
+
+    A floor rather than an equality, so raising it further stays allowed."""
+    assert settings.VAD_MIN_VOLUME >= VAD_MIN_VOLUME
 
 
 def test_confidence_is_at_least_pipecat_default():

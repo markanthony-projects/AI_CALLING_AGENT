@@ -211,13 +211,92 @@ def test_while_the_greeting_plays_a_short_reply_still_does_not_interrupt(said):
     assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.CONTINUE]
 
 
-@pytest.mark.parametrize("said", ["Yeah sure.", "Yeah,", "Hello?", "Yes please", "Okay"])
+@pytest.mark.parametrize("said", ["Yeah sure.", "Yeah,", "Yes please", "Okay", "3 BHK", "Sunday"])
 def test_after_the_greeting_the_same_reply_gets_through(said):
     """The exact replies people give to a closing question. Dropping these is worse than
     any barge-in the gate was protecting against."""
     gate = _gate()
     gate.relax()
     assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.STOP]
+
+
+# --- except the one word that is not a reply at all ----------------------------------
+#
+# Call 5023ff25. The agent went mute for the last thirty seconds and the prospect hung up:
+#
+#     USER  "Hello."   TTS reconnected (3)   AGENT "Hi, could you..."     [interrupted]
+#     USER  "Hello."   TTS reconnected (4)   AGENT "Which BHK size..."    [interrupted]
+#
+# Sarvam reopens its websocket on every interruption. They were saying "Hello?" because they
+# could not hear, and each "Hello?" was what stopped them hearing.
+
+
+@pytest.mark.parametrize("said", ["Hello?", "Hello", "hello.", "sir", "Ma'am", "Are you there?"])
+def test_checking_the_line_does_not_cut_the_agent_off(said):
+    """It is not somebody taking the floor. It is somebody who cannot hear, and the worst
+    possible answer is to stop talking."""
+    gate = _gate()
+    gate.relax()
+    assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.CONTINUE]
+
+
+@pytest.mark.parametrize("said", ["Hello?", "Hello", "sir", "Are you there?"])
+def test_the_same_words_into_silence_are_answered_at_once(said):
+    """The suppression is only about not CUTTING SOMEBODY OFF. With the agent already quiet
+    there is nothing to protect, and deferring would mean waiting for a BotStoppedSpeaking
+    that is never coming — a prospect saying "Hello?" into silence and getting nothing back,
+    which is the 37 seconds this whole gate exists to prevent.
+
+    Mutation testing found this: every other test here has the agent speaking."""
+    gate = _gate()
+    gate.relax()
+    assert asyncio.run(_feed(gate, said, bot_speaking=False)) == [ProcessFrameResult.STOP]
+
+
+def test_it_is_held_rather_than_dropped_and_answered_when_the_sentence_ends():
+    """The whole reason the gate was relaxed to one word: at three, Pipecat DISCARDS what it
+    will not act on — trigger_reset_aggregation — and a caller sat through 37 seconds of
+    silence. Suppressing the interruption must not bring that back. The sentence finishes,
+    and then they are answered."""
+    gate = _gate()
+    gate.relax()
+    started = []
+    gate.trigger_user_turn_started = lambda *a, **k: _record(started)
+    dropped = []
+    gate.trigger_reset_aggregation = lambda *a, **k: _record(dropped)
+
+    async def run():
+        await gate.process_frame(BotStartedSpeakingFrame())
+        assert await gate.process_frame(_speech("Hello?")) == ProcessFrameResult.CONTINUE
+        assert dropped == [], "the words were thrown away"
+        assert started == [], "it interrupted after all"
+        await gate.process_frame(BotStoppedSpeakingFrame())
+        assert started == [True], "the sentence ended and nobody answered them"
+
+    asyncio.run(run())
+
+
+def test_a_real_reply_after_a_held_line_check_is_not_delayed_twice():
+    """They say "Hello?", then say something real while the agent is still talking. The real
+    words take the floor at once and must not still be marked as held."""
+    gate = _gate()
+    gate.relax()
+    started = []
+    gate.trigger_user_turn_started = lambda *a, **k: _record(started)
+
+    async def run():
+        await gate.process_frame(BotStartedSpeakingFrame())
+        await gate.process_frame(_speech("Hello?"))
+        assert await gate.process_frame(_speech("I want a 3 BHK")) == ProcessFrameResult.STOP
+        assert started == [True]
+        await gate.process_frame(BotStoppedSpeakingFrame())
+        assert started == [True], "the held flag fired a second turn nobody asked for"
+
+    asyncio.run(run())
+
+
+async def _record(sink):
+    sink.append(True)
 
 
 def test_relaxing_is_permanent():
