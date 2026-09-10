@@ -33,12 +33,44 @@ def test_the_live_line_comes_out_in_commas_and_hyphens():
         ("A—B", "A, B"),
         ("A — B", "A, B"),
         ("Scotland‑themed", "Scotland-themed"),
-        ("2‐3 BHK", "2-3 BHK"),
         ("Prices start at 1.17 Cr — for a 2 BHK.", "Prices start at 1.17 Cr, for a 2 BHK."),
     ],
 )
 def test_each_kind_of_dash(text, expected):
     assert spoken_punctuation(text) == expected
+
+
+# --- a range is not a comma ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("about 20–30 Lakhs below launch", "about 20 to 30 Lakhs below launch"),
+        ("about 20‑30 Lakhs below launch", "about 20 to 30 Lakhs below launch"),
+        ("about 20-30 Lakhs below launch", "about 20 to 30 Lakhs below launch"),
+        ("It is 1.17–2.64 Crores", "It is 1.17 to 2.64 Crores"),
+        ("2‐3 BHK", "2 to 3 BHK"),
+        ("20 – 30 Lakhs", "20 to 30 Lakhs"),
+    ],
+)
+def test_a_dash_between_numbers_is_the_word_to(text, expected):
+    """The first version of this file made these commas. "20, 30 Lakhs below launch" is two
+    figures where the prospect was told one span, and "1.17, 2.64 Crores" is two unrelated
+    prices — the money said wrong, in the one part of the pitch that cannot be wrong."""
+    assert spoken_punctuation(text) == expected
+
+
+def test_a_hyphen_between_a_number_and_a_word_stays_a_hyphen():
+    """"3-acre golf course" is not a range."""
+    assert spoken_punctuation("a 3-acre golf course") == "a 3-acre golf course"
+    assert spoken_punctuation("a 3‑acre golf course") == "a 3-acre golf course"
+
+
+def test_the_range_rule_runs_before_the_clause_rule():
+    """An en-dash between numbers must be read as a range, not caught by the clause rule
+    first and turned into a comma."""
+    assert spoken_punctuation("Varthur – Sarjapur, 20–30 Lakhs off") == "Varthur, Sarjapur, 20 to 30 Lakhs off"
 
 
 def test_a_dash_after_a_comma_does_not_double_it():

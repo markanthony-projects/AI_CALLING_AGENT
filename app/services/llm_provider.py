@@ -34,7 +34,13 @@ from typing import Optional, Sequence
 
 import httpx
 from loguru import logger
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient, NotFoundError, RateLimitError
+from openai import (
+    AsyncOpenAI,
+    BadRequestError,
+    DefaultAsyncHttpxClient,
+    NotFoundError,
+    RateLimitError,
+)
 from pipecat.services.openai.llm import OpenAILLMService
 
 from app.core.llm_budget import record_budget
@@ -262,7 +268,7 @@ class ResilientLLMService(OpenAILLMService):
         # Set the first time the primary answers 404 for its model. A model that is gone
         # is gone for the rest of the call; asking again on every turn would pay a failed
         # round trip before each fallback request, on the caller's clock.
-        self._primary_model_missing = False
+        self._primary_unusable = False
         self._watcher = BudgetWatcher(call_sid, warn_below=warn_below)
         kwargs.setdefault("name", processor_name(endpoint))
         super().__init__(
@@ -331,6 +337,21 @@ class ResilientLLMService(OpenAILLMService):
                 messages=[{"role": "user", "content": "."}],
                 max_tokens=1,
             )
+        except BadRequestError as e:
+            # A parameter this model does not take — reasoning_effort is the one that
+            # varies, and qwen takes "none" where gpt-oss does not. Same shape of failure as
+            # the 404: every turn of this call is about to be refused identically, and the
+            # caller hears an apology and then a hangup. So the same treatment, and the
+            # fallback gets the request without the primary's extra params.
+            self._primary_unusable = True
+            logger.error(
+                f"[{self._call_sid}] {self._endpoint} refused our request shape (400) — check "
+                f"LLM_REASONING_EFFORT={self._endpoint.reasoning_effort!r} against this "
+                f"model's own page. Every turn will fail the same way"
+                + (f"; using {self._fallback} instead." if self._fallback else
+                   ". No LLM_FALLBACK_* configured, so this call cannot be served. ")
+                + f" Provider said: {e}"
+            )
         except NotFoundError as e:
             # Not a warm-up problem: the provider has no such model for this key, and every
             # turn of this call is about to fail identically. On 10 Sep 2026 Cerebras
@@ -338,7 +359,7 @@ class ResilientLLMService(OpenAILLMService):
             # the log filter dropped it, and the first sign was the caller being told
             # "Sorry, I missed that" twice and hung up on. Loud, and marked so the turns
             # go straight to the fallback where there is one.
-            self._primary_model_missing = True
+            self._primary_unusable = True
             logger.error(
                 f"[{self._call_sid}] {self._endpoint} has no model {self._endpoint.model!r} "
                 f"(404). Every turn will fail the same way"
@@ -355,19 +376,23 @@ class ResilientLLMService(OpenAILLMService):
         Two failures are worth a fallback and they are not alike. A rate limit is this
         minute's problem, so the primary is asked again next turn. A 404 for the model is
         the rest of the call's problem, so after the first one the primary is not asked
-        again — see _primary_model_missing.
+        again — see _primary_unusable.
         """
-        if self._primary_model_missing and self._fallback_client is not None and self._fallback:
+        if self._primary_unusable and self._fallback_client is not None and self._fallback:
             return await self._complete_on_fallback(context)
         try:
             completions = await super().get_chat_completions(context)
-        except NotFoundError as exc:
-            self._primary_model_missing = True
+        except (NotFoundError, BadRequestError) as exc:
+            # 404: no such model for this key. 400: a parameter this model does not take.
+            # Both mean every turn of this call is refused identically, and both are worth a
+            # fallback that sends the request without the primary's extra params.
+            self._primary_unusable = True
             if self._fallback_client is None or self._fallback is None:
                 raise
             logger.error(
-                f"[{self._call_sid}] {self._endpoint} has no model {self._endpoint.model!r} "
-                f"(404); switching this call to {self._fallback}. Provider said: {exc}"
+                f"[{self._call_sid}] {self._endpoint} refused the request "
+                f"({'404, no such model' if isinstance(exc, NotFoundError) else '400, bad request'}); "
+                f"switching this call to {self._fallback}. Provider said: {exc}"
             )
             return await self._complete_on_fallback(context)
         except RateLimitError as exc:

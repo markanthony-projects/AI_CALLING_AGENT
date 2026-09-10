@@ -81,3 +81,20 @@ def test_the_check_runs_before_the_goodbye_is_logged_or_queued():
     handler = src[src.index("async def end_call_handler") : src.index("llm.register_function")]
     assert handler.index("unagreed_booking(") < handler.index("AGENT initiated call end")
     assert handler.index("unagreed_booking(") < handler.index("say_goodbye_then_hang_up(line)")
+
+
+def test_the_context_the_handler_reads_exists_before_anything_can_call_it():
+    """end_call_handler closes over `context`, which is assigned seventy lines below its own
+    definition. That is legal — Python resolves a closure when the function runs — and it
+    holds only because nothing can call the handler until the pipeline is up, which is after
+    the assignment. A reorder that moved the pipeline above it would raise NameError on a
+    live call, in the handler that hangs up, with the prospect on the line.
+
+    Pinned as source order rather than trusted: the failure has no other warning."""
+    import inspect
+
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    assert src.index("context = LLMContext(") < src.index("PipelineWorker(")
+    assert src.index("context = LLMContext(") < src.index("Pipeline([")

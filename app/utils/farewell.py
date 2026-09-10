@@ -59,20 +59,38 @@ class FarewellGate(FrameProcessor):
     raised — from the audio clock task, once the turn's audio has been written out at
     realtime pace. Upstream of it the frame does not exist yet.
 
-    arm() must be called immediately before the farewell is queued. Clearing the event there
-    is what stops a BotStoppedSpeakingFrame from the turn BEFORE the goodbye releasing the
-    wait instantly — which would reintroduce the cutoff through the mechanism meant to fix
-    it. There is deliberately no second "armed" flag gating process_frame: it would be a
-    duplicate of that clear, and a guard that cannot change any outcome is a guard that
-    invites the next reader to trust it for something it does not do.
+    arm() must be called immediately before the farewell is queued, with the number of
+    utterances it will take. Clearing the event there is what stops a BotStoppedSpeakingFrame
+    from the turn BEFORE the goodbye releasing the wait instantly — which would reintroduce
+    the cutoff through the mechanism meant to fix it. There is deliberately no second "armed"
+    flag gating process_frame: it would be a duplicate of that clear, and a guard that cannot
+    change any outcome is a guard that invites the next reader to trust it for something it
+    does not do.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._spoken = asyncio.Event()
+        self._quiet = asyncio.Event()
+        self._quiet.set()
         self._speaking = False
+        self._pending = 1
 
-    def arm(self) -> None:
+    def arm(self, utterances: int = 1) -> None:
+        """Wait for this many utterances to finish before the goodbye counts as spoken.
+
+        One per sentence. Since 10 Sep the closing line is queued a sentence at a time, so
+        that it is spoken the way a person speaks rather than in one breath — and the
+        transport raises a BotStoppedSpeakingFrame for each of them, off TTSStoppedFrame.
+        Released on the first, this gate would have guaranteed only the first sentence, and
+        the read-back with the day and the time in it is not always the first sentence.
+
+        The live call that showed it survived on queue order alone: EndWorkerFrame went in
+        behind sentences already queued. That is exactly the thing this module says it does
+        not rely on, in its own first paragraph, because Sarvam's audio does not travel with
+        the frames.
+        """
+        self._pending = max(1, utterances)
         self._spoken.clear()
 
     @property
@@ -94,7 +112,14 @@ class FarewellGate(FrameProcessor):
         """
         if not self._speaking:
             return True
-        return await self.wait_until_spoken(timeout)
+        # Its own event, not the goodbye's. This runs BEFORE arm(), to let this turn's own
+        # lead-in finish, and it is done when the voice stops once — however many utterances
+        # the goodbye after it will take.
+        try:
+            await asyncio.wait_for(self._quiet.wait(), timeout)
+            return True
+        except (asyncio.TimeoutError, TimeoutError):
+            return False
 
     async def wait_until_spoken(self, timeout: float) -> bool:
         """True if the bot finished speaking, False if the wait ran out.
@@ -112,7 +137,15 @@ class FarewellGate(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, BotStartedSpeakingFrame):
             self._speaking = True
+            self._quiet.clear()
         if isinstance(frame, BotStoppedSpeakingFrame):
             self._speaking = False
-            self._spoken.set()
+            self._quiet.set()
+            self._pending -= 1
+            # `<= 0` rather than `== 0` reads as a guard and is not one: _pending only ever
+            # moves by arm() or by this single decrement, so it lands on zero exactly. Both
+            # spellings behave identically and no test can tell them apart — kept this way
+            # because it says what is meant, not because anything depends on it.
+            if self._pending <= 0:
+                self._spoken.set()
         await self.push_frame(frame, direction)

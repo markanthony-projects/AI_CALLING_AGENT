@@ -159,3 +159,139 @@ def test_a_second_call_is_not_released_by_the_first_ones_frame():
         return await gate.wait_until_spoken(0.05)
 
     assert asyncio.run(scenario()) is False
+
+
+# --- one goodbye, several sentences -----------------------------------------------------------
+
+
+def _stopped(n):
+    return [BotStoppedSpeakingFrame() for _ in range(n)]
+
+
+def test_a_three_sentence_goodbye_is_not_released_by_its_first_sentence():
+    """Since 10 Sep the closing line is queued a sentence at a time, so that it is spoken
+    the way a person speaks rather than in one breath. The transport raises a
+    BotStoppedSpeakingFrame for each, off TTSStoppedFrame. Released on the first, this gate
+    guarantees only the first sentence — and the read-back with the day and the time in it
+    is not always the first sentence."""
+    gate = FarewellGate()
+    gate.arm(3)
+
+    async def run():
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is False, "released by the first sentence"
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is False, "released by the second"
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is True
+
+    asyncio.run(run())
+
+
+def test_a_one_sentence_goodbye_behaves_as_it_always_did():
+    gate = FarewellGate()
+    gate.arm(1)
+
+    async def run():
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is True
+
+    asyncio.run(run())
+
+
+def test_arming_defaults_to_one():
+    gate = FarewellGate()
+    gate.arm()
+
+    async def run():
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is True
+
+    asyncio.run(run())
+
+
+def test_arming_again_starts_the_count_over():
+    """A second end path can fire for the same turn — a structured tool call and leaked
+    syntax both. The count must not be left part-spent."""
+    gate = FarewellGate()
+    gate.arm(3)
+
+    async def run():
+        await _feed(gate, _stopped(2))
+        gate.arm(2)
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is False
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is True
+
+    asyncio.run(run())
+
+
+def test_a_goodbye_that_never_finishes_still_times_out():
+    """False is not a reason to stay on the line — the carrier leg is billing."""
+    gate = FarewellGate()
+    gate.arm(3)
+
+    async def run():
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is False
+
+    asyncio.run(run())
+
+
+# --- letting this turn's own words finish -----------------------------------------------------
+
+
+def test_waiting_for_quiet_is_done_when_the_voice_stops_once():
+    """wait_for_quiet runs BEFORE arm(), to let this turn's lead-in finish. It must not be
+    made to wait for the goodbye's sentence count, which has not been set yet."""
+    from pipecat.frames.frames import BotStartedSpeakingFrame
+
+    gate = FarewellGate()
+
+    async def run():
+        await _feed(gate, [BotStartedSpeakingFrame()])
+        assert gate.is_speaking is True
+        assert await gate.wait_for_quiet(0.05) is False
+        await _feed(gate, _stopped(1))
+        assert gate.is_speaking is False
+        assert await gate.wait_for_quiet(0.05) is True
+
+    asyncio.run(run())
+
+
+def test_waiting_for_quiet_returns_at_once_when_nothing_is_playing():
+    gate = FarewellGate()
+    assert asyncio.run(gate.wait_for_quiet(0.05)) is True
+
+
+def test_quiet_and_spoken_are_different_questions():
+    """The distinguishing case, and the reason wait_for_quiet has its own event: after a
+    goodbye armed for three sentences and one of them played, the voice HAS stopped —
+    wait_for_quiet is satisfied — while the goodbye has NOT been spoken. Made to share the
+    counter, wait_for_quiet would hold the lead-in for the length of a goodbye that has not
+    been queued yet."""
+    gate = FarewellGate()
+    gate.arm(3)
+
+    async def run():
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_for_quiet(0.05) is True
+        assert await gate.wait_until_spoken(0.05) is False
+
+    asyncio.run(run())
+
+
+def test_arming_for_nothing_still_waits_for_one_utterance():
+    """Defensive: arm(len(...)) of an empty list would otherwise release the gate on the
+    first stray stopped frame. closing_line() never returns empty today, so this guard is
+    the only thing standing between that changing and a goodbye nobody waits for."""
+    gate = FarewellGate()
+    gate.arm(0)
+
+    async def run():
+        assert await gate.wait_until_spoken(0.05) is False, "released before anything played"
+        await _feed(gate, _stopped(1))
+        assert await gate.wait_until_spoken(0.05) is True
+
+    asyncio.run(run())

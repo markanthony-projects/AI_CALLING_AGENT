@@ -144,11 +144,13 @@ class _Farewell:
     def __init__(self, heard=True, speaking=False):
         self.heard = heard
         self.armed = False
+        self.armed_for = None
         self.is_speaking = speaking
         self.waited_for_quiet = False
 
-    def arm(self):
+    def arm(self, utterances=1):
         self.armed = True
+        self.armed_for = utterances
 
     async def wait_until_spoken(self, timeout):
         assert self.armed, "the gate must be armed before the farewell is queued"
@@ -377,6 +379,28 @@ def test_the_shield_goes_up_after_end_calls_own_interruption_not_before():
         return min(lines)
 
     assert first("InterruptionWorkerFrame") < first("protect_goodbye") < first("spoken(line)")
+
+
+def test_the_gate_is_armed_for_every_sentence_the_goodbye_takes():
+    """The transport raises a BotStoppedSpeakingFrame per utterance, off TTSStoppedFrame.
+    Armed for one, the gate is released by the first sentence and EndWorkerFrame is queued
+    while the rest are still being synthesised — and the read-back with the day and the time
+    in it is not always the first sentence.
+
+    On the live call this survived only because EndWorkerFrame went into the queue behind
+    sentences already in it. This module's first paragraph says it does not rely on frame
+    order, because Sarvam's audio does not travel with the frames."""
+    task = _Task()
+    farewell = _Farewell()
+    handler, spawned = _build(task, farewell)
+
+    async def drive():
+        await handler(type("P", (), {"arguments": {"closing_line": BOOKING_READBACK}})())
+        for coro in spawned:
+            await coro
+
+    asyncio.run(drive())
+    assert farewell.armed_for == len(sentences(BOOKING_READBACK)) == 3
 
 
 def test_a_second_hangup_is_refused():

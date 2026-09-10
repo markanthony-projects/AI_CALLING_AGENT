@@ -529,8 +529,13 @@ async def run_voice_agent(
         # reply from a split turn, still lands.
         closing_gate.protect_goodbye()
 
-        farewell.arm()
-        await task_ref[0].queue_frames(spoken(line))
+        # Armed for every sentence the goodbye takes, not one. The transport raises a
+        # BotStoppedSpeakingFrame per utterance, so a gate released on the first would
+        # guarantee only the first sentence — and the read-back with the day and time in it
+        # is not always the first sentence.
+        goodbye = spoken(line)
+        farewell.arm(len(goodbye))
+        await task_ref[0].queue_frames(goodbye)
         if not await farewell.wait_until_spoken(farewell_timeout(line)):
             logger.warning(
                 f"[{call_sid}] Goodbye never finished playing; hanging up anyway so the "

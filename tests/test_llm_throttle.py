@@ -597,13 +597,55 @@ def test_groqs_request_header_is_not_read_as_a_per_minute_figure():
 # --- the provider is configuration, not a class name ---------------------------------
 
 
-def test_the_default_is_the_model_that_was_measured():
-    """Chosen by replaying a real call against every candidate and scoring the rules live
-    calls had broken — 503ms, end_call through the tool channel, the prospect's name in six
-    replies out of six — not by tokens per second."""
+def test_the_default_model_is_one_the_provider_still_serves():
+    """gemma-4-31b was the measured choice — replayed against every candidate and scored on
+    the rules live calls had broken, 503ms, end_call through the tool channel, the name in
+    six replies of six. Cerebras withdrew it from their public endpoints on 3 Sep 2026 and
+    it now 404s, so it cannot be the default however well it scored: a default nobody can
+    call is a fresh deploy that fails on its first call.
+
+    qwen-3.8-27b is the provider's own replacement recommendation and it is NOT measured
+    against that bake-off. Whoever measures it should say so here."""
     endpoint = primary_endpoint(_settings())
     assert "cerebras.ai" in endpoint.base_url
-    assert endpoint.model == "gemma-4-31b"
+    assert endpoint.model == "qwen-3.8-27b"
+    assert endpoint.model != "gemma-4-31b", "withdrawn from public endpoints on 3 Sep 2026"
+
+
+def test_the_default_reasoning_effort_matches_the_default_model():
+    """These two are a pair. qwen reasons at high when reasoning_effort is not sent, and its
+    clear_thinking defaults to false, so each turn's thinking stays in the context for the
+    next one — on a phone call whose every reply is one sentence and a question. Left to the
+    provider's default this is the 1396ms of silence that call 2eeb48a0 opened with, every
+    turn, growing."""
+    assert primary_endpoint(_settings()).reasoning_effort == "none"
+
+
+def test_a_reasoning_effort_no_provider_takes_is_refused_at_startup():
+    """A typo here is a 400 on every turn of every call, and the caller hears exactly what
+    they heard when the model 404ed: an apology, a second apology, and a hangup. A container
+    that will not start is a deploy that fails in front of whoever ran it."""
+    import pytest
+
+    for typo in ("lo", "off", "disabled", "HIGHEST"):
+        with pytest.raises(ValueError, match="not a value any provider takes"):
+            _settings(LLM_REASONING_EFFORT=typo)
+
+
+def test_every_value_a_provider_does_take_is_allowed():
+    """The union across providers, not one model's set: qwen takes "none" and gpt-oss does
+    not, and this cannot know which model is configured. The wrong-for-this-model case is
+    caught at the provider, by the warm-up."""
+    from app.core.config import REASONING_EFFORTS
+
+    for value in REASONING_EFFORTS:
+        assert primary_endpoint(_settings(LLM_REASONING_EFFORT=value)).reasoning_effort == value
+
+
+def test_blank_still_means_send_nothing():
+    """For a model that does not reason at all. Distinct from "none", which is a value qwen
+    understands and gpt-oss refuses."""
+    assert primary_endpoint(_settings(LLM_REASONING_EFFORT="")).extra_params == {}
 
 
 def test_the_key_follows_the_provider_not_a_single_fallback():

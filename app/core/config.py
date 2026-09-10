@@ -17,6 +17,11 @@ from dotenv import load_dotenv
 # missing, so switching off one and not the other would leave half the leak in place.
 ENV_FILE = os.getenv("APP_ENV_FILE", ".env")
 
+# Every reasoning_effort value any provider we can point at accepts. The union, not one
+# model's set: which of these a given model takes is on that model's own page, and the
+# request itself is the only place that can tell. See LLM_REASONING_EFFORT below.
+REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh"})
+
 load_dotenv(ENV_FILE)
 
 from pydantic import Field, field_validator, model_validator
@@ -296,13 +301,28 @@ class Settings(BaseSettings):
     # Blank resolves to the provider's own key below, so a deployment that predates this
     # setting keeps working on whichever key it already had.
     LLM_API_KEY: str = ""
-    LLM_MODEL: str = "gemma-4-31b"
-    # For reasoning models only — gpt-oss-120b on Cerebras takes "low", "medium" or "high".
-    # Blank sends nothing, which is what a model that does not reason needs. On call
-    # 2eeb48a0 (gpt-oss, nothing set) the first turn had a 473ms first token and then
-    # 1396ms of silence before the first sentence: the model thinking, on the caller's
-    # clock, for a reply that is one short sentence and a question.
-    LLM_REASONING_EFFORT: str = ""
+    # gemma-4-31b was removed from Cerebras' PUBLIC endpoints on 3 September 2026 — it
+    # remains on their Dedicated Endpoints, which is a separate contract. models.list() still
+    # returns it for a key eligible on a dedicated endpoint, so "listed" and "404 on
+    # completion" were both true at once, and the first sign was a live call where the
+    # prospect was told twice "Sorry, I missed that" and then hung up on. See
+    # https://inference-docs.cerebras.ai/support/deprecation — Cerebras' own replacement
+    # recommendation for public workloads is qwen-3.8-27b, which is what this is.
+    LLM_MODEL: str = "qwen-3.8-27b"
+    # How hard the model may think before it answers. THIS SETTING AND LLM_MODEL ARE A PAIR:
+    # every model takes a different set, and a value one of them does not know is a 400 on
+    # every turn of every call.
+    #
+    #   qwen-3.8-27b   none | low | medium | high     DEFAULTS TO high WHEN NOT SENT
+    #   gpt-oss-120b   low | medium | high            (does not take "none")
+    #   a model that does not reason at all           leave this blank; nothing is sent
+    #
+    # "none" for qwen, and the default is not a detail. Left unset, qwen reasons at high on
+    # a phone call whose every reply is one sentence and a question — and its clear_thinking
+    # defaults to false, so each turn's thinking stays in the context for the next one. On
+    # gpt-oss with nothing set, call 2eeb48a0 turn 1 had a 473ms first token and then 1396ms
+    # of silence before the first sentence. That silence is this setting.
+    LLM_REASONING_EFFORT: str = "none"
 
     @property
     def llm_api_key(self) -> str:
@@ -322,6 +342,29 @@ class Settings(BaseSettings):
         if "openai.com" in self.LLM_BASE_URL:
             return self.OPENAI_API_KEY
         return ""
+
+    @field_validator("LLM_REASONING_EFFORT")
+    @classmethod
+    def a_reasoning_effort_the_provider_could_know(cls, value: str) -> str:
+        """Refuse a value no provider takes, at startup rather than on a live call.
+
+        This parameter goes into every completion request. A typo — "lo", "None", "off" —
+        is a 400 on every turn of every call, and the caller hears the same thing they heard
+        when the model 404ed on 10 Sep: an apology, a second apology, and a hangup. A
+        container that will not start is a deploy that fails in front of whoever ran it.
+
+        Membership only. Which of these a given model accepts is the model's business and
+        this cannot know it — qwen takes "none" and gpt-oss does not — so a wrong-for-this-
+        model value still has to be caught at the provider. That is what the warm-up is for.
+        """
+        lowered = (value or "").strip().lower()
+        if lowered and lowered not in REASONING_EFFORTS:
+            raise ValueError(
+                f"LLM_REASONING_EFFORT={value!r} is not a value any provider takes. "
+                f"Use one of {', '.join(sorted(REASONING_EFFORTS))}, or leave it blank to "
+                f"send nothing. Check your model's own page for which of them it accepts."
+            )
+        return lowered
 
     @model_validator(mode="after")
     def the_llm_has_a_key(self) -> "Settings":

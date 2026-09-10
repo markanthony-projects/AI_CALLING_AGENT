@@ -71,12 +71,27 @@ def _frames_in(node) -> list[list[str]]:
     in what order, which the cut into sentences does not change.
     """
 
+    # Local names bound to a spoken(...) call, so `goodbye = spoken(line)` followed by
+    # `queue_frames(goodbye)` still reads as the speech step. One hop, deliberately: the
+    # goodbye is held in a variable because its length is what arms the farewell gate.
+    speech_aliases = {
+        t.id
+        for a in ast.walk(node)
+        if isinstance(a, ast.Assign)
+        and isinstance(a.value, ast.Call)
+        and getattr(a.value.func, "id", None) == "spoken"
+        for t in a.targets
+        if isinstance(t, ast.Name)
+    }
+
     def kind(el):
         if isinstance(el, ast.Starred):
             el = el.value
         if isinstance(el, ast.Call):
             name = getattr(el.func, "id", None)
             return "TTSSpeakFrame" if name == "spoken" else name
+        if isinstance(el, ast.Name) and el.id in speech_aliases:
+            return "TTSSpeakFrame"
         return None
 
     out = []
@@ -130,7 +145,7 @@ def test_the_three_steps_are_separate_and_awaited():
 def test_the_interruption_is_confirmed_landed_before_the_farewell_is_spoken():
     src = _body("say_goodbye_then_hang_up")
     assert "flush_pipeline" in src
-    assert src.index("flush_pipeline") < src.index("spoken(line)")
+    assert src.index("flush_pipeline") < src.index("goodbye = spoken(line)")
 
 
 def test_it_waits_for_the_goodbye_to_be_heard_not_merely_queued():

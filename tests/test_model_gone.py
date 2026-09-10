@@ -17,7 +17,7 @@ import asyncio
 
 import httpx
 import pytest
-from openai import NotFoundError, RateLimitError
+from openai import BadRequestError, NotFoundError, RateLimitError
 from pipecat.processors.aggregators.llm_context import LLMContext
 
 from app.services.llm_provider import LLMEndpoint, ResilientLLMService
@@ -112,9 +112,9 @@ def test_the_warm_up_error_says_whether_there_is_a_way_out():
 
 def test_a_404_on_warm_up_marks_the_primary_as_gone():
     svc = _service(primary_raises=_404())
-    assert svc._primary_model_missing is False
+    assert svc._primary_unusable is False
     asyncio.run(svc.warm_up())
-    assert svc._primary_model_missing is True
+    assert svc._primary_unusable is True
 
 
 def test_any_other_warm_up_failure_stays_quiet_and_marks_nothing():
@@ -128,7 +128,7 @@ def test_any_other_warm_up_failure_stays_quiet_and_marks_nothing():
     finally:
         logger.remove(handle)
     assert not [l for l in lines if l.record["level"].name == "ERROR"]
-    assert svc._primary_model_missing is False
+    assert svc._primary_unusable is False
 
 
 # --- the turn goes to the fallback ---------------------------------------------------------
@@ -191,7 +191,7 @@ def test_a_rate_limit_does_not_mark_the_primary_as_gone():
     svc = _service(fallback=FALLBACK, primary_raises=_429())
     result = asyncio.run(svc.get_chat_completions(_ctx()))
     assert result == "from-fallback"
-    assert svc._primary_model_missing is False
+    assert svc._primary_unusable is False
 
 
 def test_after_a_rate_limit_the_primary_is_asked_again_next_turn():
@@ -209,7 +209,78 @@ def test_with_no_fallback_every_turn_after_the_404_still_fails_cleanly():
     svc = _service(fallback=None, primary_raises=_404())
     with pytest.raises(NotFoundError):
         asyncio.run(svc.get_chat_completions(_ctx()))
-    assert svc._primary_model_missing is True
+    assert svc._primary_unusable is True
     with pytest.raises(NotFoundError):
         asyncio.run(svc.get_chat_completions(_ctx()))
     assert svc._client.chat.completions.calls == 2, "nowhere else to go, so the primary is asked"
+
+
+# --- and the same for a parameter the model does not take --------------------------------------
+
+
+def _400() -> BadRequestError:
+    request = httpx.Request("POST", "https://api.cerebras.ai/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    return BadRequestError(
+        "Error code: 400 - {'message': \"Unsupported value 'none' for 'reasoning_effort'\"}",
+        response=response,
+        body={"code": "invalid_request_error"},
+    )
+
+
+def _endpoint_with_effort() -> LLMEndpoint:
+    from dataclasses import replace as _replace
+
+    return _replace(PRIMARY, reasoning_effort="none")
+
+
+def test_a_rejected_parameter_is_served_by_the_fallback():
+    """reasoning_effort is the parameter that varies between models — qwen takes "none" and
+    gpt-oss does not — and it goes into every request. Refused, every turn of the call is
+    refused identically: the same shape of failure as the 404, and the same treatment. The
+    fallback gets the request without the primary's extra params, so it can answer."""
+    svc = _service(fallback=FALLBACK, primary_raises=_400())
+    assert asyncio.run(svc.get_chat_completions(_ctx())) == "from-fallback"
+
+
+def test_a_rejected_parameter_with_no_fallback_still_raises():
+    svc = _service(fallback=None, primary_raises=_400())
+    with pytest.raises(BadRequestError):
+        asyncio.run(svc.get_chat_completions(_ctx()))
+
+
+def test_after_a_400_the_primary_is_not_asked_again():
+    svc = _service(fallback=FALLBACK, primary_raises=_400())
+    asyncio.run(svc.get_chat_completions(_ctx()))
+    asyncio.run(svc.get_chat_completions(_ctx()))
+    assert svc._client.chat.completions.calls == 1
+    assert svc._fallback_client.chat.completions.calls == 2
+
+
+def test_the_warm_up_names_the_setting_to_look_at():
+    """A 400 says nothing about which parameter. The one that varies by model is named, so
+    whoever reads the log knows where to look rather than reading the provider's prose."""
+    from loguru import logger
+
+    lines, handle = _capture(logger)
+    try:
+        svc = ResilientLLMService(call_sid="t", endpoint=_endpoint_with_effort(), fallback=FALLBACK)
+        svc._client.chat.completions = _Completions(raise_=_400())
+        svc._fallback_client.chat.completions = _Completions()
+        asyncio.run(svc.warm_up())
+    finally:
+        logger.remove(handle)
+    errors = [str(l) for l in lines if l.record["level"].name == "ERROR"]
+    assert len(errors) == 1, errors
+    assert "LLM_REASONING_EFFORT='none'" in errors[0]
+    assert "Every turn will fail" in errors[0]
+
+
+def test_a_400_on_warm_up_sends_the_first_turn_straight_to_the_fallback():
+    svc = ResilientLLMService(call_sid="t", endpoint=_endpoint_with_effort(), fallback=FALLBACK)
+    svc._client.chat.completions = _Completions(raise_=_400())
+    svc._fallback_client.chat.completions = _Completions(result="from-fallback")
+    asyncio.run(svc.warm_up())
+    svc._client.chat.completions.calls = 0
+    assert asyncio.run(svc.get_chat_completions(_ctx())) == "from-fallback"
+    assert svc._client.chat.completions.calls == 0
