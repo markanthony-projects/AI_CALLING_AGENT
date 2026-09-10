@@ -34,7 +34,7 @@ from typing import Optional, Sequence
 
 import httpx
 from loguru import logger
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient, RateLimitError
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, NotFoundError, RateLimitError
 from pipecat.services.openai.llm import OpenAILLMService
 
 from app.core.llm_budget import record_budget
@@ -252,6 +252,10 @@ class ResilientLLMService(OpenAILLMService):
         self._fallback = fallback
         self._fallback_client: Optional[AsyncOpenAI] = None
         self._last_throttle_delay: Optional[float] = None
+        # Set the first time the primary answers 404 for its model. A model that is gone
+        # is gone for the rest of the call; asking again on every turn would pay a failed
+        # round trip before each fallback request, on the caller's clock.
+        self._primary_model_missing = False
         self._watcher = BudgetWatcher(call_sid, warn_below=warn_below)
         kwargs.setdefault("name", processor_name(endpoint))
         super().__init__(
@@ -320,13 +324,45 @@ class ResilientLLMService(OpenAILLMService):
                 messages=[{"role": "user", "content": "."}],
                 max_tokens=1,
             )
+        except NotFoundError as e:
+            # Not a warm-up problem: the provider has no such model for this key, and every
+            # turn of this call is about to fail identically. On 10 Sep 2026 Cerebras
+            # answered 404 for gemma-4-31b while still listing it; this line was at DEBUG,
+            # the log filter dropped it, and the first sign was the caller being told
+            # "Sorry, I missed that" twice and hung up on. Loud, and marked so the turns
+            # go straight to the fallback where there is one.
+            self._primary_model_missing = True
+            logger.error(
+                f"[{self._call_sid}] {self._endpoint} has no model {self._endpoint.model!r} "
+                f"(404). Every turn will fail the same way"
+                + (f"; using {self._fallback} instead." if self._fallback else
+                   ". No LLM_FALLBACK_* configured, so this call cannot be served. ")
+                + f" Provider said: {e}"
+            )
         except Exception as e:
             logger.debug(f"[{self._call_sid}] LLM warm-up did not complete: {e}")
 
     async def get_chat_completions(self, context):
-        """Ask the primary; on a rate limit, ask the fallback rather than lose the turn."""
+        """Ask the primary; on a rate limit or a missing model, ask the fallback instead.
+
+        Two failures are worth a fallback and they are not alike. A rate limit is this
+        minute's problem, so the primary is asked again next turn. A 404 for the model is
+        the rest of the call's problem, so after the first one the primary is not asked
+        again — see _primary_model_missing.
+        """
+        if self._primary_model_missing and self._fallback_client is not None and self._fallback:
+            return await self._complete_on_fallback(context)
         try:
             completions = await super().get_chat_completions(context)
+        except NotFoundError as exc:
+            self._primary_model_missing = True
+            if self._fallback_client is None or self._fallback is None:
+                raise
+            logger.error(
+                f"[{self._call_sid}] {self._endpoint} has no model {self._endpoint.model!r} "
+                f"(404); switching this call to {self._fallback}. Provider said: {exc}"
+            )
+            return await self._complete_on_fallback(context)
         except RateLimitError as exc:
             self._last_throttle_delay = throttle_delay(
                 str(exc), getattr(getattr(exc, "response", None), "headers", None)
