@@ -74,6 +74,11 @@ class TurnFinalityGate(FrameProcessor):
         self._reply_generation: Optional[int] = None
         self._held: List[Frame] = []
         self._dropped = 0
+        # The generation whose reply must not be spoken at all, whatever it turns out to
+        # say. A generation rather than a flag, because the reply being silenced has usually
+        # not started arriving yet — so there is no frame to mark, only the inference it
+        # will belong to.
+        self._muzzled_generation: Optional[int] = None
 
     @property
     def dropped(self) -> int:
@@ -84,6 +89,28 @@ class TurnFinalityGate(FrameProcessor):
 
     def inference_triggered(self) -> None:
         self._generation += 1
+
+    def discard_reply(self, reason: str) -> None:
+        """Do not speak this turn's reply. Not "say something shorter" — say nothing.
+
+        Dropping what is held is the smaller half. In the ordinary case nothing is held at
+        all: BaseUserTurnStopStrategy closes the turn before the model has answered, so the
+        words are still upstream and arrive to find the gate open. Queueing an interruption
+        does not close that window either, because an interruption takes its own lap through
+        the pipeline and the reply is already travelling.
+
+        That window is the bug. On call 8d86156e the prospect said "wait" four times and the
+        agent replied "Sure, I'll wait" and then said its whole pitch again — the model had
+        understood and answered, and answering was the problem. So the muzzle stays on until
+        a new response begins, which is the first moment there is anything different to say.
+        """
+        held = bool(self._held)
+        self._drop()
+        self._muzzled_generation = self._generation
+        logger.info(
+            f"[{self._call_sid}] Not speaking this turn's reply — {reason}"
+            f"{' (a held one was dropped)' if held else ''}"
+        )
 
     def user_turn_started(self) -> None:
         self._turn_open = True
@@ -98,6 +125,21 @@ class TurnFinalityGate(FrameProcessor):
         await self._flush()
 
     # --- the frame path -----------------------------------------------------------------
+
+    @property
+    def _muzzled(self) -> bool:
+        """Whether the reply now on the wire is the one that was told not to speak.
+
+        Keyed to the inference rather than latched, and the difference is the whole fix. A
+        latch cleared by the next LLMFullResponseStartFrame would be cleared by the very
+        reply it was set to stop, because in the ordinary turn the model has not started
+        answering at the moment the prospect asks for quiet. The next INFERENCE is what
+        earns a voice back, and inference_triggered is what counts them.
+        """
+        return (
+            self._muzzled_generation is not None
+            and self._reply_generation == self._muzzled_generation
+        )
 
     @property
     def _superseded(self) -> bool:
@@ -147,6 +189,12 @@ class TurnFinalityGate(FrameProcessor):
             return
 
         if isinstance(frame, (LLMTextFrame, LLMFullResponseEndFrame)):
+            if self._muzzled:
+                # Swallowed rather than held: nothing here is ever going to be spoken, and
+                # the End frame goes with the text so no half-open response is left behind.
+                if isinstance(frame, LLMFullResponseEndFrame):
+                    self._reply_generation = None
+                return
             if self._superseded:
                 self._held.append(frame)
                 self._drop()

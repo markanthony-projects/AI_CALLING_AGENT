@@ -44,6 +44,7 @@ from app.utils.person_name import spoken_name
 from app.utils.sentences import sentences
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
+from app.utils.hold_request import HOLD_ACK, wants_to_hold
 from app.utils.repeat_request import (
     MAX_REPEAT_REFUSALS,
     REFUSAL_REASON,
@@ -758,6 +759,9 @@ async def run_voice_agent(
     # again. Bounded: a guard meant to save a lead must not become a call nobody can leave.
     _repeat_refusals: int = 0
     _dead_air_nudges: int = 0
+    # True between the prospect asking for a moment and them speaking again. Nothing the
+    # agent says on its own initiative may break that silence.
+    _holding: bool = False
     _last_nudged: str = ""
     # Counted so the machine check only ever runs on the opening turn.
     _turns_heard: int = 0
@@ -927,14 +931,37 @@ async def run_voice_agent(
     @user_agg.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
         nonlocal _empty_user_turns, _user_has_spoken, _turns_heard, _answering_machine
-        nonlocal _dead_air_nudges, _last_nudged
+        nonlocal _dead_air_nudges, _last_nudged, _holding
+        transcript = (message.content or "").strip() if message and hasattr(message, "content") else ""
+        total_turn_time = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
+
+        # Before the gate is released, because releasing it is what puts the reply on the
+        # line. A prospect who asked for a moment gets the moment. See hold_request.py: the
+        # model answers this correctly in words and then keeps talking, so the only thing
+        # that can actually produce silence is the decision not to speak.
+        if transcript and wants_to_hold(transcript):
+            _user_has_spoken = True
+            _holding = True
+            logger.info(
+                f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})"
+            )
+            turn_gate.discard_reply("the prospect asked for a moment")
+            await turn_gate.user_turn_stopped()
+            _turns_heard += 1
+            # The same three steps end_call uses, and for the same reason: an interruption
+            # only takes effect after its own lap through the pipeline, so the flush is what
+            # makes the order something other than a guess.
+            await task.queue_frames([InterruptionWorkerFrame()])
+            await task.flush_pipeline(timeout=2.0)
+            await task.queue_frames(spoken(HOLD_ACK))
+            return
+
         # Releases a held reply, or drops it when a newer inference has superseded it. The
         # strategy fires the inference event before this one, so the check is race-free.
         await turn_gate.user_turn_stopped()
-        transcript = (message.content or "").strip() if message and hasattr(message, "content") else ""
-        total_turn_time = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
         if transcript:
             _user_has_spoken = True
+            _holding = False
             logger.info(f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})")
 
             # "Can you say it again with... little bit slow hai?" — asked twice on a live
@@ -986,6 +1013,11 @@ async def run_voice_agent(
         # false barge-in this counter was built for, the question is already being asked,
         # and repeating it over the top would be worse than the noise that triggered it.
         if _agent_speaking or _llm_in_flight:
+            return
+        # They asked for a moment. VAD firing on a rustle is not them giving it back, and
+        # prompting into their silence is the same interruption the hold was meant to stop —
+        # arriving by a different door.
+        if _holding:
             return
         if _dead_air_nudges >= MAX_DEAD_AIR_NUDGES:
             return

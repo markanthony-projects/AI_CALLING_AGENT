@@ -255,3 +255,104 @@ def test_a_spoken_farewell_flushes_before_the_pipeline_stops():
         rendered = ast.unparse(node)
         if "TTSSpeakFrame" in rendered and "EndFrame()" in rendered:
             pytest.fail(f"speech followed by EndFrame is cut off mid-sentence: {rendered}")
+
+
+# --- and the reply nobody wants to hear ------------------------------------------------
+#
+# Call 8d86156e, 11 Sep 2026. The prospect asked four times, in two languages, for a moment:
+#
+#     USER  → "One second, one second, wait. एक minute रुको. एक minute रुको ma'am."
+#     AGENT → "Sure, I'll wait. As I mentioned, there is a 3-acre golf course and a
+#              1.5-acre private lake. Does that sound like your kind of place?"
+#     USER  → "No, thank you."
+#
+# The words were right and the behaviour was wrong, which is the whole reason this lives in
+# code. See app/utils/hold_request.py.
+
+
+def test_a_discarded_reply_is_not_spoken_even_though_nothing_was_held():
+    """The case that matters and the one that looks like it does not need handling. In the
+    ordinary turn the gate is already open when the model answers — the turn closed first —
+    so there is nothing held to drop and the words walk straight through."""
+    gate, sink = _gate()
+
+    async def run():
+        gate.user_turn_started()
+        gate.inference_triggered()
+        await gate.user_turn_stopped()          # gate now open, nothing held
+        gate.discard_reply("the prospect asked for a moment")
+        await _send(gate, *_reply("Sure, I'll wait. ", "As I mentioned, there is a golf course."))
+        assert sink.spoken == "", sink.spoken
+
+    asyncio.run(run())
+
+
+def test_a_discarded_reply_that_was_held_is_dropped_too():
+    gate, sink = _gate()
+
+    async def run():
+        gate.user_turn_started()
+        gate.inference_triggered()
+        await _send(gate, *_reply("As I mentioned, there is a golf course."))
+        gate.discard_reply("the prospect asked for a moment")
+        await gate.user_turn_stopped()
+        assert sink.spoken == ""
+
+    asyncio.run(run())
+
+
+def test_an_interruption_does_not_lift_the_muzzle():
+    """Because the interruption is ours. Discarding queues one, and a muzzle it cancelled
+    would leave the pipeline exactly as it was — which is the bug, not the fix."""
+    gate, sink = _gate()
+
+    async def run():
+        gate.user_turn_started()
+        gate.inference_triggered()
+        await gate.user_turn_stopped()
+        gate.discard_reply("the prospect asked for a moment")
+        await _send(gate, InterruptionFrame())
+        await _send(gate, *_reply("Does that sound like your kind of place?"))
+        assert sink.spoken == ""
+
+    asyncio.run(run())
+
+
+def test_the_next_turn_speaks_normally_again():
+    """A muzzle that outlived its turn would be a call that never talks again. The new
+    response is the first moment there is anything different to say, so it is what lifts."""
+    gate, sink = _gate()
+
+    async def run():
+        gate.user_turn_started()
+        gate.inference_triggered()
+        await gate.user_turn_stopped()
+        gate.discard_reply("the prospect asked for a moment")
+        await _send(gate, *_reply("swallowed"))
+        gate.user_turn_started()
+        gate.inference_triggered()
+        await gate.user_turn_stopped()
+        await _send(gate, *_reply("Sure. So, about the 3 BHK —"))
+        assert sink.spoken == "Sure. So, about the 3 BHK —"
+
+    asyncio.run(run())
+
+
+def test_what_the_agent_says_instead_is_not_swallowed_with_it():
+    """The acknowledgement is queued at the task source and travels through this gate like
+    anything else. If the muzzle caught it too, the prospect would hear nothing at all."""
+    from pipecat.frames.frames import TTSSpeakFrame
+
+    from app.utils.hold_request import HOLD_ACK
+
+    gate, sink = _gate()
+
+    async def run():
+        gate.user_turn_started()
+        gate.inference_triggered()
+        await gate.user_turn_stopped()
+        gate.discard_reply("the prospect asked for a moment")
+        await _send(gate, TTSSpeakFrame(HOLD_ACK))
+        assert [getattr(f, "text", None) for f in sink.frames] == [HOLD_ACK]
+
+    asyncio.run(run())
