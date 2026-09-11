@@ -34,12 +34,56 @@ THE_LIVE_ONE = (
     "एक minute रुको. एक minute रुको ma'am."
 )
 
+# Call da2f64fd, 11 Sep 2026 — the first live test of the guard above, which did not fire.
+# "One" on its own is not a hold and was not filler, so one stuttered word threw out the
+# whole utterance. The agent got lucky: the model happened to answer "No problem at all.
+# Take your time." of its own accord. The next prospect would not have been.
+THE_ONE_THAT_STILL_GOT_THROUGH = "Hold on, hold on. One one minute."
+
 
 # --- the utterance this exists for ------------------------------------------------------
 
 
 def test_the_line_that_lost_the_call():
     assert wants_to_hold(THE_LIVE_ONE) is True
+
+
+def test_the_line_that_slipped_past_the_first_version():
+    assert wants_to_hold(THE_ONE_THAT_STILL_GOT_THROUGH) is True
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "One one minute",
+        "one one minute please",
+        "ek ek minute",
+        "एक एक minute",
+        "hold on hold on",
+        "two two minutes",
+        "wait wait wait wait",
+    ],
+)
+def test_people_stutter_when_they_want_you_to_stop(said):
+    """The repetition is not noise around the request. On a phone call it IS the request,
+    said twice because the agent did not stop the first time — so a pattern that treats the
+    repeated word as foreign content fails exactly when it is needed most."""
+    assert wants_to_hold(said) is True
+
+
+@pytest.mark.parametrize("said", ["sorry one second", "just one second", "hold", "a minute"])
+def test_the_ordinary_ways_of_asking(said):
+    assert wants_to_hold(said) is True
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["one crore", "एक crore", "a 3 BHK", "two BHK", "one two three", "a villa or a plot"],
+)
+def test_a_loose_number_is_not_a_request_for_silence(said):
+    """What widening the filler risks, and the reason _HAS_A_HOLD still has to find a real
+    hold phrase: a budget, a configuration and a count are numbers too."""
+    assert wants_to_hold(said) is False
 
 
 def test_the_number_and_the_unit_may_be_in_different_scripts():

@@ -43,7 +43,7 @@ _HOLD = (
     r"(?:"
     r"\b(?:just\s+)?(?:one|a|two|2|1)\s*(?:second|seconds|sec|secs|minute|minutes|min|mins|moment)\b"
     r"|\bgive\s+me\s+(?:a|one|two)\s*(?:second|sec|minute|min|moment)\b"
-    r"|\bhold\s+on\b|\bhang\s+on\b|\bhold\s+please\b"
+    r"|\bhold\s+on\b|\bhang\s+on\b|\bhold\b"
     r"|\bwait\b"
     r"|\blet\s+me\s+(?:check|see|think|look)\b"
     r"|\bek\s*(?:minute|min|minat|second|sec)\b"
@@ -57,12 +57,23 @@ _HOLD = (
     r")"
 )
 
-# Words that can sit around a hold without changing what it is: politeness, hesitation, and
-# the agreement people put in front of a request. On their own they are NOT a hold — "ok ok"
-# is somebody listening, and app/utils/barge_in.py already knows what to do with that.
+# Words that can sit around a hold without changing what it is: politeness, hesitation, the
+# agreement people put in front of a request — and a stray number, because people stutter.
+#
+# "Hold on, hold on. One one minute." is the live line from call da2f64fd, and the first
+# version of this missed it: the second "one" was neither a hold nor filler, so the anchor
+# threw the whole utterance out. That is twice now that a pattern built from the tidy form
+# of a phrase has missed the untidy one people actually say — first "एक minute" across two
+# scripts, then a repeated word. The repetition is not noise around the request. On a phone
+# call it IS the request, said twice because the agent did not stop the first time.
+#
+# Safe to widen because none of these can make a hold on their own: _HAS_A_HOLD still
+# demands a real hold phrase, so "one two" is nothing and "एक crore" is still a budget.
 _AROUND_IT = (
     r"(?:ma'?am|madam|sir|please|plz|ji|bhai|yaar|na|to|toh|ok|okay|okey|haan|haa|han"
-    r"|and|um|uh|er|hmm|hm|मैडम|सर|जी|हाँ|हां|और)"
+    r"|sorry|just|and|um|uh|er|hmm|hm"
+    r"|one|two|a|an|ek|do"
+    r"|मैडम|सर|जी|हाँ|हां|और|एक|दो|माफ़|माफ)"
 )
 
 _ONLY_A_HOLD = re.compile(rf"^\s*(?:(?:{_HOLD}|{_AROUND_IT})[\s,.!?।-]*)+$", re.I)
