@@ -47,6 +47,7 @@ from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.hold_request import HOLD_ACK, wants_to_hold
 from app.utils.repeat_request import (
     MAX_REPEAT_REFUSALS,
+    checking_the_line,
     REFUSAL_REASON,
     say_again,
     wants_repeat,
@@ -165,6 +166,27 @@ def build_opening_line(
         f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from {identity}. "
         f"Can I speak to you for a minute?"
     )
+
+def build_reintroduction(
+    project_name: str,
+    customer_name: Optional[str] = None,
+    developer_name: Optional[str] = None,
+) -> str:
+    """Said when their first words are "Hello?" — they heard the line, not the sentence.
+
+    The greeting without the time of day. "Good afternoon" is true once; said twice inside
+    ten seconds it is the single most obviously automated thing a caller can hear. What has
+    to come back is the part they missed: who this is, and the question that hands them the
+    turn.
+    """
+    name = spoken_name(customer_name)
+    address = f" {name}" if name else ""
+    identity = caller_identity(project_name, developer_name).rstrip(".")
+    return (
+        f"Hi{address}. I am {AGENT_NAME} from {identity}. "
+        f"Can I speak to you for a minute?"
+    )
+
 
 def spoken(text: str, *, append_to_context: bool = True) -> list[TTSSpeakFrame]:
     """The frames to queue so the system says `text` the way the model's replies are said.
@@ -934,6 +956,32 @@ async def run_voice_agent(
         nonlocal _dead_air_nudges, _last_nudged, _holding
         transcript = (message.content or "").strip() if message and hasattr(message, "content") else ""
         total_turn_time = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
+
+        # Their first words are "Hello?" — they have heard a line, not a sentence. Answering
+        # that with the pitch is how call a7f92175 was over in twenty-seven seconds: the
+        # greeting had played, the prospect said "Hello.", the model replied with thirty
+        # words about the project, and what came back was "Regarding what No no, thank you."
+        #
+        # The prompt has forbidden this since the OBJECTIONS section was written — "say sorry
+        # in a few words, then repeat your last question" — and it has now been ignored on
+        # three calls. Same shape as the hold: the model knows and does it anyway.
+        #
+        # Only before its first reply. Later in the call a line check means something else,
+        # and GreetingOnlyMinWords already holds those until the agent stops speaking.
+        if transcript and _turns_heard == 0 and checking_the_line(transcript):
+            _user_has_spoken = True
+            logger.info(
+                f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})"
+            )
+            turn_gate.discard_reply("they are checking the line, not asking for the pitch")
+            await turn_gate.user_turn_stopped()
+            _turns_heard += 1
+            again = build_reintroduction(project_name, customer_name, developer_name)
+            await task.queue_frames([InterruptionWorkerFrame()])
+            await task.flush_pipeline(timeout=2.0)
+            logger.info(f"[{call_sid}] AGENT → \"{again}\"")
+            await task.queue_frames(spoken(again))
+            return
 
         # Before the gate is released, because releasing it is what puts the reply on the
         # line. A prospect who asked for a moment gets the moment. See hold_request.py: the

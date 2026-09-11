@@ -87,6 +87,22 @@ def wants_repeat(line: Optional[str]) -> bool:
     return bool(_REPEAT.search(text) or _LINE_CHECK.search(text))
 
 
+def checking_the_line(line: Optional[str]) -> bool:
+    """True when the words are only "is this call still on?" and nothing else.
+
+    A narrower question than wants_repeat: that one also covers "say it again", which asks
+    for the last thing back. This one is somebody who has heard NOTHING yet and is checking
+    the line is alive — and answering it with a sales pitch is how call a7f92175 was over in
+    twenty-seven seconds.
+    """
+    if not line or not line.strip():
+        return False
+    text = line.strip()
+    if _REFUSAL.search(text):
+        return False
+    return bool(_LINE_CHECK.search(text))
+
+
 def say_again(agent_line: Optional[str]) -> str:
     """What to say when there is no way to hand the turn back to the model.
 

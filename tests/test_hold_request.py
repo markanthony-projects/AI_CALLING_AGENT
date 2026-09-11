@@ -276,5 +276,96 @@ def test_the_hold_is_counted_as_a_turn_heard():
     """It is the prospect speaking. A turn that does not count reads as an unresponsive
     call to every downstream decision that looks at _turns_heard."""
     src = _handler()
-    hold_branch = src[src.index("wants_to_hold") : src.index("discard_reply") + 400]
+    # From wants_to_hold forward: there is a second discard_reply earlier in the handler now,
+    # for the line check, and index() from the start of the string finds that one instead.
+    start = src.index("wants_to_hold")
+    hold_branch = src[start : src.index("discard_reply", start) + 400]
     assert "_turns_heard += 1" in hold_branch
+
+
+# --- "Hello?" is not "tell me about the project" ----------------------------------------
+#
+# Call a7f92175, 11 Sep 2026. Twenty-seven seconds, start to finish:
+#
+#     AGENT → "Hi, Good afternoon Rahul. I am Priya... Can I speak to you for a minute?"
+#     USER  → "Hello."
+#     AGENT → "We are launching a new project in Varthur, Sarjapur Road. It is called
+#              Abhee Codename New Dimension. It is Bengaluru's first Scotland-themed
+#              residential township. Are you looking for any property purchase?"
+#     USER  → "Regarding what No no, thank you."
+#
+# They said one word, got thirty back, and still did not know why they were being called.
+
+
+def test_a_line_check_is_not_consent_to_pitch():
+    from app.utils.repeat_request import checking_the_line
+
+    for said in ["Hello.", "Hello?", "hello", "Are you there?", "can you hear me"]:
+        assert checking_the_line(said) is True, said
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["Yeah tell me", "3 BHK", "not interested", "Hello, yes, who is this?", "say it again"],
+)
+def test_anything_with_a_conversation_in_it_is_not_a_line_check(said):
+    """"Hello, yes, who is this?" is somebody talking. Re-introducing over that would be the
+    agent answering a question nobody asked."""
+    from app.utils.repeat_request import checking_the_line
+
+    assert checking_the_line(said) is False
+
+
+def test_it_only_applies_before_the_agent_has_said_anything_of_its_own():
+    """Later in the call a "Hello?" means the line went quiet mid-sentence, and
+    GreetingOnlyMinWords already holds those until the agent finishes. Re-introducing at turn
+    six would be worse than the bug."""
+    src = _handler()
+    guard = src[src.index("checking_the_line") - 200 : src.index("checking_the_line") + 60]
+    assert "_turns_heard == 0" in guard
+
+
+def test_the_reintroduction_drops_the_time_of_day():
+    """"Good afternoon" is true once. Said twice inside ten seconds it is the single most
+    obviously automated thing on the call."""
+    from app.services.agent import build_opening_line, build_reintroduction
+
+    again = build_reintroduction("Some Project", "RAHUL", developer_name="Some Developer")
+    assert "Good" not in again
+    assert "afternoon" not in again and "morning" not in again and "evening" not in again
+    # but it still says who is calling and still hands the turn over
+    assert "Rahul" in again
+    assert "Some Developer" in again
+    assert again.rstrip().endswith("?")
+    assert build_opening_line("Some Project", "RAHUL", developer_name="Some Developer") != again
+
+
+def test_the_reintroduction_survives_a_missing_name():
+    """The dial list has blanks, and a greeting that says "Hi ." is worse than one that just
+    starts."""
+    again = None
+    from app.services.agent import build_reintroduction
+
+    for missing in (None, "", "   "):
+        again = build_reintroduction("Some Project", missing, developer_name="Some Developer")
+        assert "Hi." in again or "Hi " in again
+        assert "  " not in again
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "can you hear me, I said do not call again",
+        "are you there? not interested",
+        "stop calling, can you hear me",
+    ],
+)
+def test_somebody_refusing_is_not_checking_the_line(said):
+    """Both at once is a real thing to say: they cannot hear well AND they want off the
+    call. Re-introducing there would restart a call the person is trying to end, and this
+    codebase does not hold anybody on a line.
+
+    Mutation testing found it: the refusal check was removable with nothing failing."""
+    from app.utils.repeat_request import checking_the_line
+
+    assert checking_the_line(said) is False
