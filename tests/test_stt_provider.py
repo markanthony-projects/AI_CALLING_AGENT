@@ -15,13 +15,14 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+from loguru import logger
 
 from app.services.stt_provider import (
     DEEPGRAM,
     PROVIDERS,
     SARVAM,
     SttEndpoint,
-    build_stt_service,
+    build_listening,
     stt_endpoint,
 )
 
@@ -34,6 +35,11 @@ def fake(**overrides):
         STT_ENDPOINTING_MS=300,
         DEEPGRAM_API_KEY="test",
         SARVAM_API_KEY="test",
+        # Read by the end-of-turn half of the plan: the timer providers need the settle
+        # window, and Flux needs its two thresholds (None = the service's own defaults).
+        TURN_SETTLE_SECS=0.4,
+        STT_EOT_THRESHOLD=None,
+        STT_EOT_TIMEOUT_MS=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -69,7 +75,7 @@ def test_the_agent_no_longer_builds_its_own():
     from app.services import agent
 
     src = inspect.getsource(agent.run_voice_agent)
-    assert "build_stt_service(call_sid, settings)" in src
+    assert "build_listening(call_sid, settings)" in src
     assert "DeepgramSTTService(" not in src
 
 
@@ -104,15 +110,15 @@ def test_the_endpoint_prints_as_something_a_log_can_carry():
 
 
 def test_deepgram_is_built_with_the_configured_model():
-    service = build_stt_service("sid", fake(STT_MODEL="nova-3", STT_LANGUAGE="multi"))
-    assert type(service).__name__ == "DeepgramSTTService"
+    plan = build_listening("sid", fake(STT_MODEL="nova-3", STT_LANGUAGE="multi"))
+    assert type(plan.service).__name__ == "DeepgramSTTService"
 
 
 def test_sarvam_is_built_when_it_is_the_one_configured():
-    service = build_stt_service(
+    plan = build_listening(
         "sid", fake(STT_PROVIDER="sarvam", STT_MODEL="saaras:v3", STT_LANGUAGE="hi")
     )
-    assert type(service).__name__ == "SarvamSTTService"
+    assert type(plan.service).__name__ == "SarvamSTTService"
 
 
 # --- the two providers do not spell a language the same way -------------------------------
@@ -152,29 +158,29 @@ def test_an_unmapped_code_passes_through_rather_than_vanishing():
 
 def test_the_mapping_is_applied_where_the_service_is_built():
     """A helper nothing calls is a helper that does not run on a call."""
-    service = build_stt_service(
+    plan = build_listening(
         "sid", fake(STT_PROVIDER="sarvam", STT_MODEL="saarika:v2.5", STT_LANGUAGE="hi")
     )
-    assert service._settings.language == "hi-IN"
+    assert plan.service._settings.language == "hi-IN"
 
 
 def test_deepgram_still_gets_the_plain_code():
     """The dialect belongs to Sarvam. Sending Deepgram "hi-IN" would change what it listens
     for on every existing call, for a switch nobody made."""
-    service = build_stt_service("sid", fake(STT_LANGUAGE="hi"))
-    assert service._settings.language == "hi"
+    plan = build_listening("sid", fake(STT_LANGUAGE="hi"))
+    assert plan.service._settings.language == "hi"
 
 
 def test_switching_provider_does_not_silently_change_the_language():
     """One STT_LANGUAGE feeds both, so the dialect has to live in the builder. Left in the
     env file, flipping STT_PROVIDER would also flip what language the call is in."""
     settings = fake(STT_LANGUAGE="hi")
-    deepgram = build_stt_service("sid", settings)
-    sarvam = build_stt_service(
+    deepgram = build_listening("sid", settings)
+    sarvam = build_listening(
         "sid", fake(STT_PROVIDER="sarvam", STT_MODEL="saarika:v2.5", STT_LANGUAGE="hi")
     )
-    assert str(deepgram._settings.language).startswith("hi")
-    assert str(sarvam._settings.language).startswith("hi")
+    assert str(deepgram.service._settings.language).startswith("hi")
+    assert str(sarvam.service._settings.language).startswith("hi")
 
 
 def test_every_provider_has_a_builder():
@@ -199,3 +205,132 @@ def test_the_sample_rate_is_not_configurable():
         if k.arg == "sample_rate"
     ]
     assert rates and set(rates) == {"SAMPLE_RATE"}, rates
+
+
+# --- a service that decides the turn, and the plan that carries that fact ---------------------
+#
+# Measured on call ba83d740, 11 Sep 2026: p50 1289ms of which turn_decision was 602ms. Nearly
+# half of everything the caller waits through, spent working out that they had finished — VAD
+# stop_secs plus TURN_SETTLE_SECS, before a word reaches the model. Flux decides that on
+# Deepgram's side and pushes the frames itself, so there is nothing left here to wait on.
+
+
+def _plan(**over):
+    return build_listening("sid", fake(**{"STT_PROVIDER": "flux", "STT_MODEL": "flux-general-multi", **over}))
+
+
+def test_flux_is_a_provider_like_any_other():
+    assert "flux" in PROVIDERS
+    assert type(_plan().service).__name__ == "DeepgramFluxSTTService"
+
+
+def test_a_transcribing_service_leaves_the_turn_to_the_timer():
+    """Somebody has to guess, and a stopwatch is all there is."""
+    for provider, model in (("deepgram", "nova-2-general"), ("sarvam", "saarika:v2.5")):
+        plan = build_listening("sid", fake(STT_PROVIDER=provider, STT_MODEL=model))
+        assert type(plan.stop_strategy).__name__ == "SpeechTimeoutUserTurnStopStrategy"
+
+
+def test_a_service_that_knows_takes_the_turn_off_the_timer():
+    """The point of the whole exercise. ExternalUserTurnStopStrategy has no
+    user_speech_timeout at all — the 400ms window simply stops existing."""
+    plan = _plan()
+    assert type(plan.stop_strategy).__name__ == "ExternalUserTurnStopStrategy"
+    assert not hasattr(plan.stop_strategy, "_user_speech_timeout")
+
+
+def test_the_timer_window_comes_from_the_setting_that_names_it():
+    plan = build_listening("sid", fake(TURN_SETTLE_SECS=0.9))
+    assert plan.stop_strategy._user_speech_timeout == 0.9
+
+
+def test_every_provider_says_who_owns_its_turns():
+    """A provider with a builder and no turn owner would build a service and then raise
+    KeyError on a live call — the same failure _BUILDERS is checked for above."""
+    from app.services.stt_provider import _TURN_OWNERS
+
+    assert set(_TURN_OWNERS) == set(PROVIDERS)
+
+
+def test_flux_does_not_take_barge_in_away():
+    """should_interrupt=False, and it is why this can be adopted one piece at a time. Left
+    True, Flux interrupts the agent the moment it hears speech — and "Hello?" learning not
+    to cut the agent off mid-sentence, earned on call 5023ff25, lives in the START strategy
+    on our side. Flux is bought for the END of a turn and nothing else.
+
+    Asserted on the built service, not on the source text: this test used to grep _flux for
+    the keyword, and a mutation run showed it stayed green when the docstring above still
+    said should_interrupt=False and the argument no longer did."""
+    assert _plan().service._should_interrupt is False
+
+
+def test_hinglish_is_described_to_it_as_both_languages():
+    """The language people speak on these calls is neither Hindi nor English on its own, and
+    flux-general-multi is the model that can be told so."""
+    from pipecat.transcriptions.language import Language
+
+    plan = _plan(STT_LANGUAGE="hi,en-IN")
+    assert plan.service._settings.language_hints == [Language.HI, Language.EN_IN]
+
+
+def test_a_single_language_still_works_unchanged():
+    from pipecat.transcriptions.language import Language
+
+    assert _plan(STT_LANGUAGE="hi").service._settings.language_hints == [Language.HI]
+
+
+def test_a_language_flux_does_not_know_is_dropped_with_a_warning():
+    """Flux ignores hints it cannot read, so a typo would change nothing and say nothing."""
+    seen = []
+    handle = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        plan = _plan(STT_LANGUAGE="hi,klingon")
+    finally:
+        logger.remove(handle)
+    assert len(plan.service._settings.language_hints) == 1
+    assert any("klingon" in line for line in seen)
+
+
+def test_a_messily_written_setting_is_read_the_way_it_was_meant():
+    """STT_LANGUAGE is typed by hand into an env file, and " hi , en-IN , " is what a hand
+    types. The spaces and the trailing comma have to be read as two languages and nothing
+    else — an empty entry survives as far as Language(""), which is dropped, but only after
+    logging a warning about a language nobody wrote."""
+    from pipecat.transcriptions.language import Language
+
+    seen = []
+    handle = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        plan = _plan(STT_LANGUAGE=" hi , en-IN , ")
+    finally:
+        logger.remove(handle)
+    assert plan.service._settings.language_hints == [Language.HI, Language.EN_IN]
+    assert not seen, seen
+
+
+def test_the_thresholds_are_left_to_the_service_unless_somebody_sets_them():
+    """Checked on the query string the service actually connects with, not on the settings
+    object: the SDK normalises its own sentinel to None internally, and it is the URL that
+    decides whether Deepgram hears an override or its default."""
+    query = _plan().service._build_query_string()
+    assert "eot_threshold" not in query
+    assert "eot_timeout_ms" not in query
+
+
+def test_the_thresholds_are_sent_when_somebody_does():
+    query = _plan(STT_EOT_THRESHOLD=0.55, STT_EOT_TIMEOUT_MS=2500).service._build_query_string()
+    assert "eot_threshold=0.55" in query
+    assert "eot_timeout_ms=2500" in query
+
+
+def test_the_hinglish_hints_reach_the_connection():
+    """language_hints are only honoured on flux-general-multi, and the service drops them
+    with a warning on any other model — so the hint and the model have to agree here."""
+    query = _plan(STT_LANGUAGE="hi,en-IN").service._build_query_string()
+    assert query.count("language_hint") == 2
+
+
+def test_the_plan_prints_both_halves_for_the_log():
+    """One line in the call log saying what we listen with AND who ends the turn — the two
+    things that have to be known to read any latency number that follows."""
+    assert str(_plan()) == "flux/flux-general-multi (turns: ExternalUserTurnStopStrategy)"

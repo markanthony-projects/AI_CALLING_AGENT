@@ -24,7 +24,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
-from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.types import ProcessFrameResult
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
@@ -80,7 +79,7 @@ class GreetingOnlyMinWords(MinWordsUserTurnStartStrategy):
             self._deferred_line_check = False
             await self.trigger_user_turn_started()
 from app.core.config import settings
-from app.services.stt_provider import build_stt_service
+from app.services.stt_provider import build_listening
 from app.services.llm_provider import (
     MAX_THROTTLE_WAIT_SECS,
     build_llm_service,
@@ -434,7 +433,11 @@ async def run_voice_agent(
     # inside the same await, so a 429 reached the logs as `groq=14605ms` with no error and
     # the caller sat through all fourteen seconds of it. See app/services/llm_provider.py.
     llm = build_llm_service(call_sid, settings)
-    stt = build_stt_service(call_sid, settings)
+    # The ears, and the end-of-turn decision that comes with them. One object because they
+    # are one choice: a service that only transcribes leaves the turn to a timer, and one
+    # that decides end-of-turn itself takes that timer away. See app/services/stt_provider.py.
+    listening = build_listening(call_sid, settings)
+    stt = listening.service
     
     # Passed only when somebody has set it. Unset, the key stays out of the connect payload
     # exactly as it has on every call so far, so a deployment cannot change the voice on its
@@ -689,14 +692,13 @@ async def run_voice_agent(
     # firing starts the turn — so leaving VAD in place would keep barging in on the first
     # syllable and this would change nothing. Stop strategies are untouched.
     greeting_gate = GreetingOnlyMinWords(min_words=settings.INTERRUPT_MIN_WORDS)
-    # The stop strategy is named rather than left to default for the same reason. Pipecat's
-    # default is a Smart Turn ONNX model that predicts semantic completeness from the audio;
-    # on PSTN it ruled "Maybe around in 2" a finished turn, so "months." arrived as a second
-    # turn and each half cost its own full LLM request. A settle window is blunter but it
-    # cannot mispredict, it costs no CPU per turn, and both observed splits were under 0.75s.
-    stop_strategy = SpeechTimeoutUserTurnStopStrategy(
-        user_speech_timeout=settings.TURN_SETTLE_SECS
-    )
+    # Who decides the turn is over comes from the speech service, because it depends on
+    # whether that service knows. Pipecat's own default here is a Smart Turn ONNX model; it
+    # is not used, and the reason is not timidity — the transport parameter that used to
+    # carry an analyzer no longer exists in 1.5, so SMART_TURN_ENABLED wires an object to
+    # nothing. The real choice is between a stopwatch and a service that says so, and
+    # stt_provider makes it once. See app/services/stt_provider.py.
+    stop_strategy = listening.stop_strategy
     user_agg = LLMUserAggregator(
         context=context,
         params=LLMUserAggregatorParams(

@@ -165,6 +165,21 @@ class Settings(BaseSettings):
     # under TURN_SETTLE_SECS on purpose; see the note there.
     STT_ENDPOINTING_MS: int = Field(default=300, ge=10, le=5000)
 
+    # --- end-of-turn, for a provider that decides it -------------------------------------
+    #
+    # Only read by STT_PROVIDER=flux, where the end of a turn is decided on Deepgram's side
+    # and this pipeline stops guessing. Both default to None, meaning "whatever the service
+    # does" — the service's own defaults are 0.7 and 5000ms, and moving either without a
+    # measured call is how a tuning knob becomes a regression.
+    #
+    # Lower threshold: turns end sooner, faster replies, more chance of cutting somebody off
+    # mid-thought. Higher: the opposite. It is the same trade TURN_SETTLE_SECS makes with a
+    # stopwatch, made instead by a model that has heard the sentence.
+    STT_EOT_THRESHOLD: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # The hard cap: end the turn at this point whatever the confidence. On a phone call the
+    # service default of five seconds is a long time to sit in silence.
+    STT_EOT_TIMEOUT_MS: Optional[int] = Field(default=None, ge=200, le=10000)
+
     # Semantic end-of-turn detection, off by default.
     #
     # Pipecat's own model, bundled with the package and run locally on CPU. It answers the

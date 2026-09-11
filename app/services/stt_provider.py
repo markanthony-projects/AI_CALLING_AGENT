@@ -23,9 +23,16 @@ place to look when a call transcribes badly and somebody asks what it was listen
 from dataclasses import dataclass
 
 from loguru import logger
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.stt_service import STTService
+from pipecat.transcriptions.language import Language
+from pipecat.turns.user_stop import (
+    ExternalUserTurnStopStrategy,
+    SpeechTimeoutUserTurnStopStrategy,
+)
+from pipecat.turns.user_stop.base_user_turn_stop_strategy import BaseUserTurnStopStrategy
 
 # The audio the transport hands over. Not configurable: the serializer, the VAD and the
 # turn analyzer all assume it, and a provider that cannot take it needs its own resampling
@@ -34,7 +41,8 @@ SAMPLE_RATE = 16000
 
 DEEPGRAM = "deepgram"
 SARVAM = "sarvam"
-PROVIDERS = (DEEPGRAM, SARVAM)
+FLUX = "flux"
+PROVIDERS = (DEEPGRAM, SARVAM, FLUX)
 
 
 @dataclass(frozen=True)
@@ -102,6 +110,38 @@ _SARVAM_LANGUAGE = {
 }
 
 
+def languages(endpoint: SttEndpoint) -> list:
+    """STT_LANGUAGE as a list. One setting, because one call has one language policy.
+
+    Most services take a single code and read the first. Flux's multilingual model takes
+    several, which is what a Hinglish call needs: "hi,en-IN".
+    """
+    return [part.strip() for part in (endpoint.language or "").split(",") if part.strip()]
+
+
+def _timer_turns(settings) -> BaseUserTurnStopStrategy:
+    """The turn is over when nobody has spoken for a while. A guess, and a measured 600ms
+    of it on every turn — VAD stop_secs plus this window — but the only thing available
+    when the service does no more than transcribe."""
+    return SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=settings.TURN_SETTLE_SECS)
+
+
+def _service_turns(settings) -> BaseUserTurnStopStrategy:
+    """The turn is over when the speech service says so. It pushes the frames itself, so
+    there is nothing here to wait on and no window to pay.
+
+    One thing to read the first live call for. This strategy only fires on
+    UserStoppedSpeakingFrame if a transcript has already reached it; otherwise it falls
+    through to a 0.5s aggregation timeout, which would cost more than the 600ms window it
+    was brought in to remove. Flux pushes them in the right order — TranscriptionFrame, then
+    UserStoppedSpeakingFrame, both in _handle_end_of_turn — but the transcript is pushed
+    downstream and the stop frame is broadcast, and those are not the same path. If the
+    first Flux call shows turns landing ~500ms late, this is the reason, and the fix is the
+    strategy's `timeout`, not the settle window.
+    """
+    return ExternalUserTurnStopStrategy()
+
+
 def sarvam_language(code: str) -> str:
     """Sarvam's spelling of a language code, or the code unchanged if it already is one."""
     lowered = (code or "").strip().lower()
@@ -119,11 +159,89 @@ def _sarvam(endpoint: SttEndpoint, settings) -> STTService:
     )
 
 
-_BUILDERS = {DEEPGRAM: _deepgram, SARVAM: _sarvam}
+def _flux(endpoint: SttEndpoint, settings) -> STTService:
+    """Deepgram Flux: transcription and end-of-turn from the same socket.
+
+    `should_interrupt=False` on purpose, and it is the whole reason this can be adopted one
+    piece at a time. Flux will happily interrupt the agent the moment it hears speech, which
+    would take barge-in away from GreetingOnlyMinWords — and that is where "Hello?" was
+    taught not to cut the agent off mid-sentence, earned on call 5023ff25. So Flux is bought
+    for the end of a turn and nothing else; who is allowed to interrupt stays where it is.
+    """
+    return DeepgramFluxSTTService(
+        api_key=settings.DEEPGRAM_API_KEY,
+        sample_rate=SAMPLE_RATE,
+        should_interrupt=False,
+        settings=DeepgramFluxSTTService.Settings(
+            model=endpoint.model,
+            language_hints=_flux_hints(endpoint),
+            # Unset means unset: the service builds its connection URL with `is not None`,
+            # so None and the SDK's own NOT_GIVEN sentinel both leave the parameter off it
+            # and Deepgram applies its defaults (0.7 and 5000ms). Checked, because the
+            # obvious alternative — omitting the keys when unset — is a branch that buys
+            # nothing. tests/test_stt_provider.py reads the query string it connects with.
+            eot_threshold=settings.STT_EOT_THRESHOLD,
+            eot_timeout_ms=settings.STT_EOT_TIMEOUT_MS,
+        ),
+    )
 
 
-def build_stt_service(call_sid: str, settings) -> STTService:
-    """Assemble the call's speech-to-text service from configuration alone."""
+def _flux_hints(endpoint: SttEndpoint) -> list:
+    """STT_LANGUAGE read as the list Flux's multilingual model wants.
+
+    "hi,en-IN" is how a Hinglish call is described to it — the language people actually
+    speak on these calls is neither of them on its own. Unknown codes are dropped rather
+    than sent: Flux ignores hints it does not know, and a typo that silently changes nothing
+    is worse than one that shows up as a missing hint here.
+    """
+    hints = []
+    for code in languages(endpoint):
+        try:
+            hints.append(Language(code))
+        except ValueError:
+            logger.warning(f"Ignoring STT_LANGUAGE entry {code!r}: not a language Flux knows")
+    return hints
+
+
+# Each provider knows how to build itself and what its arrival means for turn-taking. Adding
+# one is a function and a line here; nothing else in the codebase learns its name.
+_BUILDERS = {DEEPGRAM: _deepgram, SARVAM: _sarvam, FLUX: _flux}
+
+# Who decides a user turn is over. The timer is the default because most services only
+# transcribe and somebody has to guess; Flux is the exception that knows, and says so.
+_TURN_OWNERS = {DEEPGRAM: _timer_turns, SARVAM: _timer_turns, FLUX: _service_turns}
+
+
+@dataclass(frozen=True)
+class Listening:
+    """What the agent listens with, and what that choice implies for turn-taking.
+
+    These two travel together because they are one decision. A service that only
+    transcribes leaves the pipeline to guess when a turn ended, with a timer — 600ms per
+    turn on this deployment, measured, and 47% of everything the caller waits through. A
+    service that decides end-of-turn itself removes that guess, and removing it is the whole
+    reason for choosing such a service.
+
+    Returned as one object so no caller has to ask which provider is configured in order to
+    wire the pipeline correctly. That question has exactly one right answer per provider,
+    and it is answered here.
+    """
+
+    endpoint: SttEndpoint
+    service: STTService
+    stop_strategy: BaseUserTurnStopStrategy
+
+    def __str__(self) -> str:
+        return f"{self.endpoint} (turns: {type(self.stop_strategy).__name__})"
+
+
+def build_listening(call_sid: str, settings) -> Listening:
+    """Assemble the call's ears, and the end-of-turn decision that comes with them."""
     endpoint = stt_endpoint(settings)
-    logger.info(f"[{call_sid}] Listening with {endpoint}")
-    return _BUILDERS[endpoint.provider](endpoint, settings)
+    listening = Listening(
+        endpoint=endpoint,
+        service=_BUILDERS[endpoint.provider](endpoint, settings),
+        stop_strategy=_TURN_OWNERS[endpoint.provider](settings),
+    )
+    logger.info(f"[{call_sid}] Listening with {listening}")
+    return listening

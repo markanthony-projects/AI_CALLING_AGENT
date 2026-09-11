@@ -396,17 +396,24 @@ def test_the_turn_stop_strategy_is_named_rather_than_defaulted():
 
 
 def test_the_settle_window_is_configurable():
-    src = inspect.getsource(agent.run_voice_agent)
-    start = src.index("SpeechTimeoutUserTurnStopStrategy(")
-    assert "settings.TURN_SETTLE_SECS" in src[start : src.index(")", start)]
+    """The strategy moved out of the agent on 11 Sep: who ends a turn now comes from the
+    speech service, because it depends on whether that service knows. The window still has
+    to come from the setting that names it — see tests/test_stt_provider.py for the rest."""
+    from app.services import stt_provider
+
+    src = inspect.getsource(stt_provider._timer_turns)
+    assert "settings.TURN_SETTLE_SECS" in src
 
 
 def test_the_settle_window_is_short_enough_to_be_worth_paying_on_every_turn():
     """It used to need 0.75s to cover the two observed splits (~50ms and ~739ms apart),
     because a split turn put two replies on the line. TurnFinalityGate holds the stale half
     back now, so a split costs one extra inference and the caller hears nothing wrong — and
-    this window went back to being pure latency. It is silence on every single turn, and it
-    is invisible in the LATENCY log lines, which start counting after it has elapsed.
+    this window went back to being pure latency.
+
+    Measured on call ba83d740: it is 602ms of a 1289ms p50 once VAD stop_secs is counted
+    with it — 47% of everything the caller waits through, before a word reaches the model.
+    Which is why a service that decides end-of-turn itself is worth changing STT for.
     """
     assert _settings().TURN_SETTLE_SECS <= 0.5
 
