@@ -57,6 +57,19 @@ _CALL_MODULES = {
     # code that cannot be told apart from missing code.
     "app.services.stt_provider",
     "app.utils.turn_analyzer",
+    # And a third time, 11 Sep 2026. STARTUP measures the two seconds of silence before the
+    # greeting — the one number that had been asked for three times — and the first call
+    # carrying it produced no line at all. The comment above was written twice and did not
+    # stop it, so tests/test_log_noise.py now derives this rule instead of listing it: any
+    # module that logs a call_sid at INFO has to be in here.
+    "app.utils.startup_clock",
+    # Found by that derived test the moment it existed, which is the argument for deriving
+    # it. turn_gate says when a reply was held back from a half-finished sentence and when
+    # one was refused outright — including "Not speaking this turn's reply", the only
+    # evidence from outside that the hold guard fired at all. It was grepped for on a live
+    # call and came back empty, and the guard was read as not firing.
+    "app.utils.turn_gate",
+    "app.utils.closing_gate",
     "app.worker",
 }
 

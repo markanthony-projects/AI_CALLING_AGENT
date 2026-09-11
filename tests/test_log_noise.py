@@ -185,3 +185,63 @@ def test_a_module_outside_the_set_is_still_quiet_at_info():
 class _Level:
     def __init__(self, no):
         self.no = no
+
+
+def _modules_that_narrate_a_call() -> dict:
+    """Every module under app/ with a `logger.info` that carries a call sid.
+
+    Derived rather than listed, because listing it has now failed three times: LATENCY, then
+    the two configuration lines, then STARTUP. Each was working code that could not be told
+    apart from missing code, and each was found by somebody asking for logs that could not
+    exist.
+    """
+    import ast
+    from pathlib import Path
+
+    found = {}
+    for path in sorted(Path("app").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "logger.info" not in source:
+            continue
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "info"):
+                continue
+            if getattr(func.value, "id", None) != "logger":
+                continue
+            segment = ast.get_source_segment(source, node) or ""
+            if "call_sid" not in segment:
+                continue
+            module = ".".join(path.with_suffix("").parts)
+            found.setdefault(module, segment.strip().splitlines()[0][:70])
+    return found
+
+
+def test_every_module_that_narrates_a_call_can_actually_be_seen():
+    """The rule the comment in app/main.py states and the list kept failing to keep.
+
+    A per-call INFO line exists to be read in production. Dropped by this filter it is
+    invisible, and the symptom is always the same: an instrument that looks broken, or a
+    deploy that looks like it never happened."""
+    from app.main import _CALL_MODULES
+
+    missing = {
+        module: line
+        for module, line in _modules_that_narrate_a_call().items()
+        if module not in _CALL_MODULES
+    }
+    assert not missing, (
+        "these log a call_sid at INFO and would be dropped by _log_filter: "
+        + "; ".join(f"{m} ({line})" for m, line in sorted(missing.items()))
+    )
+
+
+def test_that_check_is_actually_looking_at_something():
+    """Guards the extractor: a scan that silently matched nothing would pass forever."""
+    found = _modules_that_narrate_a_call()
+    assert "app.utils.latency" in found
+    assert "app.utils.startup_clock" in found
+    assert len(found) >= 5, found
