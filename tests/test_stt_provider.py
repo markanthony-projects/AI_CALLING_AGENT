@@ -40,6 +40,10 @@ def fake(**overrides):
         TURN_SETTLE_SECS=0.4,
         STT_EOT_THRESHOLD=None,
         STT_EOT_TIMEOUT_MS=None,
+        # And by the barge-in half: a word count for a service that transcribes as it goes,
+        # seconds of speech for one that says nothing until the turn is over.
+        INTERRUPT_MIN_WORDS=3,
+        BARGE_IN_MIN_SPEECH_SECS=0.8,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -330,7 +334,28 @@ def test_the_hinglish_hints_reach_the_connection():
     assert query.count("language_hint") == 2
 
 
+def test_the_speech_threshold_comes_from_the_setting_that_names_it():
+    """Mutation testing found this: the default happens to be 0.8, so a hard-coded 0.8 in
+    the builder passed every test here. Asked for with a value nobody would choose."""
+    for provider, model in (("sarvam", "saarika:v2.5"), ("flux", "flux-general-multi")):
+        plan = build_listening("sid", fake(STT_PROVIDER=provider, STT_MODEL=model,
+                                           BARGE_IN_MIN_SPEECH_SECS=1.7))
+        assert plan.start_strategy._min_speech_secs == 1.7
+
+
+def test_flux_is_not_asked_to_announce_speech_twice():
+    """Flux broadcasts UserStartedSpeakingFrame itself, from StartOfTurn. Letting the
+    aggregator broadcast a second one puts two starts on the wire for one utterance. Sarvam
+    broadcasts nothing, so it keeps the default."""
+    assert _plan().start_strategy._enable_user_speaking_frames is False
+    sarvam = build_listening("sid", fake(STT_PROVIDER="sarvam", STT_MODEL="saarika:v2.5"))
+    assert sarvam.start_strategy._enable_user_speaking_frames is True
+
+
 def test_the_plan_prints_both_halves_for_the_log():
     """One line in the call log saying what we listen with AND who ends the turn — the two
     things that have to be known to read any latency number that follows."""
-    assert str(_plan()) == "flux/flux-general-multi (turns: ExternalUserTurnStopStrategy)"
+    assert str(_plan()) == (
+        "flux/flux-general-multi "
+        "(barge-in: SustainedSpeechBargeIn, turns: ExternalUserTurnStopStrategy)"
+    )

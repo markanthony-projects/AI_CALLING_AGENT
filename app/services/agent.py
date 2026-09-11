@@ -23,61 +23,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregator,
     LLMUserAggregatorParams,
 )
-from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
-from pipecat.turns.types import ProcessFrameResult
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-from app.utils.barge_in import takes_the_floor
-
-
-class GreetingOnlyMinWords(MinWordsUserTurnStartStrategy):
-    """A word gate that lifts as soon as the opening line has been delivered.
-
-    A flat gate looked right and was wrong. While the bot is speaking — and Pipecat counts
-    that from the first audio frame until the last one has played out, seconds after its
-    text is finished — anything shorter than min_words is discarded outright, not deferred.
-    So "Yeah sure." answering "Would you like to visit the site?" vanished, and the caller
-    sat through 37 seconds of silence saying "Hello" twice before the agent noticed. The
-    one-and-two-word replies this dropped are exactly the replies people give.
-
-    The gate only ever existed to stop the "Hello?" on pickup from cutting the greeting off
-    at 0.7 seconds. Once that line is out there is nothing left to protect, so it relaxes to
-    one word and the prospect can interrupt whenever they like for the rest of the call.
-
-    Whenever they like, with one exception earned on call 5023ff25: "Hello?" spoken while
-    the agent is talking is not somebody taking the floor, it is somebody who cannot hear —
-    and Sarvam reopens its websocket on every interruption, so four of those left the agent
-    mute and the prospect hung up. Those words wait for the sentence to finish instead of
-    cutting it off, and are then answered rather than discarded. See app/utils/barge_in.py.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._deferred_line_check = False
-
-    def relax(self) -> None:
-        self._min_words = 1
-
-    async def reset(self):
-        await super().reset()
-        self._deferred_line_check = False
-
-    async def _handle_transcription(self, frame):
-        if self._bot_speaking and not takes_the_floor(getattr(frame, "text", "")):
-            # Held, not dropped. The base class would call trigger_reset_aggregation() and
-            # the words would be gone; leaving the aggregation alone keeps them for the turn
-            # that starts as soon as the agent stops speaking.
-            self._deferred_line_check = True
-            return ProcessFrameResult.CONTINUE
-        self._deferred_line_check = False
-        return await super()._handle_transcription(frame)
-
-    async def _handle_bot_stopped_speaking(self, frame):
-        await super()._handle_bot_stopped_speaking(frame)
-        if self._deferred_line_check:
-            # The sentence is finished and they are still owed an answer.
-            self._deferred_line_check = False
-            await self.trigger_user_turn_started()
 from app.core.config import settings
 from app.services.stt_provider import build_listening
 from app.services.llm_provider import (
@@ -690,8 +637,12 @@ async def run_voice_agent(
     # Replaces the default start strategies rather than joining them. The defaults are
     # [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy] and any one of them
     # firing starts the turn — so leaving VAD in place would keep barging in on the first
-    # syllable and this would change nothing. Stop strategies are untouched.
-    greeting_gate = GreetingOnlyMinWords(min_words=settings.INTERRUPT_MIN_WORDS)
+    # syllable and this would change nothing.
+    #
+    # Which gate this is depends on whether the speech service produces any words before the
+    # turn ends, which is why it arrives with the service rather than being built here. See
+    # app/services/turns.py for the two of them and what each can and cannot tell apart.
+    greeting_gate = listening.start_strategy
     # Who decides the turn is over comes from the speech service, because it depends on
     # whether that service knows. Pipecat's own default here is a Smart Turn ONNX model; it
     # is not used, and the reason is not timidity — the transport parameter that used to

@@ -213,6 +213,19 @@ class Settings(BaseSettings):
     # agent stops speaking a single word starts their turn, so replies stay instant.
     INTERRUPT_MIN_WORDS: int = Field(default=3, ge=1)
 
+    # The same decision for a service that says nothing until the turn is over — Flux and
+    # Sarvam both push no interim transcript, so there are no words to count and the agent
+    # would talk over the whole utterance. Seconds of continuous speech instead.
+    #
+    # 0.8 is not a preference, it is where the arithmetic lands. VAD reports speech stopped
+    # `stop_secs` (0.2) after it actually did, so a half-second "hello?" cancels this clock
+    # at about 0.7s and must not have fired first. Below ~0.75 the line-check that cost us
+    # call 5023ff25 starts cutting the agent off again. It is also roughly what the word
+    # gate already costs in practice — three words plus the time to transcribe them — so
+    # this is parity, not a slowdown, and the speed comes later from holding the agent's
+    # audio instead of discarding it.
+    BARGE_IN_MIN_SPEECH_SECS: float = Field(default=0.8, ge=0.2, le=3.0)
+
     # How long a number may ring before the carrier gives up.
     #
     # Two reasons, and the second is the expensive one. Ringing for the carrier's default —

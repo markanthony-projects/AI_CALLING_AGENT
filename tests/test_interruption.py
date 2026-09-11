@@ -138,13 +138,27 @@ def test_vad_is_not_reintroduced_as_a_start_strategy():
 
 
 def test_the_word_count_is_configurable():
-    """Tunable against real calls without a redeploy, like the VAD thresholds beside it."""
-    min_words = next(
-        kw.value
-        for kw in _call_named("GreetingOnlyMinWords").keywords
-        if kw.arg == "min_words"
-    )
-    assert ast.unparse(min_words) == "settings.INTERRUPT_MIN_WORDS"
+    """Tunable against real calls without a redeploy, like the VAD thresholds beside it.
+
+    Built in stt_provider since 11 Sep, not in the agent: which gate a call gets depends on
+    whether its speech service produces words before the turn ends, so it is chosen where
+    the service is."""
+    import inspect as _inspect
+
+    from app.services import stt_provider
+
+    assert "settings.INTERRUPT_MIN_WORDS" in _inspect.getsource(stt_provider._word_gate)
+
+
+def test_a_service_that_says_nothing_until_the_end_gets_a_gate_that_needs_no_words():
+    """Flux and Sarvam both push no interim transcript. A word gate would have nothing to
+    count until the caller had finished — meaning the agent talks over all of it."""
+    from app.services.stt_provider import _BARGE_IN, DEEPGRAM, FLUX, PROVIDERS, SARVAM
+
+    assert set(_BARGE_IN) == set(PROVIDERS), "a provider with no gate raises on a live call"
+    assert _BARGE_IN[DEEPGRAM].__name__ == "_word_gate"
+    for quiet in (SARVAM, FLUX):
+        assert _BARGE_IN[quiet].__name__.startswith("_duration_gate")
 
 
 # --- the setting --------------------------------------------------------------------
@@ -200,7 +214,7 @@ def test_the_strategy_is_the_one_the_installed_pipecat_ships():
 
 
 def _gate():
-    from app.services.agent import GreetingOnlyMinWords
+    from app.services.turns import GreetingOnlyMinWords
 
     return GreetingOnlyMinWords(min_words=3)
 
@@ -211,13 +225,43 @@ def test_while_the_greeting_plays_a_short_reply_still_does_not_interrupt(said):
     assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.CONTINUE]
 
 
-@pytest.mark.parametrize("said", ["Yeah sure.", "Yeah,", "Yes please", "Okay", "3 BHK", "Sunday"])
+@pytest.mark.parametrize("said", ["Yes please", "3 BHK", "Sunday", "Not interested", "nahi"])
 def test_after_the_greeting_the_same_reply_gets_through(said):
     """The exact replies people give to a closing question. Dropping these is worse than
     any barge-in the gate was protecting against."""
     gate = _gate()
     gate.relax()
     assert asyncio.run(_feed(gate, said, bot_speaking=True)) == [ProcessFrameResult.STOP]
+
+
+@pytest.mark.parametrize("said", ["Yeah sure.", "Yeah,", "Okay", "haan", "theek hai", "हाँ"])
+def test_agreeing_along_waits_for_the_sentence_instead_of_cutting_it(said):
+    """These moved out of the test above on 11 Sep 2026, and it is not a loosening.
+
+    They were never getting through: under min_words while the bot speaks, the base class
+    DISCARDS — which is the 37-second bug itself, and no relax() saves them while the bot is
+    still playing out. Held, they survive and are answered the moment the sentence ends. The
+    difference that matters is dropped-versus-kept, and this is the kept half.
+
+    The reason they are held at all is that on a Hindi call this is how somebody listens.
+    "haan haan", "achha", "theek hai" run right through a description, and an agent that
+    stops for each of them is the naive one.
+    """
+    gate = _gate()
+    gate.relax()
+    started, dropped = [], []
+    gate.trigger_user_turn_started = lambda *a, **k: _record(started)
+    gate.trigger_reset_aggregation = lambda *a, **k: _record(dropped)
+
+    async def run():
+        await gate.process_frame(BotStartedSpeakingFrame())
+        assert await gate.process_frame(_speech(said)) == ProcessFrameResult.CONTINUE
+        assert dropped == [], "the words were thrown away"
+        assert started == [], "it cut the sentence off"
+        await gate.process_frame(BotStoppedSpeakingFrame())
+        assert started == [True], "the sentence ended and nobody answered them"
+
+    asyncio.run(run())
 
 
 # --- except the one word that is not a reply at all ----------------------------------
@@ -303,8 +347,8 @@ def test_relaxing_is_permanent():
     """It guards one line. Re-arming it mid-call would bring the dead air back."""
     gate = _gate()
     gate.relax()
-    asyncio.run(_feed(gate, "Yeah.", bot_speaking=False))
-    assert asyncio.run(_feed(gate, "Yeah.", bot_speaking=True)) == [ProcessFrameResult.STOP]
+    asyncio.run(_feed(gate, "Sunday.", bot_speaking=False))
+    assert asyncio.run(_feed(gate, "Sunday.", bot_speaking=True)) == [ProcessFrameResult.STOP]
 
 
 def test_the_gate_is_relaxed_when_an_assistant_turn_finishes():

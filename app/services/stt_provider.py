@@ -33,6 +33,9 @@ from pipecat.turns.user_stop import (
     SpeechTimeoutUserTurnStopStrategy,
 )
 from pipecat.turns.user_stop.base_user_turn_stop_strategy import BaseUserTurnStopStrategy
+from pipecat.turns.user_start.base_user_turn_start_strategy import BaseUserTurnStartStrategy
+
+from app.services.turns import GreetingOnlyMinWords, SustainedSpeechBargeIn
 
 # The audio the transport hands over. Not configurable: the serializer, the VAD and the
 # turn analyzer all assume it, and a provider that cannot take it needs its own resampling
@@ -142,6 +145,29 @@ def _service_turns(settings) -> BaseUserTurnStopStrategy:
     return ExternalUserTurnStopStrategy()
 
 
+def _word_gate(settings) -> BaseUserTurnStartStrategy:
+    """Count the words before stopping the agent. Needs a service that transcribes as it
+    goes, which in practice means Deepgram's interim results."""
+    return GreetingOnlyMinWords(min_words=settings.INTERRUPT_MIN_WORDS)
+
+
+def _duration_gate(settings) -> BaseUserTurnStartStrategy:
+    """Time the speech instead of reading it, for a service with nothing to read yet.
+
+    `enable_user_speaking_frames=False` because Flux broadcasts UserStartedSpeakingFrame
+    itself from StartOfTurn; letting the aggregator broadcast a second one puts two starts
+    on the wire for one utterance. Sarvam does not, and gets the default.
+    """
+    return SustainedSpeechBargeIn(min_speech_secs=settings.BARGE_IN_MIN_SPEECH_SECS)
+
+
+def _duration_gate_quietly(settings) -> BaseUserTurnStartStrategy:
+    return SustainedSpeechBargeIn(
+        min_speech_secs=settings.BARGE_IN_MIN_SPEECH_SECS,
+        enable_user_speaking_frames=False,
+    )
+
+
 def sarvam_language(code: str) -> str:
     """Sarvam's spelling of a language code, or the code unchanged if it already is one."""
     lowered = (code or "").strip().lower()
@@ -211,6 +237,12 @@ _BUILDERS = {DEEPGRAM: _deepgram, SARVAM: _sarvam, FLUX: _flux}
 # transcribe and somebody has to guess; Flux is the exception that knows, and says so.
 _TURN_OWNERS = {DEEPGRAM: _timer_turns, SARVAM: _timer_turns, FLUX: _service_turns}
 
+# What has to happen before the agent stops talking. It follows from the same fact as the
+# turn owner and a different one: whether this service produces any words BEFORE the turn
+# ends. Deepgram does, via interim results. Flux and Sarvam both push nothing until the
+# utterance is over, so a word gate would let the agent talk over all of it.
+_BARGE_IN = {DEEPGRAM: _word_gate, SARVAM: _duration_gate, FLUX: _duration_gate_quietly}
+
 
 @dataclass(frozen=True)
 class Listening:
@@ -229,10 +261,14 @@ class Listening:
 
     endpoint: SttEndpoint
     service: STTService
+    start_strategy: BaseUserTurnStartStrategy
     stop_strategy: BaseUserTurnStopStrategy
 
     def __str__(self) -> str:
-        return f"{self.endpoint} (turns: {type(self.stop_strategy).__name__})"
+        return (
+            f"{self.endpoint} (barge-in: {type(self.start_strategy).__name__}, "
+            f"turns: {type(self.stop_strategy).__name__})"
+        )
 
 
 def build_listening(call_sid: str, settings) -> Listening:
@@ -241,6 +277,7 @@ def build_listening(call_sid: str, settings) -> Listening:
     listening = Listening(
         endpoint=endpoint,
         service=_BUILDERS[endpoint.provider](endpoint, settings),
+        start_strategy=_BARGE_IN[endpoint.provider](settings),
         stop_strategy=_TURN_OWNERS[endpoint.provider](settings),
     )
     logger.info(f"[{call_sid}] Listening with {listening}")
