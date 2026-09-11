@@ -45,6 +45,7 @@ from app.utils.sentences import sentences
 from app.utils.vobiz_serializer import VobizSerializer
 from app.utils.farewell import FarewellGate, farewell_timeout
 from app.utils.hold_request import HOLD_ACK, wants_to_hold
+from app.utils.startup_clock import StartupClock
 from app.utils.repeat_request import (
     MAX_REPEAT_REFUSALS,
     checking_the_line,
@@ -450,10 +451,17 @@ async def run_voice_agent(
     async def on_tts_connected(service):
         nonlocal _tts_reconnects
         _tts_reconnects += 1
+        startup.mark("tts")
         # The first is the call opening its voice, which is not news. Every one after it is
         # a reconnect, and a run of them is the shape that preceded the failure.
         if _tts_reconnects > 1:
             logger.info(f"[{call_sid}] TTS reconnected ({_tts_reconnects - 1})")
+
+    @stt.event_handler("on_connected")
+    async def on_stt_connected(service):
+        # The greeting does not need this one. Whether it waits behind it anyway is the
+        # whole question the STARTUP line exists to answer.
+        startup.mark("stt")
 
     @tts.event_handler("on_connection_error")
     async def on_tts_connection_error(service, message):
@@ -713,6 +721,8 @@ async def run_voice_agent(
     # enable_metrics makes each service report its TTFB; the observer correlates those
     # with the turn boundaries to produce the caller's actual wait.
     latency = LatencyObserver(call_sid, stream_open_at=stream_open_at)
+    # What the greeting waited behind. Log-only; see app/utils/startup_clock.py.
+    startup = StartupClock(call_sid, stream_open_at=stream_open_at)
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(
@@ -795,6 +805,10 @@ async def run_voice_agent(
     # ─── Pipeline Started ──────────────────────────────────────────────────────
     @task.event_handler("on_pipeline_started")
     async def on_pipeline_started(worker, frame):
+        # Pipecat fires this only once StartFrame has been through every processor, so its
+        # reading is the sum of whatever those processors did on the way.
+        startup.mark("pipeline")
+
         async def startup_greeting():
             # No delay before the opening line. A caller who picks up already waits about
             # four seconds — 611ms for the answer webhook to become a websocket, 2.4s for
@@ -815,6 +829,8 @@ async def run_voice_agent(
                 # for a first turn against 1247ms for the second on the same call.
                 asyncio.create_task(llm.warm_up())
                 await task.queue_frames(spoken(opening_line, append_to_context=False))
+                startup.mark("greeting queued")
+                startup.report()
             else:
                 # They spoke first, so the greeting was cancelled and there is nothing left
                 # to protect. Lifting it here matters: otherwise the gate stays armed for a
