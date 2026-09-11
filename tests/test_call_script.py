@@ -575,3 +575,46 @@ def test_3a_must_name_the_place_in_the_same_breath_as_the_question():
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
     assert "NAME THE PLACE IN THE SAME BREATH AS THE QUESTION ABOUT IT." in intro
     assert "It sits on 45 acres with 14 towers" in intro, "the failure has to travel with the rule"
+
+
+def test_the_headline_is_spoken_as_a_sentence_and_not_as_a_caption():
+    """Call fe961761, 11 Sep 2026. Step 2 went out as:
+
+        "It is called Abhee Codename New Dimension.
+         Bengaluru's first Scotland-themed residential township."
+
+    The second one has no verb. It is the Headline field read out unchanged, and the field
+    is written to sit under a photograph — so the ear hangs it onto the sentence before it
+    and waits for an ending that never arrives. The prospect said it felt like a sentence
+    still going.
+
+    The word "sentence" was already in the instruction above and was not enough: the model
+    was not writing a fragment by accident, it was quoting a label it had been handed."""
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    assert "MUST HAVE A VERB" in gate
+    assert "printed under a photograph" in gate
+
+
+def test_a_fact_already_given_is_not_given_again():
+    """Three live calls, same shape. 297f1bbb: "What about the regular one?" answered with
+    the identical sentence the prospect had just heard. 8d86156e: after being asked to wait,
+    the agent restarted with "As I mentioned, there is a 3-acre golf course and a 1.5-acre
+    private lake" — the same line, down to the closing question.
+
+    The existing rule covered QUESTIONS only, and the repetition that makes an agent sound
+    like a recording is in the statements."""
+    assert "NEVER SAY THE SAME THING TWICE" in PROMPT
+    block = PROMPT[PROMPT.index("NEVER SAY THE SAME THING TWICE") : PROMPT.index("SAY NUMBERS THE WAY")]
+    assert "not only your questions" in block
+    assert "Say the NEXT thing." in block
+    # The two ways out, so the rule cannot silence a genuine repeat request or a cut-off line
+    assert "asked you to repeat" in block
+    assert "cut off mid-sentence" in block
+
+
+def test_measurements_are_spoken_rounded_but_money_is_not():
+    """"1448 to 1454 square feet" is a spreadsheet read aloud, and it cost three seconds of
+    a live call. Price and configuration stay exact — those are what someone decides on."""
+    block = PROMPT[PROMPT.index("SAY NUMBERS THE WAY") : PROMPT.index("NEVER ASK THE SAME THING TWICE")]
+    assert "about 1450 square feet" in block
+    assert "price and configuration" in block
