@@ -992,11 +992,26 @@ async def run_voice_agent(
             turn_gate.discard_reply("they are checking the line, not asking for the pitch")
             await turn_gate.user_turn_stopped()
             _turns_heard += 1
+            # If the greeting is still playing they are hearing it RIGHT NOW, and it ends on
+            # the question that hands them the turn. Cutting it to say the same words again
+            # is what happened on call f1d9804b: the prospect said "Hello." two seconds in,
+            # the greeting was interrupted, Sarvam reopened its websocket, and they heard
+            # the introduction twice, both halves. Dropping the reply is the whole job here;
+            # the greeting is already doing the talking.
+            if farewell.is_speaking:
+                logger.info(f"[{call_sid}] Letting the greeting finish rather than saying it twice")
+                return
+            # Added to the context as ONE message and spoken with append_to_context=False,
+            # the same way the greeting is. Letting spoken() append put each sentence in as
+            # its own assistant message: three AGENT lines in the log for one thing said,
+            # and a changed prefix that cost the first inference its cache — turn 2 of call
+            # f1d9804b read cached=0 where every other call reads a few thousand.
             again = build_reintroduction(project_name, customer_name, developer_name)
             await task.queue_frames([InterruptionWorkerFrame()])
             await task.flush_pipeline(timeout=2.0)
+            context.add_message({"role": "assistant", "content": again})
             logger.info(f"[{call_sid}] AGENT → \"{again}\"")
-            await task.queue_frames(spoken(again))
+            await task.queue_frames(spoken(again, append_to_context=False))
             return
 
         # Before the gate is released, because releasing it is what puts the reply on the

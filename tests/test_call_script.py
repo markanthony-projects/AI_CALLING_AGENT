@@ -618,3 +618,38 @@ def test_measurements_are_spoken_rounded_but_money_is_not():
     block = PROMPT[PROMPT.index("SAY NUMBERS THE WAY") : PROMPT.index("NEVER ASK THE SAME THING TWICE")]
     assert "about 1450 square feet" in block
     assert "price and configuration" in block
+
+
+def _not_for_them() -> str:
+    return PROMPT[PROMPT.index("5. NOT FOR THEM") : PROMPT.index("OBJECTIONS:")]
+
+
+def test_the_five_questions_are_five_turns_and_never_one():
+    """Call f1d9804b, 11 Sep 2026. All five went out in one breath, run together without
+    even a space between them — "a plot?Are you planning to buy" — and the prospect said
+    "why you are asking so many questions at one time".
+
+    The rule said "Still one question per turn:" and then listed five. Read as a list, it
+    is a form to read aloud."""
+    block = _not_for_them()
+    assert "ASK ONE QUESTION, THEN STOP AND LET THEM ANSWER" in block
+    assert "five separate turns and never one" in block
+    assert "so many questions at one time" in block
+
+
+def test_a_decision_is_not_re_opened_because_the_budget_fits():
+    """Same call. The prospect said "not in this project", then gave an area and a two Crore
+    budget — and step 5's re-check told the agent they were never ruled out, so it read our
+    own configurations back at 1.64 and 2.06 Crores. They said "I don't want in that area
+    and that project" and the call ended.
+
+    The re-check exists for a GUESS: "not this area" from someone who was never told where
+    it is. Someone who has heard the name, the place and what it is has the facts, and their
+    answer is a decision. Their requirement is still worth having — for the next project."""
+    block = _not_for_them()
+    assert "THAT RE-CHECK IS FOR A GUESS, NOT FOR A DECISION" in block
+    assert "NEVER pitch this project again" in block
+    assert "A budget that fits is not a reason to re-open something they have already closed" in block
+    # and the guess half has to survive: it is the rule that saved a 1.5 Cr lead
+    assert "they are guessing" in block
+    assert "GO BACK TO STEP 3" in block

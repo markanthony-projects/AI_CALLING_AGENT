@@ -369,3 +369,33 @@ def test_somebody_refusing_is_not_checking_the_line(said):
     from app.utils.repeat_request import checking_the_line
 
     assert checking_the_line(said) is False
+
+
+def test_a_greeting_still_playing_is_not_cut_to_be_said_again():
+    """Call f1d9804b, 11 Sep 2026. The prospect said "Hello." two seconds into the greeting:
+
+        AGENT → "Hi, Good evening Rahul. I am Priya calling you from Abhee Ventures..."
+        USER  → "Hello."
+        TTS reconnected (1)
+        AGENT → "Hi Rahul. I am Priya from Abhee Ventures. Can I speak to you for a minute?"
+
+    They were hearing the introduction when they said it, and the guard cut it off to say
+    the same thing again — so they heard it twice, both halves, and Sarvam reopened its
+    websocket in between. Dropping the reply is the whole job while the greeting is playing;
+    the greeting already ends on the question that hands them the turn."""
+    src = _handler()
+    branch = src[src.index("checking_the_line") : src.index("wants_to_hold")]
+    assert "farewell.is_speaking" in branch
+    # and it must return before anything is queued, not after
+    assert branch.index("farewell.is_speaking") < branch.index("InterruptionWorkerFrame")
+
+
+def test_the_reintroduction_goes_into_the_context_as_one_message():
+    """spoken() appends per sentence by default, which put three assistant messages in for
+    one thing said — three AGENT lines in the log, and a changed prefix that cost the first
+    inference its cache: turn 2 of that call read cached=0 where every other call reads
+    thousands. The greeting has always done this correctly; this now matches it."""
+    src = _handler()
+    branch = src[src.index("build_reintroduction") : src.index("wants_to_hold")]
+    assert "context.add_message" in branch
+    assert "append_to_context=False" in branch
