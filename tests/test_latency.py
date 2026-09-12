@@ -587,7 +587,8 @@ def test_the_agent_hands_the_stream_open_time_to_the_observer():
 
     src = inspect.getsource(agent.run_voice_agent)
     assert "stream_open_at: Optional[float] = None" in src
-    assert "LatencyObserver(call_sid, stream_open_at=stream_open_at)" in src
+    assert "LatencyObserver(" in src
+    assert "stream_open_at=stream_open_at" in src
 
 
 def test_the_webhook_takes_the_time_at_the_moment_the_stream_opens():

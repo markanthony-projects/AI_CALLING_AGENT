@@ -87,9 +87,19 @@ def percentile(values: list[float], fraction: float) -> float:
 class LatencyObserver(BaseObserver):
     """Collects per-turn response latency without sitting in the audio path."""
 
-    def __init__(self, call_sid: str, stream_open_at: Optional[float] = None):
+    def __init__(
+        self,
+        call_sid: str,
+        stream_open_at: Optional[float] = None,
+        on_greeting_seen=None,
+    ):
         super().__init__()
         self._call_sid = call_sid
+        # Called the first time the greeting frame is actually seen moving through the
+        # pipeline. STARTUP marks when queue_frames RETURNS; this marks when the frame has
+        # travelled, and on call ef6a13b3 the two were 810ms apart with nothing naming the
+        # difference. Both readings were right and neither was readable without the other.
+        self._on_greeting_seen = on_greeting_seen
         # time.monotonic() at websocket accept, if the caller has it. The pipeline clock
         # starts much later — after two database round trips and the services being built —
         # so it cannot see the part of the wait that happens before it exists.
@@ -148,6 +158,8 @@ class LatencyObserver(BaseObserver):
             # the same way, later — cannot claim to be the greeting.
             if self._greeting_queued_ns is None and not self._turns and self._turn_start_ns is None:
                 self._greeting_queued_ns = data.timestamp
+                if self._on_greeting_seen:
+                    self._on_greeting_seen()
             return
 
         if isinstance(frame, VADUserStartedSpeakingFrame):

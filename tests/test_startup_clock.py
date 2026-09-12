@@ -92,17 +92,26 @@ def test_the_agent_marks_both_connections_the_pipeline_and_the_queue():
         assert f'startup.mark("{name}")' in AGENT_SRC, name
 
 
-def test_the_line_is_emitted_where_the_greeting_is_queued():
-    """Not at the end of the call: the number is about the opening, and a caller who hangs
-    up during the greeting is exactly the caller whose startup time mattered most."""
+def test_the_line_is_emitted_once_the_greeting_has_actually_travelled():
+    """Not at the end of the call — the number is about the opening, and a caller who hangs
+    up during the greeting is the one whose startup time mattered most.
+
+    And not where it is queued either, which is where it used to be. STARTUP ended at
+    "greeting queued=+1ms" while FIRST WORD said the first audio arrived 800ms later with
+    only 386ms of synthesis in between. Two right readings that could not be read together,
+    and the gap between them had no name. The line now closes when the frame has moved."""
     tree = ast.parse(AGENT_SRC)
     handler = next(
         n for n in ast.walk(tree)
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == "startup_greeting"
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and n.name == "_greeting_on_the_wire"
     )
     src = ast.unparse(handler)
-    assert "startup.report()" in src
-    assert src.index("queue_frames") < src.index("startup.report()")
+    # ast.unparse normalises quotes
+    assert "startup.mark(" in src
+    assert src.index("greeting on the wire") < src.index("startup.report()")
+    # and the observer is what calls it, so the mark is the frame moving and not a guess
+    assert "on_greeting_seen=_greeting_on_the_wire" in AGENT_SRC
 
 
 def test_it_shares_the_clock_the_first_word_line_is_measured_against():

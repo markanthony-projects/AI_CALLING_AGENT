@@ -58,6 +58,7 @@ from app.utils.repeat_request import (
 )
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
+from app.utils.one_question import OneQuestionPerTurn
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
 from app.utils.timeutils import time_of_day_greeting
 from app.utils.turn_analyzer import build_turn_analyzer
@@ -423,6 +424,18 @@ async def run_voice_agent(
     # much of that was the websocket handshake and how much was everything before it.
     startup = StartupClock(call_sid, stream_open_at=stream_open_at)
 
+    def _greeting_on_the_wire() -> None:
+        """The greeting frame has actually travelled; the line is complete.
+
+        Reported from here rather than from where it was queued. STARTUP used to end
+        at 'greeting queued=+1ms' while FIRST WORD said the first audio came 800ms
+        after that with only 386ms of synthesis in between — two right readings that
+        could not be read together, and the gap between them had no name.
+        """
+        startup.mark("greeting on the wire")
+        startup.report()
+
+
     # Not GroqLLMService directly: the SDK's default two silent retries honour Retry-After
     # inside the same await, so a 429 reached the logs as `groq=14605ms` with no error and
     # the caller sat through all fourteen seconds of it. See app/services/llm_provider.py.
@@ -727,6 +740,9 @@ async def run_voice_agent(
     )
     assistant_agg = LLMAssistantAggregator(context=context)
 
+    # Any model can run away; the caller must not be able to hear it when one does.
+    one_question = OneQuestionPerTurn(call_sid)
+
     pipeline = Pipeline([
         transport.input(),
         stt,
@@ -744,6 +760,11 @@ async def run_voice_agent(
         # syntax can be removed before it is spoken, and being upstream of the assistant
         # aggregator keeps the leak out of the context too.
         tool_syntax_filter,
+        # After the tool filter so it sees speech rather than markup, and before the voice
+        # engine so nothing it drops can reach the line. On call cfb7a957 one reply carried
+        # six turns of a conversation that had not happened, including a booking nobody
+        # agreed to. See app/utils/one_question.py.
+        one_question,
         tts,
         transport.output(),
         # After the output transport, never before it: BotStoppedSpeakingFrame is raised by
@@ -755,7 +776,13 @@ async def run_voice_agent(
 
     # enable_metrics makes each service report its TTFB; the observer correlates those
     # with the turn boundaries to produce the caller's actual wait.
-    latency = LatencyObserver(call_sid, stream_open_at=stream_open_at)
+    latency = LatencyObserver(
+        call_sid,
+        stream_open_at=stream_open_at,
+        # So the STARTUP line carries the moment the greeting frame actually moved, not
+        # only the moment it was handed to the queue. See app/utils/startup_clock.py.
+        on_greeting_seen=_greeting_on_the_wire,
+    )
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(
@@ -871,7 +898,6 @@ async def run_voice_agent(
                 asyncio.create_task(llm.warm_up())
                 await task.queue_frames(spoken(opening_line, append_to_context=False))
                 startup.mark("greeting queued")
-                startup.report()
             else:
                 # They spoke first, so the greeting was cancelled and there is nothing left
                 # to protect. Lifting it here matters: otherwise the gate stays armed for a
