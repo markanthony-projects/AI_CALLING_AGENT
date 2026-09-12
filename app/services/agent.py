@@ -27,6 +27,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from app.core.config import settings
 from app.services.stt_provider import build_listening
+from app.services.voice import KeepsItsVoice
 from app.services.llm_provider import (
     MAX_THROTTLE_WAIT_SECS,
     build_llm_service,
@@ -76,6 +77,10 @@ logger.add(sys.stderr, level="INFO")
 # Pipecat's default is 300s. A carrier can drop the PSTN leg without closing the websocket,
 # and the pipeline then sits there holding one of the concurrency slots. Sixty seconds with
 # neither party speaking is dead air on a phone call, not a pause for thought.
+# Reconnects past this in one call are logged as a warning rather than a note. Three is
+# where call 5023ff25 was heading when its voice stopped coming back.
+TTS_RECONNECT_ALARM = 3
+
 IDLE_TIMEOUT_SECS = 60.0
 
 # The idle timeout only fires when NEITHER party has spoken, so it cannot end a call whose
@@ -428,7 +433,7 @@ async def run_voice_agent(
         logger.info(f"[{call_sid}] Voice steadiness set | temperature={settings.SARVAM_TEMPERATURE}")
 
     # Low-latency streaming WebSocket Sarvam TTS with pace 1.0
-    tts = SarvamTTSService(
+    tts = KeepsItsVoice(
         api_key=settings.SARVAM_API_KEY,
         # Dashes the engine misreads become commas and hyphens on the way in. See
         # app/utils/dashes.py for the call that showed it.
@@ -465,7 +470,17 @@ async def run_voice_agent(
         # The first is the call opening its voice, which is not news. Every one after it is
         # a reconnect, and a run of them is the shape that preceded the failure.
         if _tts_reconnects > 1:
-            logger.info(f"[{call_sid}] TTS reconnected ({_tts_reconnects - 1})")
+            reconnects = _tts_reconnects - 1
+            # A run of them is the shape that preceded the mute on call 5023ff25: four in
+            # fourteen seconds, and one of them did not come back. One or two is an ordinary
+            # call with barge-ins in it; past that the log should say so out loud.
+            if reconnects >= TTS_RECONNECT_ALARM:
+                logger.warning(
+                    f"[{call_sid}] TTS has reconnected {reconnects} times; this is the run "
+                    f"that preceded a call going mute. See app/services/voice.py"
+                )
+            else:
+                logger.info(f"[{call_sid}] TTS reconnected ({reconnects})")
 
     @stt.event_handler("on_connected")
     async def on_stt_connected(service):
