@@ -189,6 +189,58 @@ def _sarvam(endpoint: SttEndpoint, settings) -> STTService:
     )
 
 
+class ConnectsWhileTheGreetingPlays(DeepgramFluxSTTService):
+    """Opens its websocket in the background, so the greeting does not queue behind it.
+
+    Measured on five calls, every one the same shape:
+
+        STARTUP 1244ms to the greeting | services built=+151ms  stt=+907ms
+                                         tts=+172ms  pipeline=+12ms  greeting queued=+2ms
+
+    The greeting is a local f-string with no network in it, and it waited 1.2 seconds. The
+    speech-to-text handshake is 800ms of that, and the greeting never uses speech-to-text.
+
+    It waits because StartFrame walks the pipeline one processor at a time, and
+    DeepgramFluxSTTBase.start does `await super().start(frame); await self._connect()`. This
+    service sits before the voice engine, so the voice engine cannot even begin its own
+    handshake — 172ms — until this one has finished. on_pipeline_started, which is what
+    queues the greeting, fires after all of them.
+
+    So the first connect is started and not awaited. Nothing is lost by that: audio cannot
+    arrive before the prospect speaks, which is after the greeting, and both run_stt and
+    _transport_send_audio already return quietly when the socket is not open yet. There is
+    about two seconds of slack against a handshake that has never taken one.
+
+    Only the FIRST connect. A reconnect mid-call is awaited exactly as before — by then the
+    caller is handling a live failure and "connected" has to mean connected.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._opened_once = False
+        self._opening = None
+
+    async def _connect(self):
+        # _task_manager, not the task_manager property: the property raises when the
+        # service has not been set up, and a raise here would be a call with no
+        # transcription at all rather than a slow greeting.
+        if self._opened_once or getattr(self, "_task_manager", None) is None:
+            await super()._connect()
+            return
+        self._opened_once = True
+        logger.debug(f"{self}: opening in the background so the greeting need not wait")
+        self._opening = self.create_task(self._open())
+
+    async def _open(self):
+        await super()._connect()
+
+    async def cleanup(self):
+        if self._opening:
+            await self.cancel_task(self._opening)
+            self._opening = None
+        await super().cleanup()
+
+
 def _flux(endpoint: SttEndpoint, settings) -> STTService:
     """Deepgram Flux: transcription and end-of-turn from the same socket.
 
@@ -198,7 +250,7 @@ def _flux(endpoint: SttEndpoint, settings) -> STTService:
     taught not to cut the agent off mid-sentence, earned on call 5023ff25. So Flux is bought
     for the end of a turn and nothing else; who is allowed to interrupt stays where it is.
     """
-    return DeepgramFluxSTTService(
+    return ConnectsWhileTheGreetingPlays(
         api_key=settings.DEEPGRAM_API_KEY,
         sample_rate=SAMPLE_RATE,
         should_interrupt=False,

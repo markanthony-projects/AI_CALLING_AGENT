@@ -227,7 +227,9 @@ def _plan(**over):
 
 def test_flux_is_a_provider_like_any_other():
     assert "flux" in PROVIDERS
-    assert type(_plan().service).__name__ == "DeepgramFluxSTTService"
+    from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
+
+    assert isinstance(_plan().service, DeepgramFluxSTTService)
 
 
 def test_a_transcribing_service_leaves_the_turn_to_the_timer():
@@ -376,3 +378,102 @@ def test_the_plan_prints_both_halves_for_the_log():
         "flux/flux-general-multi "
         "(barge-in: SustainedSpeechBargeIn, turns: ServiceDecidesButNotForever)"
     )
+
+
+# --- the second the greeting spent waiting for a socket it never uses --------------------
+#
+# Five calls, the same shape every time:
+#
+#     STARTUP 1244ms to the greeting | services built=+151ms  stt=+907ms  tts=+172ms
+#                                      pipeline=+12ms  greeting queued=+2ms
+#
+# StartFrame walks the pipeline one processor at a time and DeepgramFluxSTTBase.start awaits
+# its own connect, so the voice engine — 172ms — cannot start its handshake until the
+# speech recogniser has finished. on_pipeline_started, which queues the greeting, waits for
+# all of them.
+
+
+def test_flux_opens_in_the_background():
+    from app.services.stt_provider import ConnectsWhileTheGreetingPlays
+
+    assert isinstance(_plan().service, ConnectsWhileTheGreetingPlays)
+
+
+def test_the_first_connect_is_started_and_not_waited_for():
+    """The whole point. Awaiting it is what put 800ms in front of every greeting."""
+    import asyncio
+
+    service = _plan().service
+    started = []
+
+    class _Tasks:
+        def create_task(self, coroutine, name=None, context=None):
+            started.append(name or "task")
+            coroutine.close()
+            return asyncio.get_running_loop().create_task(asyncio.sleep(0))
+
+        async def cancel_task(self, task, timeout=None):
+            task.cancel()
+
+    async def run():
+        # Set directly rather than through setup(): what is under test is the branch in
+        # _connect, not pipecat's own wiring of a task manager into a service.
+        service._task_manager = _Tasks()
+        await service._connect()
+        assert started, "the connect was awaited instead of scheduled"
+        assert service._opened_once is True
+
+    asyncio.run(run())
+
+
+def test_a_reconnect_is_still_awaited():
+    """Only the first one. By a reconnect the caller is handling a live failure and
+    "connected" has to mean connected — a background reconnect would report success while
+    the caller sits on a dead socket."""
+    import asyncio
+
+    service = _plan().service
+    service._opened_once = True
+    awaited = []
+
+    async def fake_connect():
+        awaited.append(True)
+
+    async def run():
+        import app.services.stt_provider as provider
+
+        base = provider.DeepgramFluxSTTService._connect
+        provider.DeepgramFluxSTTService._connect = lambda self: fake_connect()
+        try:
+            await service._connect()
+        finally:
+            provider.DeepgramFluxSTTService._connect = base
+        assert awaited == [True], "a reconnect was scheduled instead of awaited"
+
+    asyncio.run(run())
+
+
+def test_without_a_task_manager_it_falls_back_to_waiting():
+    """setup() runs before StartFrame, so this should not happen — and a service that
+    silently never connected because there was nowhere to put the task would be a call with
+    no transcription at all."""
+    import asyncio
+
+    service = _plan().service
+    awaited = []
+
+    async def run():
+        import app.services.stt_provider as provider
+
+        base = provider.DeepgramFluxSTTService._connect
+        provider.DeepgramFluxSTTService._connect = lambda self: _record(awaited)
+        try:
+            await service._connect()
+        finally:
+            provider.DeepgramFluxSTTService._connect = base
+        assert awaited == [True]
+
+    async def _record(sink):
+        sink.append(True)
+
+    asyncio.run(run())
