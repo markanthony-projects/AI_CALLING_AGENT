@@ -38,9 +38,9 @@ GREETING = build_opening_line(
 
 def test_the_opening_line_is_three_sentences():
     assert sentences(GREETING) == [
-        f"Hi, Good {time_of_day_greeting(NOW)} Rahul.",
-        "I am Priya calling you from Abhee Ventures.",
-        "Can I speak to you for a minute?",
+        f"Hello, Good {time_of_day_greeting(NOW)}.",
+        "My name is Priya, and I am calling you from Abhee Ventures.",
+        "Am I speaking with Rahul?",
     ]
 
 
@@ -48,16 +48,17 @@ def test_a_salutation_does_not_end_a_sentence():
     """spoken_name puts "Mr." and "Dr." in front of a name. "Good afternoon Mr." followed by
     "Rahul." is two frames where there was one sentence — the exact fault this fixes, in
     reverse."""
+    # The name lives in the closing question now, so that is the sentence that must not be
+    # split by the full stop inside "Mr." — the same fault, in the same place it can happen.
     line = build_opening_line("X", "Mr. Rahul Sharma", developer_name="Abhee Ventures")
-    first = sentences(line)[0]
-    assert first.endswith("Mr. Rahul.")
+    assert sentences(line)[-1] == "Am I speaking with Mr. Rahul?"
     line = build_opening_line("X", "Dr Sunita", developer_name="Abhee Ventures")
-    assert sentences(line)[0].endswith("Dr. Sunita.")
+    assert sentences(line)[-1] == "Am I speaking with Dr. Sunita?"
 
 
 def test_a_company_suffix_does_not_end_a_sentence():
     line = build_opening_line("X", "Rahul", developer_name="Prestige Pvt. Ltd.")
-    assert "I am Priya calling you from Prestige Pvt. Ltd." in sentences(line)
+    assert "My name is Priya, and I am calling you from Prestige Pvt. Ltd." in sentences(line)
 
 
 def test_a_decimal_does_not_end_a_sentence():

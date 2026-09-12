@@ -139,6 +139,10 @@ class Project(Base):
     # Dimension" — and a real person calls from the company, naming the project when they
     # describe it. Nullable: without one the greeting falls back to name, as before.
     developer_name = Column(String, nullable=True)
+    # Who the agent says it IS. One name per campaign, because a prospect who is dialled
+    # twice must meet the same person both times — app/models/db.py DialAttempt shows how
+    # often that happens. Nullable: without one the greeting uses the default.
+    agent_name = Column(String, nullable=True)
     city = Column(String, nullable=False)
     locality = Column(String, nullable=False)
     min_price = Column(Numeric)

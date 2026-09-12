@@ -133,6 +133,7 @@ def build_opening_line(
     customer_name: Optional[str] = None,
     now: Optional[datetime] = None,
     developer_name: Optional[str] = None,
+    agent_name: Optional[str] = None,
 ) -> str:
     """The first thing the caller hears.
 
@@ -167,18 +168,25 @@ def build_opening_line(
     # how a person is greeted. Idempotent, so applying it here as well as before the prompt
     # costs nothing and means this line is safe whoever calls it. See app/utils/person_name.
     name = spoken_name(customer_name)
-    address = f" {name}" if name else ""
     # "Prestige Pvt. Ltd." already ends in a full stop; the sentence supplies its own.
     identity = caller_identity(project_name, developer_name).rstrip(".")
+    who = (agent_name or "").strip() or AGENT_NAME
+    # Ends on a question about THEM, not on permission. "Can I speak to you for a minute?"
+    # invites a no from somebody who has not heard anything yet; "Am I speaking with Rahul?"
+    # invites a yes, and confirms we reached the person the dial list named. Without a name
+    # it asks for one, which is the same question pointed the other way.
+    ask = f"Am I speaking with {name}?" if name else "May I know your good name?"
     return (
-        f"Hi, Good {part}{address}. I am {AGENT_NAME} calling you from {identity}. "
-        f"Can I speak to you for a minute?"
+        f"Hello, Good {part}. My name is {who}, and I am calling you from {identity}. "
+        f"{ask}"
     )
+
 
 def build_reintroduction(
     project_name: str,
     customer_name: Optional[str] = None,
     developer_name: Optional[str] = None,
+    agent_name: Optional[str] = None,
 ) -> str:
     """Said when their first words are "Hello?" — they heard the line, not the sentence.
 
@@ -188,12 +196,10 @@ def build_reintroduction(
     turn.
     """
     name = spoken_name(customer_name)
-    address = f" {name}" if name else ""
     identity = caller_identity(project_name, developer_name).rstrip(".")
-    return (
-        f"Hi{address}. I am {AGENT_NAME} from {identity}. "
-        f"Can I speak to you for a minute?"
-    )
+    who = (agent_name or "").strip() or AGENT_NAME
+    ask = f"Am I speaking with {name}?" if name else "May I know your good name?"
+    return f"My name is {who}, and I am calling you from {identity}. {ask}"
 
 
 def spoken(text: str, *, append_to_context: bool = True) -> list[TTSSpeakFrame]:
@@ -360,17 +366,21 @@ async def run_voice_agent(
     project_name: str = "your project",
     customer_name: Optional[str] = None,
     developer_name: Optional[str] = None,
+    agent_name: Optional[str] = None,
     stream_open_at: Optional[float] = None,
 ):
     # Converted once, here, so the greeting and the prompt address the prospect the same
     # way. Told the full name, the model uses the full name for the rest of the call — and
     # then the opening line and every turn after it disagree about who it is talking to.
     customer_name = spoken_name(customer_name) or None
+    # One name for the whole call — the greeting, the re-introduction and the prompt
+    # all take it from here, so they cannot disagree about who is speaking.
+    agent_name = (agent_name or "").strip() or AGENT_NAME
 
     logger.info(
         f"[{call_sid}] Voice agent starting | client={client_type} | project='{project_name}' "
         f"| calling as='{caller_identity(project_name, developer_name)}' "
-        f"| lead={customer_name or 'unnamed'} | llm={primary_endpoint(settings)}"
+        f"| as={agent_name} | lead={customer_name or 'unnamed'} | llm={primary_endpoint(settings)}"
     )
 
     vad_analyzer = SileroVADAnalyzer(
@@ -495,7 +505,7 @@ async def run_voice_agent(
             f"the caller hears silence until it comes back: {message}"
         )
 
-    system_prompt = get_system_prompt(campaign_context, customer_name)
+    system_prompt = get_system_prompt(campaign_context, customer_name, agent_name)
     messages = [{"role": "system", "content": system_prompt}]
     
     task_ref = []
@@ -846,7 +856,10 @@ async def run_voice_agent(
             # GreetingOnlyMinWords protects for the rest of the opening line anyway.
             if not _user_has_spoken:
                 opening_line = build_opening_line(
-                    project_name, customer_name, developer_name=developer_name
+                    project_name,
+                    customer_name,
+                    developer_name=developer_name,
+                    agent_name=agent_name,
                 )
                 context.add_message({"role": "assistant", "content": opening_line})
                 logger.info(f"[{call_sid}] AGENT → \"{opening_line}\"")
@@ -1034,7 +1047,9 @@ async def run_voice_agent(
             # its own assistant message: three AGENT lines in the log for one thing said,
             # and a changed prefix that cost the first inference its cache — turn 2 of call
             # f1d9804b read cached=0 where every other call reads a few thousand.
-            again = build_reintroduction(project_name, customer_name, developer_name)
+            again = build_reintroduction(
+                project_name, customer_name, developer_name, agent_name
+            )
             await task.queue_frames([InterruptionWorkerFrame()])
             await task.flush_pipeline(timeout=2.0)
             context.add_message({"role": "assistant", "content": again})

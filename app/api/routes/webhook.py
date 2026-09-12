@@ -165,6 +165,9 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             # written before this field existed will simply not have the key. Missing means
             # the greeting names the project, which is what it did before either way.
             developer_name=project.get("developer_name"),
+            # Same .get for the same reason: a Redis entry written before this column
+            # existed has no key, and missing means the default name, as before.
+            agent_name=project.get("agent_name"),
             customer_name=await recall_customer_name(call_sid),
             # So the first word can be timed from the moment the media stream opened rather
             # than from the pipeline, which starts two database round trips later. The

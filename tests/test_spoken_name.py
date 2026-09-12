@@ -101,7 +101,10 @@ def test_it_can_be_applied_twice_without_changing_the_answer():
 )
 def test_the_greeting_says_it_the_way_a_person_would(raw, said):
     line = build_opening_line(PROJECT, raw, developer_name=DEVELOPER)
-    assert f"Good morning {said}." in line or f"Good afternoon {said}." in line or f"Good evening {said}." in line
+    # The name moved from beside the salutation into the question the greeting ends on —
+    # "Am I speaking with Rahul?" rather than "Good afternoon Rahul." What it must never be
+    # is the raw dial-list spelling.
+    assert f"Am I speaking with {said}?" in line
     assert raw not in line or raw == said
 
 
@@ -109,7 +112,11 @@ def test_a_greeting_with_no_usable_name_reads_as_a_sentence():
     """Not "Good morning ." — the space and the name go together or neither does."""
     line = build_opening_line(PROJECT, "राहुल", developer_name=DEVELOPER)
     assert " ." not in line
-    assert "Hi, Good" in line
+    assert "Hello, Good" in line
+    # No name to confirm, so it asks for one — the same question pointed the other way,
+    # never a greeting left hanging with nobody in it.
+    assert "May I know your good name?" in line
+    assert "Am I speaking with" not in line
 
 
 def test_the_prompt_is_told_the_same_name_the_greeting_said():
@@ -119,7 +126,7 @@ def test_the_prompt_is_told_the_same_name_the_greeting_said():
         __import__("app.services.agent", fromlist=["x"]).run_voice_agent
     )
     converted = src.index("customer_name = spoken_name(customer_name)")
-    assert converted < src.index("get_system_prompt(campaign_context, customer_name)")
+    assert converted < src.index("get_system_prompt(campaign_context, customer_name")
     assert converted < src.index("build_opening_line(")
 
 
@@ -145,7 +152,7 @@ def test_the_project_is_not_the_first_thing_said_about_it():
     prompt = get_system_prompt("Project Name: X", "Rahul")
     assert "We are launching a new project in [location]." in prompt
     assert "We are launching [project name]" not in prompt
-    assert "NEVER open with the project name" in prompt
+    assert "NEVER open a call with it" in prompt
 
 
 def test_the_name_still_gets_said_once_they_know_what_it_is():
@@ -173,5 +180,8 @@ def test_the_intent_gate_is_still_the_question_that_ends_the_opening():
     from app.prompts.agent_prompts import get_system_prompt
 
     prompt = get_system_prompt("Project Name: X", "Rahul")
-    gate = prompt.index("Are you looking for any property purchase?")
-    assert prompt.index("It is called [project name]") < gate
+    # The gate now ends step 2 on its own — the project name and the headline moved into
+    # step 3, so the question comes BEFORE them rather than after. Splitting them is what
+    # took step 2 from twelve seconds to under seven.
+    gate = prompt.index("Are you looking to buy a property?")
+    assert gate < prompt.index("It is called [project name]")

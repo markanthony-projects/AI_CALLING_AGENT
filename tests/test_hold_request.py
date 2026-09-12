@@ -348,7 +348,9 @@ def test_the_reintroduction_survives_a_missing_name():
 
     for missing in (None, "", "   "):
         again = build_reintroduction("Some Project", missing, developer_name="Some Developer")
-        assert "Hi." in again or "Hi " in again
+        # No name to confirm, so it asks for one rather than leaving the sentence hanging.
+        assert "May I know your good name?" in again
+        assert "Am I speaking with" not in again
         assert "  " not in again
 
 

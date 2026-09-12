@@ -28,8 +28,8 @@ NAMED = get_system_prompt(CONTEXT, "Rahul Sharma")
 
 def test_the_whole_greeting():
     assert build_opening_line("Abhee New Dimension", "Rahul", MORNING) == (
-        "Hi, Good morning Rahul. I am Priya calling you from Abhee New Dimension. "
-        "Can I speak to you for a minute?"
+        "Hello, Good morning. My name is Priya, and I am calling you from "
+        "Abhee New Dimension. Am I speaking with Rahul?"
     )
 
 
@@ -40,15 +40,25 @@ def test_the_greeting_follows_the_prospects_clock(when, part):
     """The droplet runs on UTC. Read there, 09:30 IST — the middle of a dialing shift —
     looks like 04:00, and the prospect is wished good morning at what the machine thinks is
     the dead of night. The 5h30m offset moves the afternoon boundary by half a day too."""
-    assert f"Good {part} " in build_opening_line("X", "Rahul", when)
+    assert f"Good {part}." in build_opening_line("X", "Rahul", when)
 
 
-def test_it_addresses_them_rather_than_interrogating_them():
-    """"Am I speaking with Rahul?" opens by making them account for themselves. Using the
-    name to address them is how a person opens a call."""
+def test_it_confirms_who_it_reached_rather_than_asking_permission():
+    """Reversed on 12 Sep, and the argument it replaced is worth keeping.
+
+    This test used to assert the opposite: that "Am I speaking with Rahul?" makes them
+    account for themselves, and that addressing them by name is how a person opens a call.
+    That is true of the phrasing and it missed what the old ending did — "Can I speak to you
+    for a minute?" invites a NO from somebody who has not heard anything yet. The new one
+    invites a yes.
+
+    It also buys something the old line only assumed: that the person who picked up is the
+    person on the dial list. A whole pitch delivered to a family member is a wasted call."""
     line = build_opening_line("X", "Rahul", MORNING)
-    assert "Am I speaking with" not in line
-    assert line.startswith("Hi, Good morning Rahul.")
+    assert "Am I speaking with Rahul?" in line
+    assert "Can I speak to you for a minute?" not in line
+    # and the name is still used, just at the end rather than beside the salutation
+    assert "Rahul" in line
 
 
 def test_it_ends_on_a_question_so_the_prospect_knows_it_is_their_go():
@@ -61,14 +71,14 @@ def test_it_ends_on_a_question_so_the_prospect_knows_it_is_their_go():
     there for its information; it is there to pass the turn over."""
     line = build_opening_line("X", "Rahul", MORNING)
     assert line.rstrip().endswith("?")
-    assert "Can I speak to you for a minute?" in line
+    assert "Am I speaking with Rahul?" in line
 
 
 def test_the_prompt_ends_the_greeting_the_same_way():
     """The greeting is cancelled if the prospect speaks first and the MODEL introduces itself
     instead. The two have to end the same way or half the calls open differently."""
-    assert "Can I speak to you for a minute?" in PROMPT
-    assert "same request for a minute of their time" in PROMPT
+    assert "Am I speaking with [their name]?" in PROMPT
+    assert "same name, same company, same question" in PROMPT
 
 
 def test_the_agent_and_the_prompt_agree_on_who_is_calling():
@@ -82,7 +92,7 @@ def test_the_agent_and_the_prompt_agree_on_who_is_calling():
 @pytest.mark.parametrize("missing", [None, "", "   "])
 def test_without_a_name_the_greeting_omits_it_rather_than_guessing(missing):
     line = build_opening_line("X", missing, MORNING)
-    assert line.startswith("Hi, Good morning. I am")
+    assert line.startswith("Hello, Good morning. My name is")
     assert "None" not in line and "  " not in line
 
 
@@ -231,13 +241,18 @@ def test_both_reach_the_model_as_named_lines():
 
 def test_the_prompt_puts_the_hook_in_the_opening_and_the_money_with_the_price():
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "Headline" in gate
-    assert "Price benefit" not in gate, "the discount belongs next to the price, not before"
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    # The hook moved out of the gate on 12 Sep. Step 2 carried the launch line, the project
+    # name AND the headline, ran twelve seconds, and a prospect said "you're launching, but
+    # what?" before it finished. The gate is now two sentences; the hook is the first thing
+    # in the walk.
+    assert "Headline" not in gate, "step 2 is the gate, not the pitch"
+    assert "Headline" in intro
+    assert "Price benefit" not in gate, "the discount belongs next to the price, not before"
     assert "Price benefit" in intro
 
 
-def test_the_project_is_shown_in_four_turns_and_not_one():
+def test_the_project_is_shown_in_five_turns_and_not_one():
     """It used to be one reply: location, unit types, starting price and the price benefit,
     capped at 35 words. The model produced 32 — eleven seconds of speaking — and on two calls
     the prospect sat through all of it and then said "not interested", having said nothing at
@@ -245,7 +260,7 @@ def test_the_project_is_shown_in_four_turns_and_not_one():
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
     for step in ("3a.", "3b.", "3c.", "3d."):
         assert step in intro, step
-    assert "FOUR SHORT TURNS, NEVER ONE" in intro
+    assert "FIVE SHORT TURNS, NEVER ONE" in intro
     assert "Under 20 words a turn" in intro
 
 
@@ -259,8 +274,9 @@ def test_the_headline_is_said_once_and_only_in_the_opening():
     meant to be the hook is the first thing that makes an agent sound automated."""
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
-    assert "Headline" in gate, "the hook has to live somewhere"
-    assert 'NOT repeat is the "Headline"' in intro
+    assert "Headline" not in gate, "step 2 is the gate; the hook opens the walk"
+    assert "Headline" in intro, "the hook has to live somewhere"
+    assert "THE HEADLINE ARRIVES FINISHED" in intro
 
 
 def test_the_location_is_said_again_where_the_question_needs_it():
@@ -270,17 +286,20 @@ def test_the_location_is_said_again_where_the_question_needs_it():
 
     Keeping the headline out of 3a was right. Taking the location out with it was not."""
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
-    assert "SAY THE LOCATION" in intro
-    assert "The location is not optional here" in intro
-    assert '"Do you know that area?" gets "Which area?" back' in intro
+    # Step 2 names the location and the very next turn asks about it by name, so the
+    # question cannot arrive twenty seconds adrift of its subject. And the question asks
+    # whether the area WORKS for them, which is an answer worth having — "Do you know
+    # Varthur?" asks about geography and sorts nobody.
+    assert "Is [locality] convenient for you?" in intro
+    assert 'Do NOT ask "Do you know [locality]?"' in intro
 
 
 def test_the_project_name_is_actually_spoken():
     """On the same call it was never said at all until the closing read-back. Step 2 is the
     one place it belongs, and a prospect who never hears it cannot ask anyone about it."""
-    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "SAY THE PROJECT NAME HERE" in gate
-    assert "cannot ask anyone about it later" in gate
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "SAY THE PROJECT NAME HERE" in intro
+    assert "cannot ask anyone about it later" in intro
 
 
 def test_each_of_those_turns_ends_by_handing_the_turn_back():
@@ -288,7 +307,7 @@ def test_each_of_those_turns_ends_by_handing_the_turn_back():
     the same monologue with pauses in it."""
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
     assert "ask ONE easy question, then STOP" in intro
-    assert "they should have spoken four times" in intro
+    assert "they should have spoken five times" in intro
 
 
 def test_the_questions_are_required_to_be_easy():
@@ -302,7 +321,7 @@ def test_the_questions_are_required_to_be_easy():
 def test_the_price_quoted_is_for_the_size_they_asked_about():
     """Reading the whole range back is the old one-breath pitch returning by another door."""
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
-    assert "if they named a size in 3c, give the price of THAT size" in intro
+    assert "if they named a size in 3d, give the price of THAT size" in intro
 
 
 def test_a_size_they_never_named_is_never_put_in_their_mouth():
@@ -325,14 +344,14 @@ def test_a_size_they_never_named_is_never_put_in_their_mouth():
 @pytest.mark.parametrize(
     "phrase",
     [
-        "Are you looking for any property purchase?",
+        "Are you looking to buy a property?",
         # The project is named here rather than in the greeting, which introduces the
         # developer. Told only "a new project in Varthur", the prospect has heard nothing
         # they can hold on to — that is true of every builder calling them that afternoon.
         "We are launching a new project in [location].",
         "We have launched a new project in [location].",
         "It is called [project name].",
-        "Do NOT list amenities, prices or configurations before you ask this",
+        "Do NOT name the project here",
     ],
 )
 def test_the_opening_gate_precedes_the_pitch(phrase):
@@ -549,8 +568,8 @@ def test_the_call_reads_the_name_back_out_of_redis():
 def test_the_agent_greets_with_the_lead_name():
     src = inspect.getsource(__import__("app.services.agent", fromlist=["x"]).run_voice_agent)
     assert "build_opening_line(" in src
-    assert "project_name, customer_name, developer_name=developer_name" in src
-    assert "get_system_prompt(campaign_context, customer_name)" in src
+    assert "developer_name=developer_name" in src
+    assert "get_system_prompt(campaign_context, customer_name" in src
 
 
 # --- what a live call on 10 Sep cost, written where the model reads it -------------------------
@@ -562,9 +581,12 @@ def test_the_opening_has_a_word_budget_and_the_reason_is_in_seconds():
     words, while this voice speaks about two and a half words a second. A cap the model
     reads as "35" and the caller hears as "fourteen seconds" is a cap in the wrong unit."""
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "ALL OF STEP 2 TOGETHER IS UNDER 30 WORDS" in gate
+    # Cut from 30 to 20 on 12 Sep by moving the name and the headline into step 3. A budget
+    # is only real if there is something to cut, and this one was met by removing work from
+    # the turn rather than by asking the model to squeeze.
+    assert "UNDER 20 WORDS" in gate
     assert "twelve seconds" in gate
-    assert "the headline is what gets shorter" in gate, "a budget with nothing to cut is a wish"
+    assert "Do NOT name the project here" in gate
 
 
 def test_3a_must_name_the_place_in_the_same_breath_as_the_question():
@@ -573,8 +595,12 @@ def test_3a_must_name_the_place_in_the_same_breath_as_the_question():
     prospect had last heard the name twenty seconds earlier and answered "Sorry, I did not
     catch that.\""""
     intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
-    assert "NAME THE PLACE IN THE SAME BREATH AS THE QUESTION ABOUT IT." in intro
-    assert "It sits on 45 acres with 14 towers" in intro, "the failure has to travel with the rule"
+    # The shape changed on 12 Sep and the lesson did not: step 2 names the location, and the
+    # very next turn asks about it by name — "Is [locality] convenient for you?" — so the
+    # question can never arrive twenty seconds adrift of its subject again.
+    assert "Is [locality] convenient for you?" in intro
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    assert "a new project in [location]" in gate
 
 
 def test_the_headline_is_spoken_as_a_sentence_and_not_as_a_caption():
@@ -692,9 +718,9 @@ def test_the_prompt_only_has_to_stop_it_being_rewritten_now():
     """"It is called Abhee Codename New Dimension. It is Bengaluru's first Scotland-themed
     residential township." Both sentences, same two opening words. The verb fix made the
     second one a sentence; matched openings are what made it sound like a template anyway."""
-    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "THE HEADLINE ARRIVES FINISHED" in gate
-    assert "do not re-word it" in gate
+    intro = PROMPT[PROMPT.index("3. SHOW THEM THE PROJECT") : PROMPT.index("4. DISCOVERY")]
+    assert "THE HEADLINE ARRIVES FINISHED" in intro
+    assert "do not re-word it" in intro
 
 
 def test_the_rules_that_fought_each_other_are_gone_rather_than_stacked():
@@ -737,3 +763,52 @@ def test_every_close_reads_back_and_not_only_the_rejection_one():
     assert "1.46 Crore one you liked" in block
     # and it must not invent a read-back out of nothing
     assert "do not invent" in block
+
+
+# --- one name per campaign ----------------------------------------------------------------
+
+
+def test_the_campaign_chooses_who_is_calling():
+    """A builder running two campaigns has two teams, and the name on the call should say
+    which one. projects.agent_name, nullable, falling back to the default."""
+    line = build_opening_line("X", "Rahul", MORNING, developer_name="Y", agent_name="Ananya")
+    assert "My name is Ananya," in line
+    assert AGENT_NAME not in line
+
+
+def test_without_one_the_default_still_answers():
+    """A project row written before the column existed keeps a NULL, and a schema change
+    must not alter what a live call says before anybody has typed the new value in."""
+    for missing in (None, "", "   "):
+        line = build_opening_line("X", "Rahul", MORNING, developer_name="Y", agent_name=missing)
+        assert f"My name is {AGENT_NAME}," in line
+
+
+def test_the_reintroduction_uses_the_same_name():
+    """It is said when the prospect's first words are "Hello?" — the same call, a few seconds
+    later. Two different names inside ten seconds is worse than not re-introducing at all."""
+    from app.services.agent import build_reintroduction
+
+    again = build_reintroduction("X", "Rahul", "Y", "Ananya")
+    assert "My name is Ananya," in again
+    assert AGENT_NAME not in again
+
+
+def test_the_prompt_is_told_the_same_name():
+    """The greeting is cancelled if the prospect speaks first and the MODEL introduces itself
+    instead. Two sources for the name would hand the caller to a different person mid-call."""
+    from app.prompts.agent_prompts import get_system_prompt
+
+    prompt = get_system_prompt("Project Name: X", "Rahul", "Ananya")
+    assert "You are Ananya," in prompt
+    assert "My name is Ananya," in prompt
+    assert f"You are {AGENT_NAME}," not in prompt
+
+
+def test_the_agent_resolves_the_name_once_for_the_whole_call():
+    """Resolved at the top of run_voice_agent and passed everywhere, so the greeting, the
+    re-introduction and the prompt cannot disagree about who is speaking."""
+    src = inspect.getsource(__import__("app.services.agent", fromlist=["x"]).run_voice_agent)
+    resolved = src.index('agent_name = (agent_name or "").strip() or AGENT_NAME')
+    for used in ("build_opening_line(", "get_system_prompt(", "build_reintroduction("):
+        assert resolved < src.index(used), used
