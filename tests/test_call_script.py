@@ -648,8 +648,42 @@ def test_a_decision_is_not_re_opened_because_the_budget_fits():
     answer is a decision. Their requirement is still worth having — for the next project."""
     block = _not_for_them()
     assert "THAT RE-CHECK IS FOR A GUESS, NOT FOR A DECISION" in block
-    assert "NEVER pitch this project again" in block
+    assert "Stop PITCHING it" in block
     assert "A budget that fits is not a reason to re-open something they have already closed" in block
+    # Not silence, though. The campaign is for this project and one honest match is still
+    # worth raising — once, in their own words, with their answer final. See
+    # app/utils/project_rejected.py, which is what the model is actually shown.
+    assert "you may still raise it ONCE" in block
+    assert "answer to that is final" in block
     # and the guess half has to survive: it is the rule that saved a 1.5 Cr lead
     assert "they are guessing" in block
     assert "GO BACK TO STEP 3" in block
+
+
+def test_each_question_reacts_to_the_answer_before_it():
+    """Call f556caf9. One question per turn landed — and produced four bare questions in a
+    row, every one answered and not one acknowledged. The prospect was interviewed. Step 4
+    has said "reacting to each answer before the next" since it was written; step 5's list
+    had no such line, so fixing the list created this."""
+    block = _not_for_them()
+    assert "REACT BEFORE YOU ASK THE NEXT ONE" in block
+    assert "being interviewed and somebody being listened to" in block
+
+
+def test_the_close_reads_back_what_was_collected():
+    """Same call. Four questions answered, then "Thank you for your time, Rahul. Have a
+    great day." and the line went dead. The read-back is the only proof the prospect has
+    that any of it was heard — and the only thing that makes the answers look like a lead
+    rather than an interrogation."""
+    block = _not_for_them()
+    assert "READ IT BACK" in block
+    assert "what they want, where, and the budget" in block
+
+
+def test_two_sentences_in_a_row_may_not_open_the_same_way():
+    """"It is called Abhee Codename New Dimension. It is Bengaluru's first Scotland-themed
+    residential township." Both sentences, same two opening words. The verb fix made the
+    second one a sentence; matched openings are what made it sound like a template anyway."""
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    assert "MUST NOT START THE WAY THE SENTENCE BEFORE IT STARTED" in gate
+    assert "Never begin two sentences in a row with the same two words" in gate

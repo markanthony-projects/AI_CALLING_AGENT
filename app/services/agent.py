@@ -35,6 +35,8 @@ from app.services.llm_provider import (
 )
 from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
 from app.utils.asked import REPEAT_LIMIT, AskedSoFar
+from app.utils.project_rejected import BRIEF as PROJECT_RULED_OUT
+from app.utils.project_rejected import rejects_the_project
 from app.utils.booking_claim import unagreed_booking
 from app.utils.closing_gate import ClosingGate
 from app.utils.dashes import DashFilter
@@ -400,6 +402,12 @@ async def run_voice_agent(
         ),
     )
 
+    # Built before anything is constructed, so its first reading is the setup that comes
+    # before the connections: the call row, the project read, the services themselves. On
+    # call f556caf9 the greeting waited 1013ms for STT and there was no way to tell how
+    # much of that was the websocket handshake and how much was everything before it.
+    startup = StartupClock(call_sid, stream_open_at=stream_open_at)
+
     # Not GroqLLMService directly: the SDK's default two silent retries honour Retry-After
     # inside the same await, so a 429 reached the logs as `groq=14605ms` with no error and
     # the caller sat through all fourteen seconds of it. See app/services/llm_provider.py.
@@ -438,6 +446,8 @@ async def run_voice_agent(
             # must be validated against Sarvam's API before it reaches a live call.
         ),
     )
+
+    startup.mark("services built")
 
     # Sarvam's websocket is torn down and reopened on every interruption — Pipecat's own
     # InterruptibleTTSService does it, to drop audio the prospect has just spoken over. On a
@@ -721,8 +731,6 @@ async def run_voice_agent(
     # enable_metrics makes each service report its TTFB; the observer correlates those
     # with the turn boundaries to produce the caller's actual wait.
     latency = LatencyObserver(call_sid, stream_open_at=stream_open_at)
-    # What the greeting waited behind. Log-only; see app/utils/startup_clock.py.
-    startup = StartupClock(call_sid, stream_open_at=stream_open_at)
     task = PipelineWorker(
         pipeline,
         params=PipelineParams(
@@ -743,6 +751,10 @@ async def run_voice_agent(
     # the repetition. See app/utils/asked.py.
     asked = AskedSoFar()
     _asked_shown: str = ""
+    # Set the moment they rule THIS project out, and never cleared. See
+    # app/utils/project_rejected.py: the static rule in step 5 was written the day before
+    # call f556caf9, and that call pitched the project again anyway.
+    _project_ruled_out: bool = False
 
     def refresh_asked_brief() -> None:
         """Put the block in front of the model, or take it away again.
@@ -755,7 +767,8 @@ async def run_voice_agent(
         re-set.
         """
         nonlocal _asked_shown
-        brief = asked.brief()
+        blocks = [asked.brief(), PROJECT_RULED_OUT if _project_ruled_out else ""]
+        brief = "\n\n".join(b for b in blocks if b)
         if brief == _asked_shown:
             return
         _asked_shown = brief
@@ -1042,6 +1055,18 @@ async def run_voice_agent(
             _user_has_spoken = True
             _holding = False
             logger.info(f"[{call_sid}] USER  → \"{transcript}\" (Total Turn Duration: {total_turn_time})")
+
+            # Appended to the system message the way ALREADY ASKED is, and for the same
+            # reason: a rule that appears only once it applies does not compete with the two
+            # hundred lines around it. Never unset — nobody un-rules-out a project.
+            nonlocal _project_ruled_out
+            if not _project_ruled_out and rejects_the_project(transcript):
+                _project_ruled_out = True
+                logger.info(
+                    f"[{call_sid}] They have ruled this project out; taking their "
+                    f"requirement for another one and not naming it again"
+                )
+                refresh_asked_brief()
 
             # "Can you say it again with... little bit slow hai?" — asked twice on a live
             # call, and answered twice at exactly the same speed, because the pace was a

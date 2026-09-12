@@ -128,3 +128,20 @@ def test_it_changes_nothing_about_the_call():
     src = inspect.getsource(StartupClock)
     for forbidden in ("await", "async ", "sleep", "queue_frames", "push_frame"):
         assert forbidden not in src, forbidden
+
+
+def test_the_setup_before_the_connections_is_measured_too():
+    """Call f556caf9 read stt=+1013ms, and the clock was built after the services were, so
+    that number was the websocket handshake AND everything before it — the call row, the
+    project read, the services themselves — with no way to tell which. A number that could
+    mean two very different fixes is not yet an answer."""
+    assert 'startup.mark("services built")' in AGENT_SRC
+    tree = ast.parse(AGENT_SRC)
+    built = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "StartupClock"
+    )
+    services = AGENT_SRC.index('startup.mark("services built")')
+    assert built.lineno < AGENT_SRC[:services].count("\n") + 1, "the clock must exist first"
+    # and it must be built before the services it is timing
+    assert built.lineno < AGENT_SRC[: AGENT_SRC.index("llm = build_llm_service")].count("\n") + 1
