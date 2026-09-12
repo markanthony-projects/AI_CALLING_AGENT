@@ -216,6 +216,10 @@ class ConnectsWhileTheGreetingPlays(DeepgramFluxSTTService):
     """
 
     def __init__(self, **kwargs):
+        # See KeepsItsVoice: the latency label comes from the instance name, and it has to
+        # name the vendor. Flux reports no TTFB today, so this has never shown up in a log —
+        # which is exactly how it would arrive unnoticed the day it does.
+        kwargs.setdefault("name", DeepgramFluxSTTService.__name__)
         super().__init__(**kwargs)
         self._opened_once = False
         self._opening = None

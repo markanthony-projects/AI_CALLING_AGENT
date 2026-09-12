@@ -124,3 +124,39 @@ def test_a_generator_override_is_still_a_generator(cls, bases):
                 f"{cls.__name__}.{name} must be an async generator; "
                 f"{theirs.__qualname__} is one"
             )
+
+
+# --- and the name the metric is filed under ---------------------------------------------
+
+
+def test_a_subclass_does_not_rename_the_latency_metric():
+    """app/utils/latency.py derives its label from the instance name, so wrapping a vendor
+    service renames its number. The first call on KeepsItsVoice logged
+
+        keepsitsvoice=201ms  keepsitsvoice_audio=348ms(silence=147ms)
+
+    where every earlier call in this repository logged sarvam=. Nothing failed; the history
+    simply stopped matching, which is worse than failing."""
+    from app.utils.latency import _short
+
+    # The most derived vendor base only. Several classes in a service's MRO end in
+    # "TTSService" — InterruptibleTTSService, WebsocketTTSService — and none of those is the
+    # vendor whose latency the number belongs to.
+    wrapped = []
+    for cls, bases in _our_pipecat_subclasses():
+        vendor = next(
+            (b for b in bases if b.__name__.endswith(("TTSService", "STTService", "LLMService"))),
+            None,
+        )
+        if vendor is not None:
+            wrapped.append((cls, vendor))
+    assert wrapped, "no vendor services are wrapped; this test would prove nothing"
+    for cls, vendor in wrapped:
+        src = inspect.getsource(cls.__init__)
+        assert 'setdefault("name"' in src, (
+            f"{cls.__name__} does not name itself, so its latency line will read "
+            f"'{_short(cls.__name__)}=' instead of '{_short(vendor.__name__)}='"
+        )
+        assert vendor.__name__ in src, (
+            f"{cls.__name__} names itself something other than {vendor.__name__}"
+        )

@@ -60,6 +60,12 @@ class KeepsItsVoice(SarvamTTSService):
     """
 
     def __init__(self, **kwargs):
+        # Named after the vendor, not after this class. app/utils/latency.py derives its
+        # metric label from the instance name, so the first call on this subclass logged
+        # "keepsitsvoice=201ms" where every earlier call in this repository logged
+        # "sarvam=201ms" — silently breaking every comparison against its own history. The
+        # number is Sarvam's latency whatever we wrap it in.
+        kwargs.setdefault("name", SarvamTTSService.__name__)
         super().__init__(**kwargs)
         self._revivals = 0
 
