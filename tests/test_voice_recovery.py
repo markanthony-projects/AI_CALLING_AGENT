@@ -40,7 +40,7 @@ def _spy(service):
         calls["connect"] += 1
         service._websocket = object()
 
-    async def spoke(text):
+    async def spoke(text, context_id):
         calls["spoke"] += 1
         if False:
             yield None
@@ -50,7 +50,10 @@ def _spy(service):
 
 
 async def _say(service, text="hello"):
-    async for _ in service.run_tts(text):
+    # Called the way pipecat calls it — text AND context_id. The first version of these
+    # tests passed one argument, which is exactly what the override declared, so the suite
+    # agreed with the bug and production ended a call 1.2 seconds in.
+    async for _ in service.run_tts(text, "ctx"):
         pass
 
 
@@ -63,7 +66,7 @@ def test_a_closed_socket_is_reopened_before_speaking():
         calls = _spy(service)
         service._websocket = None
 
-        async def fake_super(text):
+        async def fake_super(text, context_id):
             calls["spoke"] += 1
             if False:
                 yield None
@@ -71,7 +74,7 @@ def test_a_closed_socket_is_reopened_before_speaking():
         import app.services.voice as voice
 
         original = voice.SarvamTTSService.run_tts
-        voice.SarvamTTSService.run_tts = lambda self, text: fake_super(text)
+        voice.SarvamTTSService.run_tts = lambda self, text, context_id: fake_super(text, context_id)
         try:
             await _say(service)
         finally:
@@ -94,12 +97,12 @@ def test_an_open_socket_is_left_alone():
 
         original = voice.SarvamTTSService.run_tts
 
-        async def fake_super(text):
+        async def fake_super(text, context_id):
             calls["spoke"] += 1
             if False:
                 yield None
 
-        voice.SarvamTTSService.run_tts = lambda self, text: fake_super(text)
+        voice.SarvamTTSService.run_tts = lambda self, text, context_id: fake_super(text, context_id)
         try:
             await _say(service)
         finally:
@@ -128,11 +131,11 @@ def test_it_gives_up_rather_than_hammering_a_dead_service():
 
         original = voice.SarvamTTSService.run_tts
 
-        async def fake_super(text):
+        async def fake_super(text, context_id):
             if False:
                 yield None
 
-        voice.SarvamTTSService.run_tts = lambda self, text: fake_super(text)
+        voice.SarvamTTSService.run_tts = lambda self, text, context_id: fake_super(text, context_id)
         try:
             for _ in range(MAX_REVIVALS + 4):
                 service._websocket = None
@@ -188,3 +191,31 @@ def test_the_reconnect_race_is_described_where_it_happens():
     assert "await self._connect()" in src
     assert "self._websocket = None" in src
     assert "Websocket not connected" in src
+
+
+def test_the_override_accepts_everything_pipecat_passes():
+    """The test that was missing, and the reason production broke.
+
+    KeepsItsVoice.run_tts declared (self, text) while SarvamTTSService.run_tts is
+    (self, text, context_id). Every call raised TypeError, three of them tripped
+    MAX_TTS_FAILURES, and the call ended with "tts unavailable" after 1.2 seconds. The
+    suite was green because its fakes had copied the wrong signature — it was testing the
+    stub, not the contract.
+
+    Bound against the base's own parameters, so a future pipecat signature cannot drift
+    past this either."""
+    from pipecat.services.sarvam.tts import SarvamTTSService
+
+    base = inspect.signature(SarvamTTSService.run_tts)
+    ours = inspect.signature(KeepsItsVoice.run_tts)
+    passed = [p.name for p in base.parameters.values() if p.name != "self"]
+    assert passed, "the base takes nothing; this test would prove nothing"
+    ours.bind(object(), *passed)
+
+
+def test_it_really_is_an_async_generator():
+    """An override that returned a coroutine instead of yielding would break the same way
+    and just as quietly."""
+    import inspect as _inspect
+
+    assert _inspect.isasyncgenfunction(KeepsItsVoice.run_tts)

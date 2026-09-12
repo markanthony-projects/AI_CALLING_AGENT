@@ -68,8 +68,16 @@ class KeepsItsVoice(SarvamTTSService):
         """How many times this call's voice had to be brought back."""
         return self._revivals
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
-        """Speak, having first made sure there is something to speak down."""
+    async def run_tts(self, *args, **kwargs) -> AsyncGenerator[Frame, None]:
+        """Speak, having first made sure there is something to speak down.
+
+        Takes *args deliberately. The first version of this declared (self, text) while
+        SarvamTTSService.run_tts is (self, text, context_id), so every call raised TypeError,
+        three of them tripped MAX_TTS_FAILURES, and the call ended 1.2 seconds in with
+        "tts unavailable". This override cares about exactly one thing — is there a socket —
+        and has no business restating a signature it does not use. See
+        tests/test_voice_recovery.py, which now calls it the way pipecat does.
+        """
         if not self._websocket and self._revivals < MAX_REVIVALS:
             self._revivals += 1
             logger.warning(
@@ -77,5 +85,5 @@ class KeepsItsVoice(SarvamTTSService):
                 f"(revival {self._revivals}/{MAX_REVIVALS}); reconnecting before speaking"
             )
             await self._connect()
-        async for frame in super().run_tts(text):
+        async for frame in super().run_tts(*args, **kwargs):
             yield frame
