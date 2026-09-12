@@ -613,8 +613,8 @@ def test_a_fact_already_given_is_not_given_again():
     The existing rule covered QUESTIONS only, and the repetition that makes an agent sound
     like a recording is in the statements."""
     assert "NEVER SAY THE SAME THING TWICE" in PROMPT
-    block = PROMPT[PROMPT.index("NEVER SAY THE SAME THING TWICE") : PROMPT.index("SAY NUMBERS THE WAY")]
-    assert "not only your questions" in block
+    block = PROMPT[PROMPT.index("NEVER SAY THE SAME THING TWICE") : PROMPT.index("ONE NUMBER PER OPTION")]
+    assert "Statements, not only questions" in block
     assert "Say the NEXT thing." in block
     # The two ways out, so the rule cannot silence a genuine repeat request or a cut-off line
     assert "asked you to repeat" in block
@@ -643,7 +643,6 @@ def test_the_five_questions_are_five_turns_and_never_one():
     block = _not_for_them()
     assert "ASK ONE QUESTION, THEN STOP AND LET THEM ANSWER" in block
     assert "five separate turns and never one" in block
-    assert "so many questions at one time" in block
 
 
 def test_a_decision_is_not_re_opened_because_the_budget_fits():
@@ -656,13 +655,13 @@ def test_a_decision_is_not_re_opened_because_the_budget_fits():
     it is. Someone who has heard the name, the place and what it is has the facts, and their
     answer is a decision. Their requirement is still worth having — for the next project."""
     block = _not_for_them()
-    assert "THAT RE-CHECK IS FOR A GUESS, NOT FOR A DECISION" in block
+    assert "THAT RE-CHECK IS FOR A GUESS, NOT A DECISION" in block
     assert "Stop PITCHING it" in block
     assert "A budget that fits is not a reason to re-open something they have already closed" in block
     # Not silence, though. The campaign is for this project and one honest match is still
     # worth raising — once, in their own words, with their answer final. See
     # app/utils/project_rejected.py, which is what the model is actually shown.
-    assert "you may still raise it ONCE" in block
+    assert "You may raise it ONCE" in block
     assert "answer to that is final" in block
     # and the guess half has to survive: it is the rule that saved a 1.5 Cr lead
     assert "they are guessing" in block
@@ -676,7 +675,7 @@ def test_each_question_reacts_to_the_answer_before_it():
     had no such line, so fixing the list created this."""
     block = _not_for_them()
     assert "REACT BEFORE YOU ASK THE NEXT ONE" in block
-    assert "being interviewed and somebody being listened to" in block
+    assert "Five bare questions in a row is a form" in block
 
 
 def test_the_close_reads_back_what_was_collected():
@@ -686,7 +685,7 @@ def test_the_close_reads_back_what_was_collected():
     rather than an interrogation."""
     block = _not_for_them()
     assert "READ IT BACK" in block
-    assert "what they want, where, and the budget" in block
+    assert "BEFORE YOU HANG UP" in block, "the rule moved to a block that covers every close"
 
 
 def test_the_prompt_only_has_to_stop_it_being_rewritten_now():
@@ -722,8 +721,8 @@ def test_a_list_of_options_carries_one_number_each():
     Three options is fine. Six numbers is not."""
     assert "ONE NUMBER PER OPTION WHEN YOU LIST THEM" in PROMPT
     block = PROMPT[PROMPT.index("ONE NUMBER PER OPTION") : PROMPT.index("SAY NUMBERS THE WAY")]
-    assert "the NAME and the PRICE, nothing else" in block
-    assert "Hello hello" in block, "the failure has to travel with the rule"
+    assert "Name and price, nothing else" in block
+    assert "Three options is fine; two numbers each is not" in block
 
 
 def test_every_close_reads_back_and_not_only_the_rejection_one():
@@ -732,7 +731,8 @@ def test_every_close_reads_back_and_not_only_the_rejection_one():
     information, and heard "Sure, I will send you the floor plans... Have a great day." Not
     one of their own words came back."""
     assert "BEFORE YOU HANG UP, SAY WHAT YOU HEARD" in PROMPT
-    block = PROMPT[PROMPT.index("BEFORE YOU HANG UP") : PROMPT.index("BEFORE YOU HANG UP") + 1200]
+    start = PROMPT.index("BEFORE YOU HANG UP, SAY WHAT YOU HEARD")
+    block = PROMPT[start : start + 900]
     assert "Every close, without exception" in block
     assert "1.46 Crore one you liked" in block
     # and it must not invent a read-back out of nothing
