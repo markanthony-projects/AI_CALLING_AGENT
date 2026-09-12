@@ -44,6 +44,8 @@ def fake(**overrides):
         # seconds of speech for one that says nothing until the turn is over.
         INTERRUPT_MIN_WORDS=3,
         BARGE_IN_MIN_SPEECH_SECS=0.8,
+        # The ceiling on how long a service that owns end-of-turn may hold one open.
+        STT_MAX_TURN_SECS=10.0,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -236,10 +238,18 @@ def test_a_transcribing_service_leaves_the_turn_to_the_timer():
 
 
 def test_a_service_that_knows_takes_the_turn_off_the_timer():
-    """The point of the whole exercise. ExternalUserTurnStopStrategy has no
-    user_speech_timeout at all — the 400ms window simply stops existing."""
+    """The point of the whole exercise. There is no user_speech_timeout at all — the 400ms
+    window simply stops existing.
+
+    An ExternalUserTurnStopStrategy still, and it has to stay one: the turn ends when Flux
+    says so. What the subclass adds is a ceiling on how long "when Flux says so" may take,
+    after it took forty-three seconds on call 7b00a8af."""
+    from pipecat.turns.user_stop import ExternalUserTurnStopStrategy
+
     plan = _plan()
-    assert type(plan.stop_strategy).__name__ == "ExternalUserTurnStopStrategy"
+    assert isinstance(plan.stop_strategy, ExternalUserTurnStopStrategy)
+    assert not hasattr(plan.stop_strategy, "_user_speech_timeout")
+    assert plan.stop_strategy._max_open_secs == 10.0
     assert not hasattr(plan.stop_strategy, "_user_speech_timeout")
 
 
@@ -343,6 +353,13 @@ def test_the_speech_threshold_comes_from_the_setting_that_names_it():
         assert plan.start_strategy._min_speech_secs == 1.7
 
 
+def test_the_turn_ceiling_comes_from_the_setting_that_names_it():
+    """Same trap as the speech threshold: the default is 10.0, so a hard-coded 10.0 in the
+    builder passed every test here."""
+    plan = _plan(STT_MAX_TURN_SECS=23.0)
+    assert plan.stop_strategy._max_open_secs == 23.0
+
+
 def test_flux_is_not_asked_to_announce_speech_twice():
     """Flux broadcasts UserStartedSpeakingFrame itself, from StartOfTurn. Letting the
     aggregator broadcast a second one puts two starts on the wire for one utterance. Sarvam
@@ -357,5 +374,5 @@ def test_the_plan_prints_both_halves_for_the_log():
     things that have to be known to read any latency number that follows."""
     assert str(_plan()) == (
         "flux/flux-general-multi "
-        "(barge-in: SustainedSpeechBargeIn, turns: ExternalUserTurnStopStrategy)"
+        "(barge-in: SustainedSpeechBargeIn, turns: ServiceDecidesButNotForever)"
     )

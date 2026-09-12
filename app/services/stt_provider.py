@@ -35,7 +35,11 @@ from pipecat.turns.user_stop import (
 from pipecat.turns.user_stop.base_user_turn_stop_strategy import BaseUserTurnStopStrategy
 from pipecat.turns.user_start.base_user_turn_start_strategy import BaseUserTurnStartStrategy
 
-from app.services.turns import GreetingOnlyMinWords, SustainedSpeechBargeIn
+from app.services.turns import (
+    GreetingOnlyMinWords,
+    ServiceDecidesButNotForever,
+    SustainedSpeechBargeIn,
+)
 
 # The audio the transport hands over. Not configurable: the serializer, the VAD and the
 # turn analyzer all assume it, and a provider that cannot take it needs its own resampling
@@ -142,7 +146,7 @@ def _service_turns(settings) -> BaseUserTurnStopStrategy:
     first Flux call shows turns landing ~500ms late, this is the reason, and the fix is the
     strategy's `timeout`, not the settle window.
     """
-    return ExternalUserTurnStopStrategy()
+    return ServiceDecidesButNotForever(max_open_secs=settings.STT_MAX_TURN_SECS)
 
 
 def _word_gate(settings) -> BaseUserTurnStartStrategy:

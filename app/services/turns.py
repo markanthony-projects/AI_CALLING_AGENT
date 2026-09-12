@@ -35,6 +35,7 @@ from pipecat.frames.frames import (
 from pipecat.turns.types import ProcessFrameResult
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 from pipecat.turns.user_start.base_user_turn_start_strategy import BaseUserTurnStartStrategy
+from pipecat.turns.user_stop import ExternalUserTurnStopStrategy
 
 from app.utils.barge_in import takes_the_floor
 
@@ -167,3 +168,74 @@ class SustainedSpeechBargeIn(BaseUserTurnStartStrategy):
         await asyncio.sleep(self._min_speech_secs)
         logger.debug(f"{self}: still speaking after {self._min_speech_secs}s — the floor is theirs")
         await self.trigger_user_turn_started()
+
+
+class ServiceDecidesButNotForever(ExternalUserTurnStopStrategy):
+    """Let the speech service end the turn — but never let it hold one open indefinitely.
+
+    Call 7b00a8af, 12 Sep 2026. The agent asked "Do you know Varthur?" and then said nothing
+    for forty-three seconds:
+
+        AGENT -> "It sits on 45 acres with 14 towers. Do you know Varthur?"
+        USER  -> "Sorry? Hello? I want to understand what you said. Can you repeat your
+                  phone? Hello? Hello?"   (Total Turn Duration: 43062ms)
+        (the prospect hung up)
+
+    That whole thing is ONE user turn. Flux never declared end-of-turn, so no inference ever
+    fired, so the agent had nothing to say — and the silence is what kept them saying
+    "Hello?", which is what kept the turn open. A loop that ends with the call dropped.
+
+    Pipecat has a backstop for this and it could not fire. UserTurnController will force a
+    turn stop after `user_turn_stop_timeout`, but only `if self._user_turn and not
+    self._user_speaking` — and with Flux, `_user_speaking` goes True at StartOfTurn and
+    False only at EndOfTurn. The one condition that makes the backstop necessary is the one
+    that disables it.
+
+    So the clock is here instead, started when they begin and cancelled when the service
+    says they have finished. Generous on purpose: this fires on a turn nobody is ending, not
+    on a slow speaker, and cutting somebody off mid-sentence is the failure it must not
+    become. Forty-three seconds of silence is worse than answering ten seconds in, and there
+    is no third option available from here.
+
+    A forced stop can be followed by the service's own EndOfTurn carrying the whole
+    utterance again. That produces a second inference on a superseded turn, which is exactly
+    what TurnFinalityGate is for.
+    """
+
+    def __init__(self, *, max_open_secs: float, **kwargs):
+        super().__init__(**kwargs)
+        self._max_open_secs = max_open_secs
+        self._deadline: Optional[asyncio.Task] = None
+
+    async def reset(self):
+        await super().reset()
+        await self._call_it_off()
+
+    async def cleanup(self):
+        await super().cleanup()
+        await self._call_it_off()
+
+    async def _handle_user_started_speaking(self, frame):
+        await super()._handle_user_started_speaking(frame)
+        await self._start_counting()
+
+    async def _handle_user_stopped_speaking(self, frame):
+        await self._call_it_off()
+        await super()._handle_user_stopped_speaking(frame)
+
+    async def _start_counting(self):
+        await self._call_it_off()
+        self._deadline = self.create_task(self._answer_them_anyway())
+
+    async def _call_it_off(self):
+        if self._deadline:
+            await self.cancel_task(self._deadline)
+            self._deadline = None
+
+    async def _answer_them_anyway(self):
+        await asyncio.sleep(self._max_open_secs)
+        logger.warning(
+            f"{self}: the speech service has held this turn open for "
+            f"{self._max_open_secs}s; answering rather than staying silent"
+        )
+        await self.trigger_user_turn_stopped()

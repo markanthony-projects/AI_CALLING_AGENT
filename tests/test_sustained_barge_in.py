@@ -237,3 +237,104 @@ def test_a_second_start_without_a_stop_replaces_the_clock_rather_than_adding_one
         assert gate._floor_taken == [True], "one utterance, one turn"
 
     asyncio.run(run())
+
+
+# --- and a turn that nobody ever ends ----------------------------------------------------
+#
+# Call 7b00a8af, 12 Sep 2026:
+#
+#     AGENT → "It sits on 45 acres with 14 towers. Do you know Varthur?"
+#     USER  → "Sorry? Hello? I want to understand what you said. Can you repeat your
+#              phone? Hello? Hello?"   (Total Turn Duration: 43062ms)
+#     (the prospect hung up)
+#
+# One turn, forty-three seconds, no inference, nothing said. The silence is what kept them
+# saying "Hello?", and that is what kept the turn open.
+
+
+def _stopper(secs=QUICK):
+    from app.services.turns import ServiceDecidesButNotForever
+
+    gate = ServiceDecidesButNotForever(max_open_secs=secs)
+    gate._stopped = []
+    gate.trigger_user_turn_stopped = lambda *a, **k: _took_it(gate._stopped)
+    return gate
+
+
+def test_a_turn_the_service_never_ends_is_answered_anyway():
+    from pipecat.frames.frames import UserStartedSpeakingFrame
+
+    async def run():
+        gate = _stopper()
+        await gate.setup(_Tasks())
+        await gate.process_frame(UserStartedSpeakingFrame())
+        assert gate._stopped == [], "it gave up before the ceiling"
+        await _settle(6)
+        assert gate._stopped == [True]
+
+    asyncio.run(run())
+
+
+def test_a_service_that_does_end_the_turn_is_left_alone():
+    """The ceiling is for a turn nobody is ending. Firing on an ordinary one would cut off
+    every speaker who takes a breath, which is worse than what it is here to fix.
+
+    Asserted on the clock rather than on the outcome: the base class fires its own stop on
+    that frame, so counting stops cannot tell a cancelled ceiling from a working one."""
+    from pipecat.frames.frames import UserStartedSpeakingFrame, UserStoppedSpeakingFrame
+
+    async def run():
+        gate = _stopper()
+        await gate.setup(_Tasks())
+        await gate.process_frame(UserStartedSpeakingFrame())
+        assert gate._deadline is not None, "it never started counting"
+        await gate.process_frame(UserStoppedSpeakingFrame())
+        assert gate._deadline is None, "the clock outlived the turn"
+
+    asyncio.run(run())
+
+
+def test_the_clock_does_not_survive_into_the_next_turn():
+    from pipecat.frames.frames import UserStartedSpeakingFrame
+
+    async def run():
+        gate = _stopper()
+        await gate.setup(_Tasks())
+        await gate.process_frame(UserStartedSpeakingFrame())
+        await gate.reset()
+        assert gate._deadline is None
+        await _settle(6)
+        assert gate._stopped == []
+
+    asyncio.run(run())
+
+
+def test_the_ceiling_is_actually_waited_out():
+    """A ceiling that fired at once would pass the test above and cut off every caller on
+    their first syllable — the exact failure it exists to avoid becoming."""
+    from pipecat.frames.frames import UserStartedSpeakingFrame
+
+    async def run():
+        gate = _stopper(secs=10)
+        await gate.setup(_Tasks())
+        await gate.process_frame(UserStartedSpeakingFrame())
+        await _settle(6)
+        assert gate._stopped == []
+
+    asyncio.run(run())
+
+
+def test_the_ceiling_is_whatever_it_was_built_with():
+    from app.services.turns import ServiceDecidesButNotForever
+
+    assert ServiceDecidesButNotForever(max_open_secs=7.5)._max_open_secs == 7.5
+
+
+def test_it_is_still_the_strategy_the_service_drives():
+    """Subclassed rather than replaced. Flux ending the turn is the whole reason Flux is
+    here; the ceiling only covers the case where it does not."""
+    from pipecat.turns.user_stop import ExternalUserTurnStopStrategy
+
+    from app.services.turns import ServiceDecidesButNotForever
+
+    assert issubclass(ServiceDecidesButNotForever, ExternalUserTurnStopStrategy)

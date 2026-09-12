@@ -226,6 +226,20 @@ class Settings(BaseSettings):
     # audio instead of discarding it.
     BARGE_IN_MIN_SPEECH_SECS: float = Field(default=0.8, ge=0.2, le=3.0)
 
+    # The longest a speech service may hold one user turn open before the agent answers
+    # anyway. Only read by a provider that decides end-of-turn itself.
+    #
+    # Call 7b00a8af: Flux held a turn open for forty-three seconds while the prospect said
+    # "Hello?" into silence and then hung up. No inference had fired, so the agent had
+    # nothing to say, and the silence is what kept them talking. Pipecat's own backstop
+    # could not help: it skips while the user is still speaking, which with Flux is the
+    # whole time a turn is stuck.
+    #
+    # Ten seconds is chosen to be too long for a real sentence and far too short for that.
+    # Lowering it starts cutting off slow speakers, which is the failure this must not
+    # become; a genuine single utterance on these calls has never reached it.
+    STT_MAX_TURN_SECS: float = Field(default=10.0, ge=3.0, le=60.0)
+
     # How long a number may ring before the carrier gives up.
     #
     # Two reasons, and the second is the expensive one. Ringing for the carrier's default —

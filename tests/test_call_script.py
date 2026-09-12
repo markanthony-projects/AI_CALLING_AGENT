@@ -687,3 +687,18 @@ def test_two_sentences_in_a_row_may_not_open_the_same_way():
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
     assert "MUST NOT START THE WAY THE SENTENCE BEFORE IT STARTED" in gate
     assert "Never begin two sentences in a row with the same two words" in gate
+
+
+def test_varying_the_opening_may_not_cost_the_verb():
+    """Call 7b00a8af. Two rules were added at once — the line must have a verb, and two
+    sentences in a row must not open the same way — and the model satisfied the second by
+    breaking the first:
+
+        "It is called Abhee Codename New Dimension. Bengaluru's first Scotland-themed
+         residential township."
+
+    Straight back to the caption the verb rule was written for. Given a conflict the model
+    picks one, so the prompt has to say which."""
+    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
+    assert "VARY IT BY REWRITING, NEVER BY DELETING THE VERB" in gate
+    assert "if you cannot have both, keep the verb" in gate
