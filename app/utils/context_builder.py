@@ -1,6 +1,8 @@
 import re
 from typing import Optional
 
+from app.utils.headline import as_a_sentence
+
 _LAKHS_PER_CRORE = 100.0
 _PRICE_TOKEN = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>cr|crore|crores|lakh|lakhs|l)\b", re.I)
 
@@ -225,10 +227,16 @@ def build_campaign_context(project: dict) -> str:
     # picking well from a dozen bullets under time pressure. The list stays for everything
     # that comes after the hook.
     headline, price_benefit = pitch_points(project)
-    if headline:
+    # Handed over as a finished sentence rather than as the label the column holds.
+    # Three prompt attempts failed to get a verb into this one line and the third made it
+    # worse; see app/utils/headline.py for why that was the prompt's fault, not the
+    # model's.
+    spoken_headline = as_a_sentence(headline)
+    if spoken_headline:
         context_lines.append(
             f"Headline — the one thing that makes this project worth a minute of their "
-            f"time. Say it in your opening, in simple words: {headline}"
+            f"time. Say this in your opening, exactly as written here, as its own "
+            f"sentence: {spoken_headline}"
         )
     if price_benefit:
         context_lines.append(

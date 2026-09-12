@@ -589,10 +589,19 @@ def test_the_headline_is_spoken_as_a_sentence_and_not_as_a_caption():
     still going.
 
     The word "sentence" was already in the instruction above and was not enough: the model
-    was not writing a fragment by accident, it was quoting a label it had been handed."""
-    gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "MUST HAVE A VERB" in gate
-    assert "printed under a photograph" in gate
+    was not writing a fragment by accident, it was quoting a label it had been handed.
+
+    It took three attempts in the prompt to learn that, and the third made it worse: by then
+    one paragraph carried seven rules about this one sentence and the model dropped whichever
+    it dropped. It is built in app/utils/headline.py now and arrives finished."""
+    from app.utils.context_builder import build_campaign_context
+
+    ctx = build_campaign_context(
+        {"name": "Some Project", "usps": ["Bengaluru's first Scotland-themed township"]}
+    )
+    line = next(l for l in ctx.splitlines() if "Headline" in l)
+    assert "It is Bengaluru's first Scotland-themed township." in line
+    assert "exactly as written" in line
 
 
 def test_a_fact_already_given_is_not_given_again():
@@ -680,16 +689,16 @@ def test_the_close_reads_back_what_was_collected():
     assert "what they want, where, and the budget" in block
 
 
-def test_two_sentences_in_a_row_may_not_open_the_same_way():
+def test_the_prompt_only_has_to_stop_it_being_rewritten_now():
     """"It is called Abhee Codename New Dimension. It is Bengaluru's first Scotland-themed
     residential township." Both sentences, same two opening words. The verb fix made the
     second one a sentence; matched openings are what made it sound like a template anyway."""
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "MUST NOT START THE WAY THE SENTENCE BEFORE IT STARTED" in gate
-    assert "Never begin two sentences in a row with the same two words" in gate
+    assert "THE HEADLINE ARRIVES FINISHED" in gate
+    assert "do not re-word it" in gate
 
 
-def test_varying_the_opening_may_not_cost_the_verb():
+def test_the_rules_that_fought_each_other_are_gone_rather_than_stacked():
     """Call 7b00a8af. Two rules were added at once — the line must have a verb, and two
     sentences in a row must not open the same way — and the model satisfied the second by
     breaking the first:
@@ -700,5 +709,31 @@ def test_varying_the_opening_may_not_cost_the_verb():
     Straight back to the caption the verb rule was written for. Given a conflict the model
     picks one, so the prompt has to say which."""
     gate = PROMPT[PROMPT.index("2. OPENING GATE") : PROMPT.index("3. SHOW THEM THE PROJECT")]
-    assert "VARY IT BY REWRITING, NEVER BY DELETING THE VERB" in gate
-    assert "if you cannot have both, keep the verb" in gate
+    for gone in ("MUST HAVE A VERB", "MUST NOT START THE WAY THE SENTENCE BEFORE",
+                 "VARY IT BY REWRITING"):
+        assert gone not in gate, f"{gone} is still competing with the rules around it"
+
+
+def test_a_list_of_options_carries_one_number_each():
+    """Call d468f275. "Tell me more about the three BHK options" was answered with three
+    options, each with a size AND a price — twenty-five seconds of speech — and what came
+    back was "Hello hello". They had lost the thread.
+
+    Three options is fine. Six numbers is not."""
+    assert "ONE NUMBER PER OPTION WHEN YOU LIST THEM" in PROMPT
+    block = PROMPT[PROMPT.index("ONE NUMBER PER OPTION") : PROMPT.index("SAY NUMBERS THE WAY")]
+    assert "the NAME and the PRICE, nothing else" in block
+    assert "Hello hello" in block, "the failure has to travel with the rule"
+
+
+def test_every_close_reads_back_and_not_only_the_rejection_one():
+    """The read-back was written into step 5, which only runs when the prospect is not for
+    us. The call that needed it took the WhatsApp path: they picked a unit, asked for more
+    information, and heard "Sure, I will send you the floor plans... Have a great day." Not
+    one of their own words came back."""
+    assert "BEFORE YOU HANG UP, SAY WHAT YOU HEARD" in PROMPT
+    block = PROMPT[PROMPT.index("BEFORE YOU HANG UP") : PROMPT.index("BEFORE YOU HANG UP") + 1200]
+    assert "Every close, without exception" in block
+    assert "1.46 Crore one you liked" in block
+    # and it must not invent a read-back out of nothing
+    assert "do not invent" in block
