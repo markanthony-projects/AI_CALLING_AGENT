@@ -248,3 +248,46 @@ def test_an_ordinary_goodbye_still_ends_the_call():
         f.text for batch in task.batches for f in batch if getattr(f, "text", None)
     )
     assert "Have a good day" in said
+
+
+# --- the forms the first list did not know ---------------------------------------------------
+#
+# Found by feeding the guard the phrasings prospects actually use on 12 Sep 2026: every one
+# of these returned False, and this guard is what refuses end_call on somebody who did not
+# hear the goodbye.
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "kya bola?",
+        "Kya bole aap?",
+        "kya kaha",
+        "ek baar aur",
+        "Ek baar aur boliye",
+        "wapas bolo",
+        "fir se bolo",
+        "samjha nahi",
+        "Sorry?",
+        "What?",
+        "Haan?",
+        "Huh?",
+        "ji?",
+    ],
+)
+def test_hindi_and_one_word_repeat_requests_are_heard(line):
+    assert wants_repeat(line) is True
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "sorry",  # no question mark: as likely a polite refusal
+        "Sorry, not interested.",  # the refusal wins
+        "What a nice project.",
+        "Haan, Sunday is fine.",
+        "ji haan",
+    ],
+)
+def test_a_word_that_merely_contains_a_repeat_form_is_not_one(line):
+    assert wants_repeat(line) is False

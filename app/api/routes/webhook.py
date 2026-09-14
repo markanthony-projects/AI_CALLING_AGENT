@@ -11,8 +11,9 @@ from app.core import call_slots
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import issue_call_token, require_call_token, require_call_token_ws
-from app.models.db import Call, CallStatus, Transcript
+from app.models.db import Call, CallMetrics, CallStatus, Transcript
 from app.services.agent import run_voice_agent
+from app.utils.call_metrics import CallMetricsSnapshot
 from app.services.call_context import recall_customer_name, recall_dialed_number
 from app.services.dial_pump import (
     recall_contact,
@@ -130,6 +131,9 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
     logger.info(f"[{call_sid}] {client_type} stream open | campaign={campaign_id}")
 
     transcript = ""
+    # The numbers the call is judged by. None when the session died before it could count
+    # anything, and finalisation writes no row for it rather than a row of zeros.
+    metrics: Optional[CallMetricsSnapshot] = None
     # Default to FAILED: any path that leaves this block without a clean voice session —
     # missing project, pipeline crash, exhausted LLM turns — is a call we did not conduct.
     status = CallStatus.FAILED
@@ -175,6 +179,7 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             stream_open_at=stream_open_at,
         )
         transcript = result.transcript
+        metrics = result.metrics
         # Alongside the status, because "COMPLETED" answers whether the call worked and this
         # answers who ended it — and those were indistinguishable when a call finished with no
         # reason logged at all.
@@ -203,7 +208,7 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
         # slot, and a slot that is not released blocks a third of the account's capacity
         # until it ages out.
         await call_slots.release(call_sid)
-        await _finalize_call(call_sid, started_at, transcript, status)
+        await _finalize_call(call_sid, started_at, transcript, status, metrics)
         # The queue entry, so a number that rang out becomes eligible for a retry and one
         # that spoke to the agent is never dialled again. Kept out of _finalize_call because
         # that function owns the call history, which is a separate record.
@@ -270,7 +275,11 @@ async def _record_refused(campaign_id: str, call_sid: str) -> None:
 
 
 async def _finalize_call(
-    call_sid: str, started_at: datetime, transcript: str, status: CallStatus
+    call_sid: str,
+    started_at: datetime,
+    transcript: str,
+    status: CallStatus,
+    metrics: Optional[CallMetricsSnapshot] = None,
 ) -> None:
     ended_at = utc_now()
     duration = (ended_at - started_at).total_seconds()
@@ -292,6 +301,16 @@ async def _finalize_call(
                 if existing is None:
                     db.add(Transcript(call_id=call_record.id, full_text=transcript))
                     transcript_stored = True
+
+            # Same transaction as the status: a call either finalised with its numbers or it
+            # did not finalise. call_id is unique, so a replayed finalisation cannot write
+            # a second row — the first one stands and the constraint refuses the rest.
+            if metrics is not None:
+                has_metrics = await db.scalar(
+                    select(CallMetrics.id).where(CallMetrics.call_id == call_record.id)
+                )
+                if has_metrics is None:
+                    db.add(CallMetrics(call_id=call_record.id, **metrics.as_row()))
 
             await db.commit()
     except Exception as e:

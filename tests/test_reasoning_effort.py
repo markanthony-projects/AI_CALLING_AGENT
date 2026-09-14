@@ -72,13 +72,20 @@ def test_it_is_normalised():
 
 
 def test_the_service_carries_it_into_the_request_params():
+    """`extra` also carries the stop sequences every request sends (see
+    tests/test_llm_bounds.py); what this pins is that reasoning_effort rides beside them."""
+    from app.services.llm_provider import STOP_SEQUENCES
+
     svc = ResilientLLMService(call_sid="t", endpoint=_endpoint(reasoning_effort="low"))
-    assert svc._settings.extra == {"reasoning_effort": "low"}
+    assert svc._settings.extra == {"reasoning_effort": "low", "stop": list(STOP_SEQUENCES)}
 
 
 def test_a_model_that_does_not_reason_gets_no_extra_params():
+    from app.services.llm_provider import STOP_SEQUENCES
+
     svc = ResilientLLMService(call_sid="t", endpoint=_endpoint(model="gemma-4-31b"))
-    assert svc._settings.extra == {}
+    assert "reasoning_effort" not in svc._settings.extra
+    assert svc._settings.extra == {"stop": list(STOP_SEQUENCES)}
 
 
 class _Completions:

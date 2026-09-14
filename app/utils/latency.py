@@ -104,6 +104,10 @@ class LatencyObserver(BaseObserver):
         # starts much later — after two database round trips and the services being built —
         # so it cannot see the part of the wait that happens before it exists.
         self._stream_open_at = stream_open_at
+        # Milliseconds from the media stream opening to the first audio of the greeting —
+        # the same number the FIRST WORD line prints, kept so the call_metrics row can carry
+        # it. None until the greeting is audible, or forever if stream_open_at was unknown.
+        self.first_word_ms: Optional[int] = None
         # The last moment their voice actually stopped. The honest start of a turn: what
         # follows is the VAD settling, the blind wait, and only then the turn being declared.
         self._voice_stopped_ns: Optional[int] = None
@@ -239,12 +243,13 @@ class LatencyObserver(BaseObserver):
                 # timestamp IS "pipeline start -> first audio".
                 since_pipeline = data.timestamp / NS_PER_SEC
                 if synthesis >= 0:
-                    since_open = (
-                        f"{(time.monotonic() - self._stream_open_at) * 1000:.0f}ms after the "
-                        f"stream opened"
-                        if self._stream_open_at is not None
-                        else "stream-open time not supplied"
-                    )
+                    if self._stream_open_at is not None:
+                        self.first_word_ms = round(
+                            (time.monotonic() - self._stream_open_at) * 1000
+                        )
+                        since_open = f"{self.first_word_ms}ms after the stream opened"
+                    else:
+                        since_open = "stream-open time not supplied"
                     logger.info(
                         f"[{self._call_sid}] FIRST WORD {since_open} | "
                         f"pipeline={since_pipeline * 1000:.0f}ms "

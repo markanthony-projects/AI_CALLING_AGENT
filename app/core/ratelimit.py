@@ -18,6 +18,7 @@ from fastapi import HTTPException, status
 from loguru import logger
 from redis.exceptions import RedisError
 
+from app.core import llm_probe
 from app.core.config import settings
 from app.core.llm_budget import headroom
 from app.core.queue import get_arq_pool
@@ -111,6 +112,16 @@ async def reserve_llm_headroom() -> None:
     refills throughout a call, so requiring the full amount up front would refuse every dial
     on a small plan — including the ones that go on to complete perfectly well.
     """
+    # A model that is gone is not a budget question, and no amount of headroom helps. The
+    # probe verdict is checked first so the caller gets the true reason back.
+    if not await llm_probe.serviceable():
+        logger.warning("Dial rejected: no configured LLM can answer a call")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No configured LLM can answer a call; check LLM_MODEL and LLM_FALLBACK_MODEL",
+            headers={"Retry-After": str(settings.LLM_PROBE_INTERVAL_SECONDS)},
+        )
+
     floor = settings.LLM_MIN_TOKENS_TO_DIAL
     if floor <= 0:
         return

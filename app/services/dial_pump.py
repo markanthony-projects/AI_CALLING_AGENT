@@ -26,6 +26,7 @@ Business hours are enforced here rather than at import, because a list uploaded 
 should dial in the morning, not be rejected.
 """
 
+import time
 import uuid
 from collections import Counter
 from datetime import timedelta
@@ -35,7 +36,7 @@ from loguru import logger
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import call_slots
+from app.core import call_slots, llm_probe
 from app.core.database import AsyncSessionLocal
 from app.models.db import (
     RETRIABLE_CONTACT_STATUSES,
@@ -184,6 +185,24 @@ async def active_campaign_ids(db: AsyncSession) -> List[uuid.UUID]:
     return [r[0] for r in rows]
 
 
+# The pump ticks every few seconds. One line per tick while the LLM is down would bury the
+# log; one line a minute says the same thing and leaves the rest readable.
+_LLM_DOWN_WARN_EVERY_SECS = 60.0
+_llm_down_last_warned: float = 0.0
+
+
+def _warn_llm_down() -> None:
+    global _llm_down_last_warned
+    now = time.monotonic()
+    if now - _llm_down_last_warned < _LLM_DOWN_WARN_EVERY_SECS:
+        return
+    _llm_down_last_warned = now
+    logger.error(
+        "Dialing paused: no configured LLM can answer a call (see the LLM probe lines above). "
+        "The queue is untouched and resumes on its own once a probe passes."
+    )
+
+
 async def dial_due_contacts() -> int:
     """One tick. Returns how many calls were placed.
 
@@ -191,6 +210,14 @@ async def dial_due_contacts() -> int:
     because this runs unattended every few seconds and nobody reads its return value.
     """
     if not is_within_calling_hours(to_ist(utc_now())):
+        return 0
+
+    # Before the slot check, and before anything is claimed: a dial placed while no model
+    # can answer bills the carrier leg, rings a real person, and hangs up on them after two
+    # apologies. That is what every call on 10 Sep 2026 did. The probe that decides this
+    # runs at startup and every few minutes; unknown permits dialing. See llm_probe.py.
+    if not await llm_probe.serviceable():
+        _warn_llm_down()
         return 0
 
     slots = await call_slots.free_slots()

@@ -39,7 +39,7 @@ GREETING = build_opening_line(
 def test_the_opening_line_is_three_sentences():
     assert sentences(GREETING) == [
         f"Hello, Good {time_of_day_greeting(NOW)}.",
-        "My name is Priya, and I am calling you from Abhee Ventures.",
+        "My name is Priya, an AI assistant, and I am calling you from Abhee Ventures.",
         "Am I speaking with Rahul?",
     ]
 
@@ -58,13 +58,62 @@ def test_a_salutation_does_not_end_a_sentence():
 
 def test_a_company_suffix_does_not_end_a_sentence():
     line = build_opening_line("X", "Rahul", developer_name="Prestige Pvt. Ltd.")
-    assert "My name is Priya, and I am calling you from Prestige Pvt. Ltd." in sentences(line)
+    assert (
+        "My name is Priya, an AI assistant, and I am calling you from Prestige Pvt. Ltd."
+        in sentences(line)
+    )
 
 
 def test_a_decimal_does_not_end_a_sentence():
     assert sentences("It starts at 2.5 Crores. Shall I go on?") == [
         "It starts at 2.5 Crores.",
         "Shall I go on?",
+    ]
+
+
+# --- abbreviations a read-back carries ------------------------------------------------------
+#
+# Each of these was cut in two by the version that knew only the salutations, and each cut
+# is an audible gap in the last thing the prospect hears.
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        (
+            "Possession is Dec. 2027. Does that work?",
+            ["Possession is Dec. 2027.", "Does that work?"],
+        ),
+        (
+            "Price is Rs. 85 Lakhs onwards. Interested?",
+            ["Price is Rs. 85 Lakhs onwards.", "Interested?"],
+        ),
+        (
+            "Sure! Sunday 11 A.M. works. Shall I book it?",
+            ["Sure!", "Sunday 11 A.M. works.", "Shall I book it?"],
+        ),
+        (
+            "It is 1,450 Sq. Ft. carpet area. Is that enough?",
+            ["It is 1,450 Sq. Ft. carpet area.", "Is that enough?"],
+        ),
+        (
+            "The project is on Sarjapur Rd. near Wipro. Do you know it?",
+            ["The project is on Sarjapur Rd. near Wipro.", "Do you know it?"],
+        ),
+    ],
+)
+def test_an_abbreviation_inside_a_sentence_does_not_end_it(line, expected):
+    assert sentences(line) == expected
+
+
+def test_an_abbreviation_that_really_ends_a_sentence_still_does():
+    """"Cr." and "Rd." can close a sentence, and then the next word starts one. Holding those
+    together would send two sentences to the voice engine as one breath — the fault the
+    whole module exists to prevent, in reverse."""
+    assert sentences("It costs 1.2 Cr. Shall I go on?") == ["It costs 1.2 Cr.", "Shall I go on?"]
+    assert sentences("It is on Sarjapur Rd. Do you know it?") == [
+        "It is on Sarjapur Rd.",
+        "Do you know it?",
     ]
 
 

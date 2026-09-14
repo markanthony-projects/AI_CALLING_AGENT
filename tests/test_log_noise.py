@@ -157,7 +157,7 @@ def test_the_latency_lines_can_actually_be_seen():
     "module,line",
     [
         ("app.services.stt_provider", "Listening with deepgram/nova-2-general"),
-        ("app.utils.turn_analyzer", "Semantic turn detection on"),
+        ("app.core.llm_probe", "LLM probe: primary cerebras/gpt-oss-120b answers"),
     ],
 )
 def test_the_lines_that_prove_a_configuration_took_effect_can_be_seen(module, line):

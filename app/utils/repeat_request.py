@@ -51,9 +51,17 @@ _REPEAT = re.compile(
     r"|\b(?:can'?t|cannot) hear (?:you|that)\b"
     r"|\bnot audible\b|\bbreaking up\b|\bnot clear\b"
     r"|\bpardon\b|\bwhat did you say\b|\bwhat was that\b"
-    r"|\bsamajh nahi\b|\bphir se\b|\bdobara\b",
+    r"|\bsamajh nahi\b|\bsamjha nahi\b|\bsamjhi nahi\b|\bphir se\b|\bfir se\b|\bdobara\b"
+    # The commonest Hindi forms, none of which the first list had: "kya bola?" (what did
+    # you say), "kya kaha?", "ek baar aur" (once more), "wapas bolo" (say it again).
+    r"|\bkya bol[ae]\b|\bkya kaha\b|\bek baar aur\b|\bwapas bol\w*\b",
     re.I,
 )
+
+# One word and a question mark, on its own. "Sorry?", "What?", "Haan?", "Huh?" are how
+# people actually ask for a repeat on a phone line, and the STT punctuates them. Anchored
+# whole-string and requiring the "?": "sorry" alone can be a refusal being polite about it.
+_ONE_WORD_REPEAT = re.compile(r"^\s*(?:sorry|what|haan|hain|huh|eh|kya|ji)\s*\?+\s*$", re.I)
 
 # Checking the line is still open. "Hello" on its own only — the greeting reply "Hello, yes?"
 # is a conversation, not a line check, and the difference is whether anything follows it.
@@ -84,7 +92,7 @@ def wants_repeat(line: Optional[str]) -> bool:
     text = line.strip()
     if _REFUSAL.search(text):
         return False
-    return bool(_REPEAT.search(text) or _LINE_CHECK.search(text))
+    return bool(_REPEAT.search(text) or _ONE_WORD_REPEAT.match(text) or _LINE_CHECK.search(text))
 
 
 def checking_the_line(line: Optional[str]) -> bool:

@@ -185,3 +185,20 @@ def test_the_intent_gate_is_still_the_question_that_ends_the_opening():
     # took step 2 from twelve seconds to under seven.
     gate = prompt.index("Are you looking to buy a property?")
     assert gate < prompt.index("It is called [project name]")
+
+
+# --- prefixes that are not what the person is called -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,said",
+    [
+        ("Mohd. Irfan", "Irfan"),  # the probe case: was greeted as "Mohd."
+        ("Md Salim", "Salim"),
+        ("Mohammed Ali Khan", "Ali"),
+        ("MOHAMMAD IRFAN", "Irfan"),
+        ("Mohammad", "Mohammad"),  # alone, it is the name
+    ],
+)
+def test_a_name_prefix_is_skipped_to_reach_the_name(raw, said):
+    assert spoken_name(raw) == said

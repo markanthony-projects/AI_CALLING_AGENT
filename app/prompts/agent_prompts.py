@@ -1,5 +1,7 @@
 from typing import Optional
 
+from app.core.config import settings
+
 # Lives here rather than in app.services.agent because the spoken greeting and the prompt
 # have to agree: the greeting is played by the system, and if the prospect speaks first it
 # is cancelled and the model introduces itself instead. Two copies of the name would
@@ -7,15 +9,36 @@ from typing import Optional
 AGENT_NAME = "Priya"
 
 
+def introduction(who: str, identity: str, disclosure: Optional[str] = None) -> str:
+    """"My name is Priya, an AI assistant, and I am calling you from Prestige."
+
+    One function for the greeting the system speaks, the re-introduction after a "Hello?",
+    and the introduction the prompt tells the model to give — so all three carry the same
+    name, the same company and the same disclosure, and none can drift from the others.
+
+    The disclosure is TRAI's (TCCCPR, Feb 2025 amendment): an automated commercial call has
+    to say it is automated. It sits inside the sentence rather than as its own, so it is
+    said and moved past in one breath; a separate "Please note this is an AI call" is the
+    line people hang up on. None reads AI_DISCLOSURE; blank omits the clause cleanly.
+    """
+    clause = (settings.AI_DISCLOSURE if disclosure is None else disclosure).strip()
+    if clause:
+        return f"My name is {who}, {clause}, and I am calling you from {identity}."
+    return f"My name is {who}, and I am calling you from {identity}."
+
+
 def get_system_prompt(
     campaign_context: str,
     customer_name: Optional[str] = None,
     agent_name: Optional[str] = None,
+    disclosure: Optional[str] = None,
 ) -> str:
     """Build the agent's system prompt.
 
     customer_name comes from the dial payload, so the agent can confirm who it reached
-    instead of asking a stranger to identify themselves.
+    instead of asking a stranger to identify themselves. disclosure is the AI clause of
+    the introduction; None reads the AI_DISCLOSURE setting, which is what every live call
+    does — the parameter exists so a test can pin both spellings without touching settings.
 
     Every word here is resent to the LLM on every single turn — around 4,800 tokens per
     request against a 12,000/minute account ceiling, which is a couple of turns a minute
@@ -52,6 +75,14 @@ def get_system_prompt(
         )
 
     agent_name = (agent_name or "").strip() or AGENT_NAME
+    # The same sentence the system speaks in the greeting, with the company left as a
+    # placeholder the model fills from the campaign context. Built by introduction() so the
+    # disclosure clause cannot be present in one and missing from the other.
+    intro = introduction(
+        agent_name,
+        "[the Developer in the campaign context, or the project name if there is none]",
+        disclosure,
+    )
     return f"""You are {agent_name}, a real estate sales director on a live phone call. Warm, patient, consultative — never a telecaller reading a script. Your goal: qualify the prospect, handle objections simply, and book a site visit or a callback.
 
 SIMPLE ENGLISH — THE MOST IMPORTANT RULE:
@@ -62,7 +93,7 @@ Callers are Indians hearing you once, on a phone line, with no chance to re-read
 - If a sentence sounds like a brochure, say it the way you would to a friend. This simplicity rule beats every other style rule.
 
 CALL FLOW — follow the order, never read it out like a form:
-1. GREETING: "Hello, Good [morning/afternoon/evening]. My name is {agent_name}, and I am calling you from [the Developer in the campaign context, or the project name if there is none]. Am I speaking with [their name]?" Without a name on the dial list, the last sentence is "May I know your good name?" instead.
+1. GREETING: "Hello, Good [morning/afternoon/evening]. {intro} Am I speaking with [their name]?" Without a name on the dial list, the last sentence is "May I know your good name?" instead.
    It ends on a question about THEM. "Can I speak to you for a minute?" was there before and invited a no from somebody who had not heard anything yet; this invites a yes, and confirms we reached the person the list named rather than whoever picked up the phone.
    The system plays this automatically if the prospect stays silent. If they speak first it is cancelled, so your VERY FIRST reply must introduce you the same way — same name, same company, same question. Do not work out the time of day yourself; the system has already said it. If they say they are busy, go to BUSY / IN A MEETING below.
    When they confirm who they are, or give you their name, go to step 2. Do NOT pitch in the same breath as the greeting.

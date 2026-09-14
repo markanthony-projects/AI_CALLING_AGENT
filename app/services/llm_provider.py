@@ -73,6 +73,15 @@ _TRY_AGAIN = re.compile(
 # plausible reply — a turn that takes 8s has already failed by conversational standards.
 MAX_THROTTLE_WAIT_SECS = 8.0
 
+# Text the model may never produce: the other side of the conversation. On call cfb7a957 one
+# reply carried six turns of a dialogue that had not happened, the prospect's answers
+# invented along with the agent's. These are sent as `stop` on every completion, primary and
+# fallback alike, so a model that starts narrating the prospect is cut off by the provider
+# before a token of it is streamed — cheaper and earlier than any processor downstream.
+# Labels rather than words: none of these can occur inside a spoken sales sentence, and
+# every OpenAI-wire provider here accepts up to four.
+STOP_SEQUENCES = ("\nUser:", "\nProspect:", "\nAgent:")
+
 
 def retry_after_seconds(message: Optional[str]) -> Optional[float]:
     """How long the provider asked us to wait, read out of its prose. None if it did not say."""
@@ -257,6 +266,7 @@ class ResilientLLMService(OpenAILLMService):
         call_sid: str = "-",
         fallback: Optional[LLMEndpoint] = None,
         warn_below: int = 4000,
+        max_completion_tokens: Optional[int] = None,
         **kwargs,
     ):
         # Set before super().__init__, which calls create_client() on its last line.
@@ -271,10 +281,18 @@ class ResilientLLMService(OpenAILLMService):
         self._primary_unusable = False
         self._watcher = BudgetWatcher(call_sid, warn_below=warn_below)
         kwargs.setdefault("name", processor_name(endpoint))
+        # The stop sequences ride in `extra` beside reasoning_effort. Pipecat spreads
+        # `extra` over the request last, and build_chat_completion_params carries both it
+        # and max_completion_tokens into the fallback request too — so the bounds hold on
+        # whichever provider answers the turn.
         super().__init__(
             api_key=endpoint.api_key,
             base_url=endpoint.base_url,
-            settings=OpenAILLMService.Settings(model=endpoint.model, extra=endpoint.extra_params),
+            settings=OpenAILLMService.Settings(
+                model=endpoint.model,
+                max_completion_tokens=max_completion_tokens,
+                extra={**endpoint.extra_params, "stop": list(STOP_SEQUENCES)},
+            ),
             **kwargs,
         )
         if fallback:
@@ -480,4 +498,5 @@ def build_llm_service(call_sid: str, settings) -> ResilientLLMService:
         endpoint=primary_endpoint(settings),
         fallback=fallback_endpoint(settings),
         warn_below=settings.LLM_MIN_TOKENS_TO_DIAL,
+        max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
     )

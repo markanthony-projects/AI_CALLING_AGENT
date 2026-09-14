@@ -6,6 +6,7 @@ from app.api.routes.campaign import router as campaign_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.contacts import router as contacts_router
 from app.api.routes.dashboard import router as dashboard_router
+from app.core import llm_probe
 from app.core.config import settings
 from sqlalchemy import text
 
@@ -56,7 +57,9 @@ _CALL_MODULES = {
     # is an allow-list, so forgetting is silent, and the symptom is always the same: working
     # code that cannot be told apart from missing code.
     "app.services.stt_provider",
-    "app.utils.turn_analyzer",
+    # The model probe: which configured models can answer, and whether dialing is paused
+    # because none can. The one line that explains a queue that is not moving.
+    "app.core.llm_probe",
     # And a third time, 11 Sep 2026. STARTUP measures the two seconds of silence before the
     # greeting — the one number that had been asked for three times — and the first call
     # carrying it produced no line at all. The comment above was written twice and did not
@@ -246,6 +249,33 @@ async def lifespan(app: FastAPI):
     await init_arq_pool()
     logger.info("Extraction queue connected.")
 
+    if not settings.AI_DISCLOSURE.strip():
+        logger.warning("=" * 78)
+        logger.warning("AI_DISCLOSURE is blank — the greeting will NOT say the caller is software.")
+        logger.warning("TRAI's TCCCPR (Feb 2025 amendment) requires that disclosure on every call.")
+        logger.warning("=" * 78)
+
+    # The models named in .env, asked for a token before anybody is dialled. On 10 Sep the
+    # primary 404ed while still listed; on 14 Sep the .env still named it, and named a
+    # fallback its provider had shut down a month earlier. Startup is the moment to find
+    # that out, and the timer below is for the day a provider withdraws a model at noon.
+    # Never fatal: a probe that cannot run leaves the verdict unknown, and unknown permits
+    # dialing. See app/core/llm_probe.py.
+    try:
+        await llm_probe.run_and_publish(settings)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"LLM probe could not run at startup: {e}")
+
+    async def probe_llm_periodically():
+        while True:
+            await asyncio.sleep(settings.LLM_PROBE_INTERVAL_SECONDS)
+            try:
+                await llm_probe.run_and_publish(settings)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"LLM probe failed: {e}")
+
+    prober = asyncio.create_task(probe_llm_periodically())
+
     # A call whose process died never got to write its own ending, so the row says
     # IN_PROGRESS for ever and the dashboard cannot tell it from a live call. Swept on a
     # timer as well as at startup, because the process that should have cleaned up is
@@ -263,6 +293,7 @@ async def lifespan(app: FastAPI):
     yield
 
     sweeper.cancel()
+    prober.cancel()
     await close_arq_pool()
     try:
         await engine.dispose()
@@ -316,4 +347,16 @@ app.include_router(contacts_router)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "auth": "enabled" if settings.AUTH_ENABLED else "DISABLED"}
+    # The LLM verdict is best effort and read from Redis, so a probe that has not run yet
+    # shows as unknown rather than failing the check. The container is healthy when it can
+    # serve HTTP; whether it can serve a call is a separate question this line answers.
+    verdict = await llm_probe.status()
+    return {
+        "status": "ok",
+        "auth": "enabled" if settings.AUTH_ENABLED else "DISABLED",
+        "llm": {
+            "primary": verdict.get("primary", "unknown"),
+            "fallback": verdict.get("fallback", "not configured" if not settings.llm_fallback_enabled else "unknown"),
+            "serviceable": verdict.get("serviceable", "unknown"),
+        },
+    }

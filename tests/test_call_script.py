@@ -28,7 +28,7 @@ NAMED = get_system_prompt(CONTEXT, "Rahul Sharma")
 
 def test_the_whole_greeting():
     assert build_opening_line("Abhee New Dimension", "Rahul", MORNING) == (
-        "Hello, Good morning. My name is Priya, and I am calling you from "
+        "Hello, Good morning. My name is Priya, an AI assistant, and I am calling you from "
         "Abhee New Dimension. Am I speaking with Rahul?"
     )
 

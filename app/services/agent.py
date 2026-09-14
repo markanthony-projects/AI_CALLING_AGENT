@@ -63,10 +63,10 @@ from app.utils.socket_witness import SocketWitness
 from app.utils.one_question import OneQuestionPerTurn
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
 from app.utils.timeutils import time_of_day_greeting
-from app.utils.turn_analyzer import build_turn_analyzer
 from app.utils.stt_witness import SttWitness
 from app.utils.turn_gate import TurnFinalityGate
-from app.prompts.agent_prompts import AGENT_NAME, get_system_prompt
+from app.prompts.agent_prompts import AGENT_NAME, get_system_prompt, introduction
+from app.utils.call_metrics import CallMetricsSnapshot
 import sys
 from loguru import logger
 
@@ -179,10 +179,9 @@ def build_opening_line(
     # invites a yes, and confirms we reached the person the dial list named. Without a name
     # it asks for one, which is the same question pointed the other way.
     ask = f"Am I speaking with {name}?" if name else "May I know your good name?"
-    return (
-        f"Hello, Good {part}. My name is {who}, and I am calling you from {identity}. "
-        f"{ask}"
-    )
+    # The introduction carries the AI disclosure and is built in one place, shared with the
+    # prompt, so the system-spoken greeting and the model's own introduction cannot drift.
+    return f"Hello, Good {part}. {introduction(who, identity)} {ask}"
 
 
 def build_reintroduction(
@@ -202,7 +201,7 @@ def build_reintroduction(
     identity = caller_identity(project_name, developer_name).rstrip(".")
     who = (agent_name or "").strip() or AGENT_NAME
     ask = f"Am I speaking with {name}?" if name else "May I know your good name?"
-    return f"My name is {who}, and I am calling you from {identity}. {ask}"
+    return f"{introduction(who, identity)} {ask}"
 
 
 def spoken(text: str, *, append_to_context: bool = True) -> list[TTSSpeakFrame]:
@@ -313,6 +312,9 @@ class CallResult:
     # stopped without saying — which is itself worth seeing, because that is exactly how an
     # ending nobody chose looks from the outside.
     end_reason: Optional[str] = None
+    # The numbers this call is judged by, for the call_metrics table. None only when the
+    # session died before it could count anything. See app/utils/call_metrics.py.
+    metrics: Optional[CallMetricsSnapshot] = None
 
 
 def ending_reason(frame) -> str:
@@ -394,8 +396,6 @@ async def run_voice_agent(
         )
     )
 
-    turn_analyzer = build_turn_analyzer(call_sid, settings)
-
     serializer = VobizSerializer(stream_sid=call_sid)
 
     # Wrapped, not replaced: every call the transport makes falls through to the real socket.
@@ -414,9 +414,6 @@ async def run_voice_agent(
             audio_in_sample_rate=16000,
             audio_out_sample_rate=16000,
             serializer=serializer,
-            # None unless SMART_TURN_ENABLED, and None is what the transport had before —
-            # so an untouched deployment keeps the silence timer it has always used.
-            turn_analyzer=turn_analyzer,
         ),
     )
 
@@ -748,11 +745,12 @@ async def run_voice_agent(
     # app/services/turns.py for the two of them and what each can and cannot tell apart.
     greeting_gate = listening.start_strategy
     # Who decides the turn is over comes from the speech service, because it depends on
-    # whether that service knows. Pipecat's own default here is a Smart Turn ONNX model; it
-    # is not used, and the reason is not timidity — the transport parameter that used to
-    # carry an analyzer no longer exists in 1.5, so SMART_TURN_ENABLED wires an object to
-    # nothing. The real choice is between a stopwatch and a service that says so, and
-    # stt_provider makes it once. See app/services/stt_provider.py.
+    # whether that service knows. Pipecat's own default here is Smart Turn v3.2, a local
+    # ONNX model, and this deliberately replaces it: the choice today is between a stopwatch
+    # and a service that says so, made once in stt_provider. Adopting the model instead of
+    # the stopwatch is a measured A/B, not a flag — see the Phase 1 plan — and until that
+    # runs, a strategy passed here is the only thing that decides. (An earlier setting that
+    # handed an analyzer to the transport did nothing: the parameter does not exist in 1.5.)
     stop_strategy = listening.stop_strategy
     user_agg = LLMUserAggregator(
         context=context,
@@ -1051,12 +1049,6 @@ async def run_voice_agent(
             _llm_in_flight = False
             logger.info(f"[{call_sid}] Prospect resumed mid-inference; abandoning the stale turn")
             await task.queue_frames([InterruptionWorkerFrame()])
-
-        if client_type == "exotel":
-            try:
-                await websocket.send_json({"event": "clear_client_buffer"})
-            except Exception:
-                pass
 
     # ─── User Stops Speaking ───────────────────────────────────────────────────
     @user_agg.event_handler("on_user_turn_stopped")
@@ -1410,4 +1402,17 @@ async def run_voice_agent(
         ),
         latency=latency.log_summary(),
         answering_machine=_answering_machine,
+        # summary(), not log_summary(): the line above has already printed it, and the
+        # table gets the same dict without a second LATENCY line in the log.
+        metrics=CallMetricsSnapshot.collect(
+            latency_summary=latency.summary(),
+            first_word_ms=latency.first_word_ms,
+            held_replies=turn_gate.dropped,
+            tts_reconnects=max(0, _tts_reconnects - 1),
+            tts_revivals=tts.revivals,
+            llm_failures=_llm_failures,
+            end_reason=_end_reason,
+            stt=str(listening.endpoint),
+            llm=str(primary_endpoint(settings)),
+        ),
     )

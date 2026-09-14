@@ -241,6 +241,46 @@ class Call(Base):
     campaign = relationship("Campaign", back_populates="calls")
     lead = relationship("Lead", back_populates="calls")
     transcript = relationship("Transcript", back_populates="call", uselist=False)
+    metrics = relationship("CallMetrics", back_populates="call", uselist=False)
+
+class CallMetrics(Base):
+    """The numbers one call is judged by. One row per finished call, written once.
+
+    Every column was already a log line — LATENCY, FIRST WORD, the held-reply and reconnect
+    counts — and log lines rotate after a couple of days. This is what lets the dashboard
+    draw a p50 trend and what lets "is today slower than yesterday" be answered without
+    grep. See app/utils/call_metrics.py for how the row is assembled.
+    """
+
+    __tablename__ = "call_metrics"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    call_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("calls.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    turns = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    p50_turn_ms = Column(Integer, nullable=True)
+    p95_turn_ms = Column(Integer, nullable=True)
+    max_turn_ms = Column(Integer, nullable=True)
+    first_word_ms = Column(Integer, nullable=True)
+    held_replies = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    tts_reconnects = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    tts_revivals = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    llm_failures = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    end_reason = Column(String, nullable=True)
+    stt = Column(String, nullable=False)
+    llm = Column(String, nullable=False)
+    # Indexed on its own: the dashboard asks "the last N days" of this table directly.
+    created_at = Column(
+        DateTime, default=utc_now, server_default=text("now()"), nullable=False, index=True
+    )
+
+    call = relationship("Call", back_populates="metrics")
+
 
 class DialAttempt(Base):
     """One request to the carrier to ring one number. Written once, never overwritten.

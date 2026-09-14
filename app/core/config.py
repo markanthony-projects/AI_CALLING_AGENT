@@ -180,31 +180,6 @@ class Settings(BaseSettings):
     # service default of five seconds is a long time to sit in silence.
     STT_EOT_TIMEOUT_MS: Optional[int] = Field(default=None, ge=200, le=10000)
 
-    # Semantic end-of-turn detection, off by default.
-    #
-    # Pipecat's own model, bundled with the package and run locally on CPU. It answers the
-    # one question a silence timer cannot: is this sentence finished? On a live call on
-    # 3 Sep 2026 the prospect said "investment" / "is good or" / "self is good?" with
-    # pauses between, and the agent answered all three fragments separately because each
-    # pause outlasted TURN_SETTLE_SECS.
-    #
-    # It reads the audio rather than the transcript, which matters here more than it would
-    # elsewhere: our Hinglish transcription is the weak part of the stack, and a model that
-    # hears the intonation is not fooled by "3 crore" coming back as "3 year".
-    #
-    # Default off, and deliberately so. It was tried before and ruled "Maybe around in 2" a
-    # finished turn on PSTN; this is v3.2 rather than that build, but the risk is real and
-    # this has to be earned on measured calls, not assumed. Turning it on is one value, and
-    # turning it back off is one value — no deploy either way.
-    SMART_TURN_ENABLED: bool = False
-    # CPU threads for that inference. One is Pipecat's own default and enough for a single
-    # call; the ceiling matters because every concurrent call runs its own.
-    SMART_TURN_CPU_COUNT: int = Field(default=1, ge=1, le=8)
-    # How long to keep waiting when the model keeps saying the sentence is unfinished. This
-    # is the backstop, not the normal path — a prospect who trails off must not hold the
-    # line open. Pipecat's default is 3s.
-    SMART_TURN_STOP_SECS: float = Field(default=2.0, gt=0, le=10)
-
     # Words the prospect must say to cut the agent off while it is speaking. VAD alone
     # treated the "Hello?" on pickup as a barge-in and killed the opening line 0.7s in, so
     # the prospect never heard who was calling and asked "who are you?" two turns later.
@@ -323,6 +298,19 @@ class Settings(BaseSettings):
     # listening, and the difference between 1.1 and 1.15 is not something a test can settle.
     # Bounded by what bulbul:v3 accepts; the useful band is 1.0 to 1.2.
     SPEAKING_PACE: float = Field(default=1.0, ge=0.5, le=2.0)
+
+    # What the agent calls itself in the opening line, so the prospect is told they are
+    # talking to software before anything else is said. TRAI's February 2025 amendment to
+    # the TCCCPR makes that disclosure mandatory on every automated commercial call, and a
+    # channel partner placing promotional calls is a sender under it exactly as a vendor is.
+    #
+    # Spoken by the system inside the greeting — "My name is Priya, an AI assistant, and I
+    # am calling you from ..." — and repeated by the model when it has to introduce itself,
+    # never left to the prompt alone: a rule in the prompt is a suggestion, and this is a
+    # legal requirement. The phrase is a setting because the wording is a compliance and
+    # brand decision, not an engineering one. Blank disables it, loudly, at startup; there
+    # is no quiet way to switch a legal disclosure off.
+    AI_DISCLOSURE: str = "an AI assistant"
     GROQ_API_KEY: str = ""
     DEEPGRAM_API_KEY: str = ""
 
@@ -376,6 +364,22 @@ class Settings(BaseSettings):
     # reasoning_effort at all, it spent its entire 60-token budget thinking and never
     # reached the tool call, so on qwen this must be "none", not "low".
     LLM_REASONING_EFFORT: str = "low"
+
+    # The most tokens one reply may spend, reasoning included. A spoken sales reply is
+    # twenty to forty words; call cfb7a957 produced fourteen seconds of one — six turns of a
+    # conversation that had not happened, both sides of it, and a booking nobody agreed to.
+    # OneQuestionPerTurn keeps a runaway off the line; this keeps it from being generated
+    # at all, and from being billed. gpt-oss counts its reasoning against this budget, so
+    # 400 leaves room for "low" effort (8–72 tokens measured) plus the reply. Raise it only
+    # with a measured reason; lowering it below ~200 starts truncating ordinary answers.
+    LLM_MAX_COMPLETION_TOKENS: int = Field(default=400, ge=100, le=4096)
+
+    # How often the configured models are re-checked with a real completion. On 10 Sep 2026
+    # the primary 404ed mid-day while still listed by models.list, and the first sign was a
+    # prospect being hung up on. The probe runs at startup and on this interval, and the
+    # dialer refuses to place calls while neither the primary nor the fallback can answer.
+    # Five minutes bounds the exposure to a few dials without hammering the providers.
+    LLM_PROBE_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
 
     @property
     def llm_api_key(self) -> str:

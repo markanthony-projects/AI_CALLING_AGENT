@@ -44,6 +44,12 @@ _SALUTATIONS = {
 # next word along.
 _INITIAL = re.compile(r"^[A-Za-z]\.?$")
 
+# A name prefix that is not what the person is called. "Mohd. Irfan" is addressed as Irfan;
+# greeting him as "Mohd." — which is what the first-word rule produced — is an abbreviation
+# said out loud to a stranger. Only skipped when a name follows: a row holding "Mohammad"
+# alone is a man called Mohammad, and he is greeted as one.
+_NAME_PREFIXES = {"mohd", "md", "mohammad", "mohammed", "muhammad", "mohamed"}
+
 # Anything outside Latin letters, digits, spaces and the punctuation a name can hold.
 # Sarvam breaks up mid-word on mixed script, so a Devanagari row in the lead list would
 # garble the one line the caller has not yet decided to trust.
@@ -78,6 +84,8 @@ def spoken_name(raw: Optional[str]) -> str:
     # Skip initials to reach a word somebody is called by. If the whole name is initials
     # there is nothing to say, so the greeting goes without one.
     while words and _INITIAL.match(words[0]):
+        words = words[1:]
+    if len(words) > 1 and words[0].rstrip(".").lower() in _NAME_PREFIXES:
         words = words[1:]
     if not words:
         return ""
