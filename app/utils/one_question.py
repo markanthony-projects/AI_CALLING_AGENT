@@ -55,6 +55,20 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 _WORTH_CUTTING = 12
 
 
+def spoken_part(text: str) -> str:
+    """What this processor will let through of `text`: up to and including its first "?".
+
+    The same rule the streaming path applies, as a pure function, for anything upstream
+    that needs to know what the prospect is about to hear rather than what the model wrote.
+    On 14 Sep 2026 the leaked-end_call path read "Thank you for your time" off the tool
+    filter's lead-in, decided a goodbye had already been spoken, and waited twelve seconds
+    for audio that this processor had cut — the prospect said "Hello? Hello?" into silence
+    and was hung up on. The words that decide a hangup have to be the words on the wire.
+    """
+    head, mark, _ = (text or "").partition("?")
+    return head + mark if mark else head
+
+
 class OneQuestionPerTurn(FrameProcessor):
     """Stops a reply at its first question, and drops whatever the model kept writing.
 

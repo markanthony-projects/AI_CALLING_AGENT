@@ -208,6 +208,9 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         # And it refuses on a bare yes/no, which is an answer and not a goodbye.
         # Same shape, same closure. See app/utils/bare_answer.py.
         "    _bare_refusals = 0\n"
+        # And once on a closing line that announces a booking the prospect never agreed —
+        # it asks for the missing hour instead. See app/utils/booking_claim.py.
+        "    _booking_refusals = 0\n"
         "    _last_agent_line = 'It sits on 45 acres. Do you know Varthur?'\n"
         "    return end_call_handler\n"
     ).body[0]
@@ -229,6 +232,10 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "BARE_ANSWER_REASON": agent.BARE_ANSWER_REASON,
         "dead_air_nudge": agent.dead_air_nudge,
         "REFUSAL_REASON": agent.REFUSAL_REASON,
+        # And the three for the unagreed-booking refusal.
+        "MAX_BOOKING_REFUSALS": agent.MAX_BOOKING_REFUSALS,
+        "BOOKING_REFUSAL_REASON": agent.BOOKING_REFUSAL_REASON,
+        "ASK_FOR_TIME": agent.ASK_FOR_TIME,
         "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "FAREWELL_LINE": FAREWELL_LINE,
         "logger": agent.logger,

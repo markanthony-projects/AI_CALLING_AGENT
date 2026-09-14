@@ -40,7 +40,8 @@ from app.utils.bare_answer import MAX_BARE_REFUSALS, is_a_bare_answer
 from app.utils.bare_answer import REFUSAL_REASON as BARE_ANSWER_REASON
 from app.utils.project_rejected import BRIEF as PROJECT_RULED_OUT
 from app.utils.project_rejected import rejects_the_project
-from app.utils.booking_claim import unagreed_booking
+from app.utils.booking_claim import ASK_FOR_TIME, MAX_BOOKING_REFUSALS, unagreed_booking
+from app.utils.booking_claim import REFUSAL_REASON as BOOKING_REFUSAL_REASON
 from app.utils.closing_gate import ClosingGate
 from app.utils.dashes import DashFilter
 from app.utils.latency import LatencyObserver
@@ -614,7 +615,7 @@ async def run_voice_agent(
 
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
-        nonlocal _ending, _repeat_refusals, _bare_refusals
+        nonlocal _ending, _repeat_refusals, _bare_refusals, _booking_refusals
         if not task_ref or _ending:
             return
 
@@ -679,6 +680,23 @@ async def run_voice_agent(
         # who had never been offered one; the caller heard it and the lead sheet recorded
         # it. See app/utils/booking_claim.py.
         claim = unagreed_booking(line, prospect_lines)
+        # Once, the turn goes back to the model with the reason: a prospect who said
+        # "Saturday" and no hour is in the middle of booking, and hanging up on them —
+        # even politely, even without the invented hour — loses the visit. On the second
+        # attempt the plain farewell stands, as the bounded refusals above do.
+        if claim and _booking_refusals < MAX_BOOKING_REFUSALS:
+            _booking_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Refusing to hang up: closing line announces {claim!r}, which "
+                f"the prospect never said. Asking for the time instead "
+                f"({_booking_refusals}/{MAX_BOOKING_REFUSALS}). Was: \"{line}\""
+            )
+            callback = getattr(params, "result_callback", None)
+            if callback is not None:
+                await callback({"refused": BOOKING_REFUSAL_REASON})
+            else:
+                await task_ref[0].queue_frames(spoken(ASK_FOR_TIME))
+            return
         if claim:
             logger.warning(
                 f"[{call_sid}] Closing line announces {claim!r}, which the prospect never "
@@ -699,9 +717,38 @@ async def run_voice_agent(
     # ToolSyntaxFilter has already stopped the caller hearing it, so all that is left is to
     # hang up the way the structured call would have.
     async def on_leaked_end_call(line: Optional[str], spoken_already: str):
-        nonlocal _ending
+        nonlocal _ending, _booking_refusals
         if not task_ref or _ending:
             return
+
+        # The same vetting the tool channel gets. The leak path used to skip the booking
+        # check, so a leaked "confirmed for Saturday at 11 AM" — the exact line the tool
+        # path refuses — would have been read out here.
+        goodbye = closing_line(line)
+        prospect_lines = [
+            m["content"] for m in context.messages
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+        ]
+        claim = unagreed_booking(goodbye, prospect_lines)
+        if claim and _booking_refusals < MAX_BOOKING_REFUSALS:
+            _booking_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Not hanging up on a leaked end_call: its closing line announces "
+                f"{claim!r}, which the prospect never said. Asking for the time instead "
+                f"({_booking_refusals}/{MAX_BOOKING_REFUSALS}). Was: \"{goodbye}\""
+            )
+            # No tool result to hand back on this path. If the words on the wire already
+            # end on a question the prospect is being asked; otherwise ask them ourselves.
+            if not spoken_already.rstrip().endswith("?"):
+                await task_ref[0].queue_frames(spoken(ASK_FOR_TIME))
+            return
+        if claim:
+            logger.warning(
+                f"[{call_sid}] Leaked closing line announces {claim!r}, which the prospect "
+                f"never said; saying goodbye without it. Was: \"{goodbye}\""
+            )
+            goodbye = FAREWELL_LINE
+
         _ending = True
         closing_gate.arm()
         # Whether the prospect has already been said goodbye to — not merely whether the
@@ -712,14 +759,21 @@ async def run_voice_agent(
         if sounds_like_goodbye(spoken_already):
             # It really was a sign-off and it is on the wire now. Speaking the leaked closing
             # line too would be two farewells in a row, but the first still has to finish.
+            #
+            # wait_for_quiet, not wait_until_spoken: nothing is queued on this branch, so
+            # there is no farewell to wait FOR — only whatever is playing to let finish. On
+            # 14 Sep the old wait sat its full ceiling out against audio the cutter had
+            # already dropped: twelve seconds of silence, then a dead line.
             logger.info(f"[{call_sid}] Ending call after leaked end_call syntax (goodbye already spoken)")
-            farewell.arm()
-            await farewell.wait_until_spoken(farewell_timeout(line or ""))
+            if not await farewell.wait_for_quiet(farewell_timeout(spoken_already)):
+                logger.warning(
+                    f"[{call_sid}] The goodbye on the wire never finished playing; hanging up "
+                    f"rather than holding the line open"
+                )
             await task_ref[0].queue_frames([EndWorkerFrame(reason="leaked end_call, goodbye already spoken")])
             return
-        spoken = closing_line(line)
-        logger.info(f"[{call_sid}] Ending call after leaked end_call syntax → \"{spoken}\"")
-        await say_goodbye_then_hang_up(spoken)
+        logger.info(f"[{call_sid}] Ending call after leaked end_call syntax → \"{goodbye}\"")
+        await say_goodbye_then_hang_up(goodbye)
 
     # Above the tool-syntax filter on purpose: a reply to half a sentence must not reach
     # the leaked-end_call path either. See app/utils/turn_gate.py.
@@ -879,6 +933,9 @@ async def run_voice_agent(
     # again. Bounded: a guard meant to save a lead must not become a call nobody can leave.
     _repeat_refusals: int = 0
     _bare_refusals: int = 0
+    # And because the closing line announced a booking the prospect never agreed. See
+    # app/utils/booking_claim.py.
+    _booking_refusals: int = 0
     _dead_air_nudges: int = 0
     # True between the prospect asking for a moment and them speaking again. Nothing the
     # agent says on its own initiative may break that silence.

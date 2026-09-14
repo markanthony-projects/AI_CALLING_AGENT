@@ -31,6 +31,24 @@ _RELATIVE = re.compile(r"(?<![a-z])(day after tomorrow|tomorrow|today|tonight)(?
 _CLOCK = re.compile(r"(?<![0-9.])(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?![a-z])", re.I)
 _RELATIVE_DAYS = {"today": 0, "tonight": 0, "tomorrow": 1, "day after tomorrow": 2}
 
+# How many times end_call is refused for announcing a booking the prospect never agreed.
+# Once. Call 6102ee87, 14 Sep 2026: the prospect said "next weekend, like Saturday" and the
+# model closed with "confirmed for Saturday at 11 AM" — no hour had been said. Saying goodbye
+# without the claim, which is what happened before, still hangs up on somebody in the middle
+# of booking a visit; the right move is to ask the one thing that is missing. Bounded like
+# the repeat and bare-answer refusals: a guard meant to save a booking must not become a
+# call nobody can leave, so the second time the plain farewell stands.
+MAX_BOOKING_REFUSALS = 1
+
+REFUSAL_REASON = (
+    "Your closing line announces a day or time the prospect never said in their own words, "
+    "so there is no booking yet. Do NOT end the call. Ask which day and what time would suit "
+    "them, wait for the answer, read it back, and only then close."
+)
+
+# Spoken by the system when the leak path has no tool result to hand back to the model.
+ASK_FOR_TIME = "Sorry, one small thing. Which day and what time would suit you for the visit?"
+
 
 def _as_transcript(prospect_lines: Iterable[str]) -> str:
     """The prospect's words in the shape attribution reads — Prospect: lines and nothing else."""

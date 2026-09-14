@@ -29,6 +29,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from app.utils.money import amounts_in, as_spoken, ungrounded
+from app.utils.one_question import spoken_part
 
 # Words that, right after a '<', mean the model is writing markup rather than speech.
 # '|' covers Llama's special tokens (<|python_tag|>), '/' the closing tags.
@@ -349,7 +350,10 @@ class ToolSyntaxFilter(FrameProcessor):
             if speak:
                 self._spoke_this_response = True
                 self._record_lead_in(speak)
-                self._report_script(speak)
+                # Both checks read lead_in — what will be heard — not this chunk, so a
+                # stray script or an invented price after the first question is not
+                # reported as something the prospect was told.
+                self._report_script(self.lead_in)
                 self._report_price()
                 frame.text = speak
                 await self.push_frame(frame, direction)
@@ -390,10 +394,16 @@ class ToolSyntaxFilter(FrameProcessor):
 
     @property
     def lead_in(self) -> str:
-        """What the inference now being read out has already sent to the voice engine.
+        """What the inference now being read out will actually have said out loud.
 
         Empty when the current response has spoken nothing, and empty again as soon as a
         new response starts -- so anything non-empty here belongs to the turn in progress.
+
+        Cut at the first question, because that is what OneQuestionPerTurn, downstream of
+        here, lets through. This filter forwards the whole reply and cannot see the cut, so
+        it applies the same rule itself: on 14 Sep the words after the question were "Thank
+        you for your time", the leak handler read them as a goodbye already on the wire, and
+        the prospect got twelve seconds of silence and a dead line instead of one.
 
         end_call reads this to tell a lead-in from a leftover. On a live call on 4 Sep 2026
         one inference produced both a reply and the tool call, and the interruption meant to
@@ -406,7 +416,8 @@ class ToolSyntaxFilter(FrameProcessor):
 
         The prospect heard half a sentence and then a goodbye.
         """
-        return self._spoken_line if self._spoken_seq == self._response_seq else ""
+        raw = self._spoken_line if self._spoken_seq == self._response_seq else ""
+        return spoken_part(raw)
 
     def _report_price(self) -> None:
         """Report, once per response, a money figure the campaign context cannot account for.
@@ -423,7 +434,10 @@ class ToolSyntaxFilter(FrameProcessor):
         """
         if self._flagged_price:
             return
-        line = self._spoken_line
+        # lead_in, not the raw line: a figure the model wrote after its first question is
+        # cut before the voice engine sees it, and reporting it as "spoken" was a false
+        # alarm on 14 Sep (1.64 Crores, in a runaway nobody heard).
+        line = self.lead_in
         invented = ungrounded(line, self._grounded_amounts)
         if not invented:
             return
