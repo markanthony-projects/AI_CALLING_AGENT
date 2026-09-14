@@ -36,6 +36,8 @@ from app.services.llm_provider import (
 )
 from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machine_phrases
 from app.utils.asked import REPEAT_LIMIT, AskedSoFar
+from app.utils.bare_answer import MAX_BARE_REFUSALS, is_a_bare_answer
+from app.utils.bare_answer import REFUSAL_REASON as BARE_ANSWER_REASON
 from app.utils.project_rejected import BRIEF as PROJECT_RULED_OUT
 from app.utils.project_rejected import rejects_the_project
 from app.utils.booking_claim import unagreed_booking
@@ -615,7 +617,7 @@ async def run_voice_agent(
 
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
-        nonlocal _ending, _repeat_refusals
+        nonlocal _ending, _repeat_refusals, _bare_refusals
         if not task_ref or _ending:
             return
 
@@ -623,6 +625,29 @@ async def run_voice_agent(
             m["content"] for m in context.messages
             if m.get("role") == "user" and isinstance(m.get("content"), str)
         ]
+
+        # One word is an answer to a question, never a decision to end the call. On call
+        # 578195d1 a prospect who had just said they were buying answered "No." to "Have you
+        # been to that side of town?" and the model hung up on them, forty-five seconds in.
+        # See app/utils/bare_answer.py.
+        if _bare_refusals < MAX_BARE_REFUSALS and is_a_bare_answer(
+            prospect_lines[-1] if prospect_lines else None
+        ):
+            _bare_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Refusing to hang up: {prospect_lines[-1].strip()[:40]!r} is an "
+                f"answer, not a goodbye ({_bare_refusals}/{MAX_BARE_REFUSALS})"
+            )
+            callback = getattr(params, "result_callback", None)
+            if callback is not None:
+                await callback({"refused": BARE_ANSWER_REASON})
+                return
+            # No way to hand the turn back. Asking the question again is worse than the model
+            # carrying on, and far better than hanging up on somebody who is still buying.
+            nudge = dead_air_nudge(_last_agent_line)
+            if nudge:
+                await task_ref[0].queue_frames(spoken(nudge))
+                return
 
         # "Say it again" is not a goodbye. On call 6a58a7f4 the prospect had said they were
         # interested, then said "Sorry, I did not catch that. Can you say it again?" — and
@@ -855,6 +880,7 @@ async def run_voice_agent(
     # How many times end_call has been refused because the prospect asked to hear something
     # again. Bounded: a guard meant to save a lead must not become a call nobody can leave.
     _repeat_refusals: int = 0
+    _bare_refusals: int = 0
     _dead_air_nudges: int = 0
     # True between the prospect asking for a moment and them speaking again. Nothing the
     # agent says on its own initiative may break that silence.

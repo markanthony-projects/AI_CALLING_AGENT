@@ -205,6 +205,9 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         # end_call refuses to hang up when the prospect asked to hear something again, and
         # counts its refusals. Both are closure variables of run_voice_agent.
         "    _repeat_refusals = 0\n"
+        # And it refuses on a bare yes/no, which is an answer and not a goodbye.
+        # Same shape, same closure. See app/utils/bare_answer.py.
+        "    _bare_refusals = 0\n"
         "    _last_agent_line = 'It sits on 45 acres. Do you know Varthur?'\n"
         "    return end_call_handler\n"
     ).body[0]
@@ -219,6 +222,12 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "wants_repeat": agent.wants_repeat,
         "say_again": agent.say_again,
         "MAX_REPEAT_REFUSALS": agent.MAX_REPEAT_REFUSALS,
+        # The same three for the bare-answer refusal: a one-word yes or no is an answer
+        # to a question, and the call does not end on it.
+        "MAX_BARE_REFUSALS": agent.MAX_BARE_REFUSALS,
+        "is_a_bare_answer": agent.is_a_bare_answer,
+        "BARE_ANSWER_REASON": agent.BARE_ANSWER_REASON,
+        "dead_air_nudge": agent.dead_air_nudge,
         "REFUSAL_REASON": agent.REFUSAL_REASON,
         "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "FAREWELL_LINE": FAREWELL_LINE,
