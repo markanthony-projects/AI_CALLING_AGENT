@@ -213,6 +213,9 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "    _booking_refusals = 0\n"
         # And once on a yes to a question that closed nothing. See app/utils/engaged_answer.py.
         "    _early_refusals = 0\n"
+        # And once on a closing offer the prospect spoke over before hearing it.
+        "    _cut_off_refusals = 0\n"
+        "    _last_agent_line_interrupted = False\n"
         "    _last_agent_line = 'It sits on 45 acres. Do you know Varthur?'\n"
         "    return end_call_handler\n"
     ).body[0]
@@ -243,6 +246,9 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "EARLY_REFUSAL_REASON": agent.EARLY_REFUSAL_REASON,
         "said_yes_and_nothing_was_closed": agent.said_yes_and_nothing_was_closed,
         "is_a_yes_to_a_close": agent.is_a_yes_to_a_close,
+        "offered_a_close": agent.offered_a_close,
+        "CUT_OFF_REASON": agent.CUT_OFF_REASON,
+        "MAX_CUT_OFF_REFUSALS": agent.MAX_CUT_OFF_REFUSALS,
         "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "FAREWELL_LINE": FAREWELL_LINE,
         "logger": agent.logger,

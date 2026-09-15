@@ -121,3 +121,47 @@ def test_the_bare_answer_refusal_steps_aside_for_it():
     handler = handler[: handler.index('llm.register_function("end_call"')]
     bare = handler.index("is_a_bare_answer(")
     assert "and not is_a_yes_to_a_close(" in handler[bare : bare + 300]
+
+
+# --- an offer they spoke over is not an offer they answered -------------------------------
+
+
+def test_the_closing_offers_are_recognised():
+    from app.utils.engaged_answer import offered_a_close
+
+    assert offered_a_close("Shall I send you the floor plan and price details on WhatsApp?")
+    assert offered_a_close("Would you like to visit the site on Saturday?")
+    assert offered_a_close("Should our property expert call you with the details?")
+    assert not offered_a_close("Does that work for you?")
+    assert not offered_a_close("")
+    assert not offered_a_close(None)
+
+
+def test_both_hangup_paths_refuse_once_on_a_cut_off_offer():
+    """Call cb3119fd, 15 Sep 2026: the WhatsApp offer was cut off by the prospect's answer
+    to the previous question, and the model hung up on that answer."""
+    from app.services import agent
+    from app.utils.engaged_answer import MAX_CUT_OFF_REFUSALS
+
+    src = inspect.getsource(agent.run_voice_agent)
+    ends = {"end_call_handler": 'llm.register_function("end_call"', "on_leaked_end_call": "turn_gate = TurnFinalityGate("}
+    for name, end in ends.items():
+        handler = src[src.index(f"async def {name}") :]
+        handler = handler[: handler.index(end)]
+        assert "_last_agent_line_interrupted" in handler, name
+        assert "offered_a_close(_last_agent_line)" in handler, name
+        assert "_cut_off_refusals < MAX_CUT_OFF_REFUSALS" in handler, name
+    assert MAX_CUT_OFF_REFUSALS == 1
+    # The flag is set from the aggregator's own verdict on the turn.
+    assert "_last_agent_line_interrupted = interrupted" in src
+
+
+def test_the_tool_path_hands_the_turn_back_with_the_reason():
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    handler = src[src.index("async def end_call_handler") :]
+    handler = handler[: handler.index('llm.register_function("end_call"')]
+    cut = handler.index("offered_a_close(_last_agent_line)")
+    assert 'callback({"refused": CUT_OFF_REASON})' in handler[cut : cut + 900]
+    assert cut < handler.index("line = closing_line(")

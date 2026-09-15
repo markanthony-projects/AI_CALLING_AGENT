@@ -76,3 +76,16 @@ def is_a_yes_to_a_close(last_prospect_line: Optional[str], last_agent_line: Opti
     if not text or not _ENGAGED.search(text):
         return False
     return bool(last_agent_line and _CLOSING_OFFER.search(last_agent_line))
+
+
+def offered_a_close(line: Optional[str]) -> bool:
+    """Whether the agent's line was one of the script's closing offers."""
+    return bool(line and _CLOSING_OFFER.search(line))
+
+
+CUT_OFF_REASON = (
+    "Do NOT end the call. Your closing offer was cut off before the prospect heard it — "
+    "their answer was to your PREVIOUS question, not to the offer. Ask the offer again, in "
+    "full, and wait for their answer to it."
+)
+MAX_CUT_OFF_REFUSALS = 1

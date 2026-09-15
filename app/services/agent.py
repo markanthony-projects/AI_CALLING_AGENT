@@ -39,8 +39,11 @@ from app.utils.asked import REPEAT_LIMIT, AskedSoFar
 from app.utils.bare_answer import MAX_BARE_REFUSALS, is_a_bare_answer
 from app.utils.bare_answer import REFUSAL_REASON as BARE_ANSWER_REASON
 from app.utils.engaged_answer import (
+    CUT_OFF_REASON,
+    MAX_CUT_OFF_REFUSALS,
     MAX_EARLY_REFUSALS,
     is_a_yes_to_a_close,
+    offered_a_close,
     said_yes_and_nothing_was_closed,
 )
 from app.utils.engaged_answer import REFUSAL_REASON as EARLY_REFUSAL_REASON
@@ -533,6 +536,7 @@ async def run_voice_agent(
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
         nonlocal _ending, _repeat_refusals, _bare_refusals, _booking_refusals, _early_refusals
+        nonlocal _cut_off_refusals
         if not task_ref or _ending:
             return
 
@@ -617,6 +621,28 @@ async def run_voice_agent(
                 await task_ref[0].queue_frames(spoken(nudge))
                 return
 
+        # A closing offer the prospect spoke over is not an offer they answered. Call
+        # cb3119fd, 15 Sep 2026: "Does that work for you?" — "Yeah." — the WhatsApp offer
+        # began and was cut off by "That's fine." (their answer to the price), and the
+        # model hung up on a yes to a question it never finished asking.
+        if (
+            _cut_off_refusals < MAX_CUT_OFF_REFUSALS
+            and _last_agent_line_interrupted
+            and offered_a_close(_last_agent_line)
+        ):
+            _cut_off_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Refusing to hang up: the closing offer was cut off before the "
+                f"prospect heard it ({_last_agent_line.strip()[:60]!r}); asking it again "
+                f"({_cut_off_refusals}/{MAX_CUT_OFF_REFUSALS})"
+            )
+            callback = getattr(params, "result_callback", None)
+            if callback is not None:
+                await callback({"refused": CUT_OFF_REASON})
+            else:
+                await task_ref[0].queue_frames(spoken(_last_agent_line))
+            return
+
         call_args = getattr(params, "arguments", None) or {}
         line = closing_line(
             call_args.get("closing_line") if isinstance(call_args, dict) else None
@@ -663,8 +689,24 @@ async def run_voice_agent(
     # ToolSyntaxFilter has already stopped the caller hearing it, so all that is left is to
     # hang up the way the structured call would have.
     async def on_leaked_end_call(line: Optional[str], spoken_already: str):
-        nonlocal _ending, _booking_refusals
+        nonlocal _ending, _booking_refusals, _cut_off_refusals
         if not task_ref or _ending:
+            return
+
+        # The same rule as the tool path: an offer they spoke over was not answered.
+        if (
+            _cut_off_refusals < MAX_CUT_OFF_REFUSALS
+            and _last_agent_line_interrupted
+            and offered_a_close(_last_agent_line)
+        ):
+            _cut_off_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Not hanging up on a leaked end_call: the closing offer was cut "
+                f"off before the prospect heard it; asking it again "
+                f"({_cut_off_refusals}/{MAX_CUT_OFF_REFUSALS})"
+            )
+            if not spoken_already.rstrip().endswith("?"):
+                await task_ref[0].queue_frames(spoken(_last_agent_line))
             return
 
         # The same vetting the tool channel gets. The leak path used to skip the booking
@@ -901,6 +943,10 @@ async def run_voice_agent(
     # The agent's last finalized reply, kept so its question can be asked again without an
     # LLM round trip when the answer never reaches us.
     _last_agent_line: str = ""
+    # Whether that line was cut off by the prospect before it finished. A closing offer
+    # they never heard the end of is not an offer they answered. See call cb3119fd.
+    _last_agent_line_interrupted: bool = False
+    _cut_off_refusals: int = 0
     # How many times end_call has been refused because the prospect asked to hear something
     # again. Bounded: a guard meant to save a lead must not become a call nobody can leave.
     _repeat_refusals: int = 0
@@ -1432,15 +1478,17 @@ async def run_voice_agent(
     # every AGENT line was missing from the logs.
     @assistant_agg.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn_stopped(aggregator, message):
-        nonlocal _agent_speaking, _last_agent_line
+        nonlocal _agent_speaking, _last_agent_line, _last_agent_line_interrupted
         _agent_speaking = False
         content = (getattr(message, "content", "") or "").strip()
         if content:
-            suffix = " [interrupted]" if getattr(message, "interrupted", False) else ""
+            interrupted = bool(getattr(message, "interrupted", False))
+            suffix = " [interrupted]" if interrupted else ""
             logger.info(f"[{call_sid}] AGENT → \"{content}\"{suffix}")
             # An interrupted reply is still what the prospect last heard us ask, so it is
             # still the right thing to repeat if their answer then goes missing.
             _last_agent_line = content
+            _last_agent_line_interrupted = interrupted
 
             topic = asked.record(content)
             if topic:

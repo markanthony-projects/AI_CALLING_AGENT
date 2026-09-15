@@ -324,3 +324,12 @@ def test_several_questions_at_once_get_one_answer_and_a_choice():
     drew a seventy-word reply the prospect talked over halfway through."""
     assert "ONE TOPIC PER REPLY" in PROMPT
     assert "answer ONE of them in two sentences and ask which they want next" in PROMPT
+
+
+def test_the_visit_is_the_first_close_and_a_close_must_be_heard():
+    """Call cb3119fd, 15 Sep 2026: price quoted, "Yeah", WhatsApp offered and cut off by the
+    prospect's answer to the price, hung up — on a prospect two questions from booking."""
+    assert "THE VISIT COMES FIRST" in PROMPT
+    assert "WhatsApp is for a prospect who has declined the visit" in PROMPT
+    assert "A CLOSE IS A QUESTION THEY HEARD AND ANSWERED" in PROMPT
+    assert "Never hang up on a yes to a question you never finished asking" in PROMPT
