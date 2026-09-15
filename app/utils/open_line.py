@@ -48,13 +48,23 @@ def line_has_gone_dead(
     last_nudge_at: Optional[float],
     holding: bool,
     ending: bool,
+    last_turn_stopped_at: Optional[float] = None,
+    inference_in_flight: bool = False,
 ) -> bool:
-    """Whether to speak into the silence now. Pure, so every branch has a test."""
-    if bot_speaking or holding or ending:
+    """Whether to speak into the silence now. Pure, so every branch has a test.
+
+    Three clocks have to agree that nothing is happening: the agent's last audio, the
+    agent's last nudge, and the prospect's last finished turn. The third was missing on
+    call 2dbf4ee1: the prospect answered at length, the agent's last audio was eleven
+    seconds old by the time their turn was declared over, and the watchdog spoke into the
+    two seconds in which the reply to that answer was being generated. A turn that has
+    just ended is a reply on its way, and a reply in flight is not silence.
+    """
+    if bot_speaking or holding or ending or inference_in_flight:
         return False
     if bot_stopped_at is None:
         return False  # the agent has not spoken yet; the greeting is on its way
-    quiet_since = max(bot_stopped_at, last_nudge_at or 0.0)
+    quiet_since = max(bot_stopped_at, last_nudge_at or 0.0, last_turn_stopped_at or 0.0)
     if now - quiet_since < OPEN_LINE_SECS:
         return False
     if last_voice_at is not None and now - last_voice_at < PROSPECT_QUIET_SECS:
