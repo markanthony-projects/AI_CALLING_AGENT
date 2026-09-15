@@ -1154,7 +1154,9 @@ async def run_voice_agent(
     @user_agg.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
         nonlocal _empty_user_turns, _user_has_spoken, _turns_heard, _answering_machine
-        nonlocal _dead_air_nudges, _last_nudged, _holding
+        nonlocal _dead_air_nudges, _last_nudged, _holding, _last_turn_stopped_at
+        # For the open-line watchdog: a turn that has just ended is a reply on its way.
+        _last_turn_stopped_at = time.monotonic()
         transcript = (message.content or "").strip() if message and hasattr(message, "content") else ""
         total_turn_time = f"{(time.time() - _turn_start_time) * 1000:.0f}ms" if _turn_start_time else "?"
 
@@ -1527,6 +1529,7 @@ async def run_voice_agent(
     # three calls that motivated it the service held a turn open for twenty seconds and
     # every existing backstop was waiting on that turn to end. See app/utils/open_line.py.
     _last_nudge_at: Optional[float] = None
+    _last_turn_stopped_at: Optional[float] = None
     _open_line_reported = False
 
     async def watch_open_line() -> None:
@@ -1548,6 +1551,8 @@ async def run_voice_agent(
                     last_nudge_at=_last_nudge_at,
                     holding=_holding,
                     ending=_ending,
+                    last_turn_stopped_at=_last_turn_stopped_at,
+                    inference_in_flight=_llm_in_flight,
                 ):
                     continue
                 _last_nudge_at = now

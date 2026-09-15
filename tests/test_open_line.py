@@ -168,3 +168,30 @@ def test_still_speaking_is_shorter_than_the_gap_between_sentences_is_long():
     from app.utils.open_line import STILL_SPEAKING_SECS
 
     assert 0.5 <= STILL_SPEAKING_SECS <= 2.0
+
+
+# --- a turn that has just ended is a reply on its way -------------------------------------
+
+
+def test_a_prospect_turn_that_just_ended_holds_the_watchdog():
+    """Call 2dbf4ee1, 15 Sep 2026: the prospect answered for eight seconds, the agent's last
+    audio was eleven seconds old when the turn was declared over, and the watchdog spoke
+    into the two seconds in which the reply was being generated."""
+    assert _dead(last_turn_stopped_at=100.0 - 1.0) is False
+    assert _dead(last_turn_stopped_at=100.0 - OPEN_LINE_SECS + 0.5) is False
+    assert _dead(last_turn_stopped_at=100.0 - OPEN_LINE_SECS - 0.1) is True
+
+
+def test_an_inference_in_flight_is_not_silence():
+    assert _dead(inference_in_flight=True) is False
+
+
+def test_the_agent_feeds_it_the_turn_clock_and_the_inference_flag():
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    watchdog = src[src.index("async def watch_open_line") : src.index("_open_line_guard = ")]
+    assert "last_turn_stopped_at=_last_turn_stopped_at" in watchdog
+    assert "inference_in_flight=_llm_in_flight" in watchdog
+    stopped = src[src.index("async def on_user_turn_stopped") :][:600]
+    assert "_last_turn_stopped_at = time.monotonic()" in stopped
