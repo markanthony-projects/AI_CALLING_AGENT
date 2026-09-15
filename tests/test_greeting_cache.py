@@ -1,8 +1,12 @@
-"""The greeting synthesised while the phone rings is the greeting the agent will ask for.
+"""The greeting synthesised while the phone rings is the greeting the agent will ask for,
+in the voice the rest of the call will have.
 
 The cache is keyed by sentence. If the worker and the agent cut or build the line
-differently by one character, every call misses silently and nothing is faster. So the
-first tests here are about the keys; the rest are about failing quietly.
+differently by one character, every call misses silently and nothing is faster. And it is
+synthesised over the same websocket with the same config as the live call, because the
+REST endpoint — same model, same speaker — came back about 4dB louder and the prospect
+heard the call drop in volume after the first line. So the tests here are about the keys,
+about the config being the live one to the byte, and about failing quietly.
 """
 
 import asyncio
@@ -11,7 +15,6 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
 from app.services import greeting_cache as gc
@@ -28,6 +31,7 @@ def _settings(**over):
         SARVAM_VOICE_ID="simran",
         SPEAKING_PACE=1.0,
         SARVAM_TEMPERATURE=None,
+        TTS_SPARE_SOCKET=False,
         GREETING_PRIME=True,
     )
     base.update(over)
@@ -49,7 +53,7 @@ class _Redis:
 
 
 def _wav(pcm: bytes, rate: int = 16000, channels: int = 1, bits: int = 16) -> bytes:
-    """A real RIFF/WAVE file, header and all, the way Sarvam returns one."""
+    """A real RIFF/WAVE file, header and all."""
     import struct
 
     block = channels * bits // 8
@@ -58,14 +62,18 @@ def _wav(pcm: bytes, rate: int = 16000, channels: int = 1, bits: int = 16) -> by
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
-class _Client:
-    """httpx.AsyncClient stand-in that records requests and answers with a fixed wave."""
+class _Socket:
+    """Sarvam's websocket as the live call sees it: config, text, flush in; audio frames
+    and a final event out."""
 
-    def __init__(self, pcm=b"\x01\x02" * 400, status=200, raise_=None):
-        self.requests = []
+    sockets = []
+
+    def __init__(self, pcm=b"\x01\x02" * 400, error=None, hang=False):
+        self.sent = []
         self.pcm = pcm
-        self.status = status
-        self.raise_ = raise_
+        self.error = error
+        self.hang = hang
+        _Socket.sockets.append(self)
 
     async def __aenter__(self):
         return self
@@ -73,12 +81,37 @@ class _Client:
     async def __aexit__(self, *exc):
         return False
 
-    async def post(self, url, json=None, headers=None):
-        if self.raise_:
-            raise self.raise_
-        self.requests.append((url, json, headers))
-        body = {"audios": [base64.b64encode(_wav(self.pcm)).decode()]}
-        return httpx.Response(self.status, json=body)
+    async def send(self, raw):
+        self.sent.append(json.loads(raw))
+
+    def __aiter__(self):
+        return self._messages()
+
+    async def _messages(self):
+        if self.hang:
+            await asyncio.sleep(10)
+        if self.error:
+            yield json.dumps({"type": "error", "data": {"message": self.error, "code": 422}})
+            return
+        half = len(self.pcm) // 2
+        for piece in (self.pcm[:half], self.pcm[half:]):
+            yield json.dumps({"type": "audio", "data": {"audio": base64.b64encode(piece).decode()}})
+        yield json.dumps({"type": "event", "data": {"event_type": "final"}})
+
+
+@pytest.fixture
+def sockets(monkeypatch):
+    _Socket.sockets = []
+    factory = {"make": lambda: _Socket()}
+
+    def connect(url, additional_headers=None):
+        sock = factory["make"]()
+        sock.url = url
+        sock.headers = additional_headers
+        return sock
+
+    monkeypatch.setattr(gc, "connect", connect)
+    return factory
 
 
 @pytest.fixture
@@ -123,27 +156,43 @@ def test_the_agent_builds_the_line_with_the_same_arguments():
     assert "developer_name=developer_name" in call and "agent_name=agent_name" in call
 
 
-# ------------------------------------------------------------------ the request
+# ------------------------------------------------------------------ the same voice
 
 
-def test_the_rest_request_matches_the_websocket_config():
-    """The greeting must be in the same voice as the rest of the call."""
+@pytest.mark.parametrize("temperature", [None, 0.4, 0.3])
+def test_the_config_is_the_live_calls_config_to_the_byte(temperature):
+    """The load-bearing one. KeepsItsVoice._config_payload() is what the live socket
+    receives; the worker cannot import it, so live_config is a copy, and this holds them
+    equal across every setting that reaches the voice."""
     from app.services.voice import build_tts
 
-    settings = _settings(SARVAM_TEMPERATURE=0.3)
-    live = build_tts(SimpleNamespace(**vars(settings), TTS_SPARE_SOCKET=False))._config_payload()
-    rest = gc.payload("Hello, Good morning.", settings)
+    settings = _settings(SARVAM_TEMPERATURE=temperature, SPEAKING_PACE=1.05)
+    tts = build_tts(settings)
+    tts._speech_sample_rate = str(gc.SAMPLE_RATE)  # what start() sets from the 16kHz transport
+    assert gc.live_config(settings) == tts._config_payload()
 
-    assert rest["speaker"] == live["speaker"]
-    assert rest["pace"] == live["pace"]
-    assert rest["model"] == live["model"]
-    assert rest["target_language_code"] == live["target_language_code"]
-    assert rest["enable_preprocessing"] == live["enable_preprocessing"]
-    assert rest["temperature"] == live["temperature"] == 0.3
-    # The live socket learns its rate from the StartFrame — the transport's 16kHz output —
-    # so before start() it still says the constructor default. The REST request has to
-    # say what the transport plays, which the next test pins in the agent.
-    assert rest["speech_sample_rate"] == 16000
+
+def test_the_same_endpoint_and_query_as_pipecat():
+    from app.services.voice import build_tts
+
+    assert gc.WS_URL == build_tts(_settings())._websocket_url
+
+
+def test_one_sentence_goes_config_text_flush_and_comes_back_as_pcm(sockets):
+    pcm = asyncio.run(gc.synthesise("Hello, Good morning.", _settings(SARVAM_TEMPERATURE=0.4)))
+    sock = _Socket.sockets[0]
+    assert pcm == sock.pcm
+    assert [m["type"] for m in sock.sent] == ["config", "text", "flush"]
+    assert sock.sent[0]["data"] == gc.live_config(_settings(SARVAM_TEMPERATURE=0.4))
+    assert sock.headers == {"api-subscription-key": "k"}
+
+
+def test_the_text_gets_the_same_dash_treatment_as_the_engine_input(sockets):
+    from app.utils.dashes import spoken_punctuation
+
+    text = "Hello — Good morning."
+    asyncio.run(gc.synthesise(text, _settings()))
+    assert _Socket.sockets[0].sent[1]["data"]["text"] == spoken_punctuation(text)
 
 
 def test_the_rate_is_the_rate_the_transport_plays():
@@ -154,24 +203,14 @@ def test_the_rate_is_the_rate_the_transport_plays():
 
     assert "audio_out_sample_rate=16000" in inspect.getsource(agent.run_voice_agent)
     assert gc.SAMPLE_RATE == primed_speech.SAMPLE_RATE == 16000
+    assert gc.live_config(_settings())["speech_sample_rate"] == "16000"
 
 
-def test_temperature_stays_out_of_the_request_when_unset():
-    assert "temperature" not in gc.payload("Hello.", _settings())
-
-
-def test_the_text_gets_the_same_dash_treatment_as_the_engine_input():
-    from app.utils.dashes import spoken_punctuation
-
-    text = "Hello — Good morning."
-    assert gc.payload(text, _settings())["text"] == spoken_punctuation(text)
-
-
-def test_the_wave_header_is_read_not_assumed():
+def test_a_wave_header_if_one_ever_appears_is_read_not_assumed():
     pcm = b"\x10\x20" * 100
-    data = {"audios": [base64.b64encode(_wav(pcm)).decode()]}
-    assert gc.pcm_from_response(data) == pcm
-    assert gc.pcm_from_response({"audios": []}) is None
+    assert gc.pcm_16k_mono(_wav(pcm)) == pcm
+    assert gc.pcm_16k_mono(pcm) == pcm, "bare linear16 is what the socket sends"
+    assert gc.pcm_16k_mono(b"") is None
     assert gc.wav_pcm(_wav(pcm, rate=22050)) == (pcm, 22050, 1, 16)
 
 
@@ -180,59 +219,53 @@ def test_audio_at_any_other_rate_is_a_miss_not_a_slow_deep_greeting():
     slower and five semitones down, in a voice nobody had chosen."""
     pcm = b"\x10\x20" * 100
     for wav in (_wav(pcm, rate=22050), _wav(pcm, rate=24000), _wav(pcm, channels=2), _wav(pcm, bits=8)):
-        assert gc.pcm_from_response({"audios": [base64.b64encode(wav).decode()]}) is None
-
-
-def test_the_request_asks_for_the_rate_by_the_name_the_api_honours():
-    """Sarvam's REST endpoint ignores `sample_rate` and honours `speech_sample_rate`; the
-    first version sent the former and got the default 22050 back."""
-    body = gc.payload("Hello.", _settings())
-    assert body["speech_sample_rate"] == 16000
-    assert "sample_rate" not in body
+        assert gc.pcm_16k_mono(wav) is None
 
 
 # ------------------------------------------------------------------ round trip
 
 
-def test_prime_then_recall_round_trips_every_sentence(monkeypatch, redis):
-    client = _Client()
-    monkeypatch.setattr(gc.httpx, "AsyncClient", lambda **kw: client)
-
+def test_prime_then_recall_round_trips_every_sentence(sockets, redis):
     cached = asyncio.run(gc.prime_greeting("c1", PROJECT, "Rahul", _settings()))
     expected = gc.opening_sentences(PROJECT, "Rahul")
     assert cached == len(expected)
-    assert [r[1]["text"] for r in client.requests] == [
+    assert len(_Socket.sockets) == len(expected), "one socket per sentence, in parallel"
+    assert sorted(s.sent[1]["data"]["text"] for s in _Socket.sockets) == sorted(
         gc.spoken_punctuation(s) for s in expected
-    ]
-    assert all(r[2]["api-subscription-key"] == "k" for r in client.requests)
+    )
 
     ttl, raw = redis.store["greeting:c1"]
     assert ttl == gc._TTL_SECONDS
     assert set(json.loads(raw)) == set(expected)
 
     primed = asyncio.run(gc.recall_primed_greeting("c1"))
-    assert primed == {s: client.pcm for s in expected}
+    assert primed == {s: _Socket.sockets[0].pcm for s in expected}
     assert "greeting:c1" not in redis.store, "read once, then gone"
     assert asyncio.run(gc.recall_primed_greeting("c1")) == {}
 
 
-def test_switched_off_means_no_request_and_nothing_stored(monkeypatch, redis):
-    client = _Client()
-    monkeypatch.setattr(gc.httpx, "AsyncClient", lambda **kw: client)
+def test_switched_off_means_no_socket_and_nothing_stored(sockets, redis):
     assert asyncio.run(gc.prime_greeting("c1", PROJECT, "Rahul", _settings(GREETING_PRIME=False))) == 0
-    assert client.requests == [] and redis.store == {}
+    assert _Socket.sockets == [] and redis.store == {}
 
 
-def test_a_refusal_from_the_voice_engine_is_a_miss_not_an_error(monkeypatch, redis):
-    monkeypatch.setattr(gc.httpx, "AsyncClient", lambda **kw: _Client(status=429))
+def test_a_refusal_from_the_voice_engine_is_a_miss_not_an_error(sockets, redis):
+    sockets["make"] = lambda: _Socket(error="Input parameters has to be a valid dictionary")
     assert asyncio.run(gc.prime_greeting("c1", PROJECT, "Rahul", _settings())) == 0
     assert redis.store == {}
 
 
-def test_a_network_failure_never_raises_into_the_dialer(monkeypatch, redis):
-    monkeypatch.setattr(
-        gc.httpx, "AsyncClient", lambda **kw: _Client(raise_=httpx.ConnectError("down"))
-    )
+def test_a_socket_that_never_answers_is_given_up_on_within_the_budget(sockets, redis, monkeypatch):
+    sockets["make"] = lambda: _Socket(hang=True)
+    monkeypatch.setattr(gc, "_SYNTHESIS_BUDGET_SECS", 0.05)
+    assert asyncio.run(gc.prime_greeting("c1", PROJECT, "Rahul", _settings())) == 0
+
+
+def test_a_connection_failure_never_raises_into_the_dialer(redis, monkeypatch):
+    def refused(url, additional_headers=None):
+        raise OSError("refused")
+
+    monkeypatch.setattr(gc, "connect", refused)
     assert asyncio.run(gc.prime_greeting("c1", PROJECT, "Rahul", _settings())) == 0
 
 
