@@ -211,6 +211,8 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         # And once on a closing line that announces a booking the prospect never agreed —
         # it asks for the missing hour instead. See app/utils/booking_claim.py.
         "    _booking_refusals = 0\n"
+        # And once on a yes to a question that closed nothing. See app/utils/engaged_answer.py.
+        "    _early_refusals = 0\n"
         "    _last_agent_line = 'It sits on 45 acres. Do you know Varthur?'\n"
         "    return end_call_handler\n"
     ).body[0]
@@ -236,6 +238,10 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "MAX_BOOKING_REFUSALS": agent.MAX_BOOKING_REFUSALS,
         "BOOKING_REFUSAL_REASON": agent.BOOKING_REFUSAL_REASON,
         "ASK_FOR_TIME": agent.ASK_FOR_TIME,
+        # And the three for the hung-up-on-a-yes refusal.
+        "MAX_EARLY_REFUSALS": agent.MAX_EARLY_REFUSALS,
+        "EARLY_REFUSAL_REASON": agent.EARLY_REFUSAL_REASON,
+        "said_yes_and_nothing_was_closed": agent.said_yes_and_nothing_was_closed,
         "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "FAREWELL_LINE": FAREWELL_LINE,
         "logger": agent.logger,

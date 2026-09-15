@@ -56,12 +56,17 @@ REFUSAL_REASON = (
 MAX_BARE_REFUSALS = 2
 
 
+def is_a_refusal(line: Optional[str]) -> bool:
+    """Whether the sentence, whatever its length, is somebody leaving."""
+    return bool(_A_REFUSAL.search(line or ""))
+
+
 def is_a_bare_answer(line: Optional[str]) -> bool:
     """True when the last thing they said is too small to be a decision about the call."""
     text = (line or "").strip()
     if not text:
         return False
-    if _A_REFUSAL.search(text):
+    if is_a_refusal(text):
         return False
     # Punctuation only would be a transcript of silence, not an answer.
     words = [w for w in re.findall(r"[^\W_]+", text, re.UNICODE)]

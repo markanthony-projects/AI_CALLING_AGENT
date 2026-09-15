@@ -38,6 +38,8 @@ from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machi
 from app.utils.asked import REPEAT_LIMIT, AskedSoFar
 from app.utils.bare_answer import MAX_BARE_REFUSALS, is_a_bare_answer
 from app.utils.bare_answer import REFUSAL_REASON as BARE_ANSWER_REASON
+from app.utils.engaged_answer import MAX_EARLY_REFUSALS, said_yes_and_nothing_was_closed
+from app.utils.engaged_answer import REFUSAL_REASON as EARLY_REFUSAL_REASON
 from app.utils.project_rejected import BRIEF as PROJECT_RULED_OUT
 from app.utils.project_rejected import rejects_the_project
 from app.utils.booking_claim import ASK_FOR_TIME, MAX_BOOKING_REFUSALS, unagreed_booking
@@ -522,7 +524,7 @@ async def run_voice_agent(
 
     # 2. Actual handler that intercepts the tool execution
     async def end_call_handler(params=None, *args, **kwargs):
-        nonlocal _ending, _repeat_refusals, _bare_refusals, _booking_refusals
+        nonlocal _ending, _repeat_refusals, _bare_refusals, _booking_refusals, _early_refusals
         if not task_ref or _ending:
             return
 
@@ -577,6 +579,28 @@ async def run_voice_agent(
                 # model saying it, and far better than hanging up.
                 await task_ref[0].queue_frames(spoken(say_again(_last_agent_line)))
             return
+
+        # A yes is not a goodbye either. On call 96080daa the prospect answered "Yeah. I
+        # was looking for property purchase." to the opening question and the model hung
+        # up on them — seven words, so not bare; no refusal in them; nothing closed. Once,
+        # the turn goes back with the reason. See app/utils/engaged_answer.py.
+        if _early_refusals < MAX_EARLY_REFUSALS and said_yes_and_nothing_was_closed(
+            prospect_lines[-1] if prospect_lines else None, _last_agent_line
+        ):
+            _early_refusals += 1
+            logger.warning(
+                f"[{call_sid}] Refusing to hang up: the prospect just said yes "
+                f"({prospect_lines[-1].strip()[:60]!r}) and nothing has been closed "
+                f"({_early_refusals}/{MAX_EARLY_REFUSALS})"
+            )
+            callback = getattr(params, "result_callback", None)
+            if callback is not None:
+                await callback({"refused": EARLY_REFUSAL_REASON})
+                return
+            nudge = dead_air_nudge(_last_agent_line)
+            if nudge:
+                await task_ref[0].queue_frames(spoken(nudge))
+                return
 
         call_args = getattr(params, "arguments", None) or {}
         line = closing_line(
@@ -856,6 +880,8 @@ async def run_voice_agent(
     # And because the closing line announced a booking the prospect never agreed. See
     # app/utils/booking_claim.py.
     _booking_refusals: int = 0
+    # And once because the prospect had just said yes to a question that closed nothing.
+    _early_refusals: int = 0
     _dead_air_nudges: int = 0
     # True between the prospect asking for a moment and them speaking again. Nothing the
     # agent says on its own initiative may break that silence.
