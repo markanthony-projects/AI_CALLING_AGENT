@@ -107,6 +107,9 @@ MAX_LLM_TURN_FAILURES = 2
 # so. Longer than any healthy turn (p95 was 1.7s on 14 Sep) and shorter than the six
 # seconds call 29b2f355 sat silent before the prospect asked "Did you get it?".
 REPLY_WATCHDOG_SECS = 4.0
+# How long the greeting waits for Vobiz to name the stream before going out anyway. The
+# start message normally arrives within milliseconds of the socket opening.
+STREAM_START_WAIT_SECS = 1.5
 
 # TTS failure is not recoverable the way an LLM failure is: with no voice there is no
 # agent, and the caller pays for every second of the silence. Pipecat already retries the
@@ -923,6 +926,18 @@ async def run_voice_agent(
                 # lands on the first thing the prospect actually waits for — measured at 3382ms
                 # for a first turn against 1247ms for the second on the same call.
                 asyncio.create_task(llm.warm_up())
+                # Vobiz names the stream in its first message, and audio sent before that
+                # carries our id, not theirs. Call 07709de3, 15 Sep 2026: the greeting was
+                # on the wire 246ms after the socket opened — the fastest yet — and the
+                # prospect heard nothing for twelve seconds. Bounded, so a Vobiz that never
+                # says start still gets its greeting. See app/utils/vobiz_serializer.py.
+                if await serializer.wait_for_start(STREAM_START_WAIT_SECS):
+                    startup.mark("stream started")
+                else:
+                    logger.warning(
+                        f"[{call_sid}] No start event from Vobiz within "
+                        f"{STREAM_START_WAIT_SECS}s; greeting anyway"
+                    )
                 await task.queue_frames(spoken(opening_line, append_to_context=False))
                 startup.mark("greeting queued")
             else:
