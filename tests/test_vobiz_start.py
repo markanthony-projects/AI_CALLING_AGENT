@@ -6,6 +6,7 @@ the streamId Vobiz sends in its "start" message; anything sent before that carri
 """
 
 import asyncio
+import base64
 import inspect
 import json
 
@@ -80,3 +81,48 @@ def test_other_events_do_not_name_the_stream(event):
     s = VobizSerializer(stream_sid="call-1")
     asyncio.run(s.deserialize(json.dumps({"event": event, "streamId": "v", "media": {"payload": ""}})))
     assert not s.started.is_set()
+
+
+# --- was there a voice on the line -------------------------------------------------------
+
+
+def _media(samples):
+    import struct
+
+    pcm = b"".join(struct.pack("<h", s) for s in samples)
+    return json.dumps({"event": "media", "media": {"payload": base64.b64encode(pcm).decode()}})
+
+
+def test_a_silent_line_is_reported_as_silent():
+    """Call ecf55487, 15 Sep 2026: frames at full rate, ten seconds of hello, no turn. The
+    close line now says whether those frames carried a voice."""
+    import base64  # noqa: F811
+
+    s = VobizSerializer(stream_sid="call-1")
+    assert s.inbound_report() == "IN: no audio frames"
+
+    async def go():
+        for _ in range(8):  # two sampled frames of near-silence
+            await s.deserialize(_media([3, -4, 2] * 100))
+
+    asyncio.run(go())
+    assert "0/2 sampled frames with voice" in s.inbound_report()
+    assert "peak -" in s.inbound_report()
+
+
+def test_a_voice_on_the_line_is_counted():
+    s = VobizSerializer(stream_sid="call-1")
+
+    async def go():
+        for _ in range(8):
+            await s.deserialize(_media([9000, -9000, 400] * 100))
+
+    asyncio.run(go())
+    assert "2/2 sampled frames with voice" in s.inbound_report()
+
+
+def test_the_report_is_on_the_close_line():
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    assert "SOCKET closed | {socket.report()} | {serializer.inbound_report()}" in src

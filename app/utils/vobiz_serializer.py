@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import math
 
 from loguru import logger
 from pipecat.frames.frames import (
@@ -10,6 +11,11 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
 )
 from pipecat.serializers.base_serializer import FrameSerializer
+
+
+# A 16-bit sample this high inside a 20ms frame is somebody talking; line noise on a
+# quiet telephone leg sits well under it, and speech at conversational level well over.
+VOICE_PEAK = 1500
 
 
 class VobizSerializer(FrameSerializer):
@@ -34,11 +40,42 @@ class VobizSerializer(FrameSerializer):
         self._sample_rate = 16000
         self.started = asyncio.Event()
         self._sent_before_start = 0
+        # Whether what Vobiz sent us was a voice or a silent line. Call ecf55487, 15 Sep
+        # 2026: the outbound counter proved the greeting left our socket, inbound frames
+        # arrived at full rate, the prospect said hello for ten seconds, and no turn was
+        # ever detected. Frames at full rate can be frames of silence; this says which.
+        self._inbound_frames = 0
+        self._inbound_peak = 0
+        self._loud_frames = 0
+        self._sampled_frames = 0
 
     @property
     def sent_before_start(self) -> int:
         """Outbound audio frames serialized before Vobiz had named the stream."""
         return self._sent_before_start
+
+    def inbound_report(self) -> str:
+        """One clause on what came in: peak level, and how many sampled frames had a voice in them."""
+        if not self._sampled_frames:
+            return "IN: no audio frames"
+        dbfs = 20 * math.log10(max(self._inbound_peak, 1) / 32768)
+        return (
+            f"IN: peak {dbfs:.0f} dBFS, {self._loud_frames}/{self._sampled_frames} sampled "
+            f"frames with voice"
+        )
+
+    def _note_inbound(self, audio: bytes) -> None:
+        self._inbound_frames += 1
+        # Every fourth frame: a peak over 80ms is as telling as one over 20ms, at a quarter
+        # of the cost, on a box that also has to run the VAD.
+        if self._inbound_frames % 4 or len(audio) < 2:
+            return
+        self._sampled_frames += 1
+        peak = max(abs(s) for s in memoryview(audio[: len(audio) - (len(audio) % 2)]).cast("h"))
+        if peak > self._inbound_peak:
+            self._inbound_peak = peak
+        if peak >= VOICE_PEAK:
+            self._loud_frames += 1
 
     async def wait_for_start(self, timeout: float) -> bool:
         """True once Vobiz has named the stream; False if it has not within `timeout`."""
@@ -102,6 +139,7 @@ class VobizSerializer(FrameSerializer):
                 if payload:
                     # Vobiz provides native 16000Hz PCM, just decode and pass along
                     audio_data = base64.b64decode(payload)
+                    self._note_inbound(audio_data)
                     return InputAudioRawFrame(
                         audio=audio_data, sample_rate=self._sample_rate, num_channels=1
                     )

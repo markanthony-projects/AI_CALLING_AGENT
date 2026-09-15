@@ -1066,7 +1066,7 @@ async def run_voice_agent(
         logger.info(f"[{call_sid}] Media stream closed — ending pipeline")
         # The whole point of SocketWitness, on its own line so it can be counted: `SOCKET`
         # appears nowhere else in these logs.
-        logger.warning(f"[{call_sid}] SOCKET closed | {socket.report()}")
+        logger.warning(f"[{call_sid}] SOCKET closed | {socket.report()} | {serializer.inbound_report()}")
         # Ending on our own; the hangup route must not end it a second time.
         live_calls.forget(call_sid)
         await task.queue_frames([EndFrame(reason="the media stream closed")])
