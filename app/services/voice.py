@@ -75,7 +75,7 @@ SPARE_KEEPALIVE_SECS = 20
 SPARE_CONNECT_TIMEOUT_SECS = 5.0
 
 
-def build_tts(settings, *, spare_socket: Optional[bool] = None) -> "KeepsItsVoice":
+def build_tts(settings, *, spare_socket: Optional[bool] = None, call_sid: str = "-") -> "KeepsItsVoice":
     """The voice, built the same way wherever it is built.
 
     Passed only when somebody has set it: SARVAM_TEMPERATURE unset keeps the key out of the
@@ -89,6 +89,7 @@ def build_tts(settings, *, spare_socket: Optional[bool] = None) -> "KeepsItsVoic
 
     return KeepsItsVoice(
         api_key=settings.SARVAM_API_KEY,
+        call_sid=call_sid,
         spare_socket=settings.TTS_SPARE_SOCKET if spare_socket is None else spare_socket,
         # Dashes the engine misreads become commas and hyphens on the way in. See
         # app/utils/dashes.py for the call that showed it.
@@ -117,7 +118,7 @@ class KeepsItsVoice(SarvamTTSService):
     which a missing socket actually costs anything.
     """
 
-    def __init__(self, *, spare_socket: bool = False, **kwargs):
+    def __init__(self, *, spare_socket: bool = False, call_sid: str = "-", **kwargs):
         # Named after the vendor, not after this class. app/utils/latency.py derives its
         # metric label from the instance name, so the first call on this subclass logged
         # "keepsitsvoice=201ms" where every earlier call in this repository logged
@@ -125,6 +126,8 @@ class KeepsItsVoice(SarvamTTSService):
         # number is Sarvam's latency whatever we wrap it in.
         kwargs.setdefault("name", SarvamTTSService.__name__)
         super().__init__(**kwargs)
+        # For the log lines below: grepping a call by its id must find its socket swaps.
+        self._call_sid = call_sid
         self._revivals = 0
         self._spare_enabled = spare_socket
         self._spare = None
@@ -225,7 +228,8 @@ class KeepsItsVoice(SarvamTTSService):
         except Exception as e:  # noqa: BLE001 — no spare means the old path, not a failure
             self._spare = None
             logger.warning(
-                f"{self}: could not open a spare voice socket ({e}); barge-ins will reconnect"
+                f"[{self._call_sid}] {self}: could not open a spare voice socket ({e}); "
+                f"barge-ins will reconnect"
             )
 
     async def _spare_keepalive_handler(self):
@@ -324,6 +328,8 @@ class KeepsItsVoice(SarvamTTSService):
         if self._bot_speaking and self.spare_ready:
             await TTSService._handle_interruption(self, frame, direction)
             await self._swap_in_spare()
-            logger.info(f"{self}: barge-in handled by socket swap ({self._swaps} this call)")
+            logger.info(
+                f"[{self._call_sid}] {self}: barge-in handled by socket swap ({self._swaps} this call)"
+            )
             return
         await super()._handle_interruption(frame, direction)

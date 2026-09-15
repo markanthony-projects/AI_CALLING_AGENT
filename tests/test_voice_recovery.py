@@ -169,7 +169,7 @@ def test_the_agent_speaks_through_this_and_not_the_plain_service():
     from app.services import voice
 
     assert "KeepsItsVoice(" in inspect.getsource(voice.build_tts)
-    assert "tts = build_tts(settings)" in AGENT_SRC
+    assert "tts = build_tts(settings, call_sid=call_sid)" in AGENT_SRC
     assert "KeepsItsVoice(" not in AGENT_SRC
     assert "SarvamTTSService(\n" not in AGENT_SRC
 

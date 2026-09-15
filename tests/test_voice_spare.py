@@ -246,8 +246,10 @@ def test_the_factory_reads_the_switch():
 def test_the_switches_exist_with_rollback_defaults():
     from app.core.config import Settings
 
-    for name in ("GREETING_PRIME", "TTS_PRECONNECT", "TTS_SPARE_SOCKET"):
+    for name in ("GREETING_PRIME", "TTS_PRECONNECT"):
         assert Settings.model_fields[name].default is True, name
+    # Off until understood: every call on 15 Sep that lost its voice mid-call had it on.
+    assert Settings.model_fields["TTS_SPARE_SOCKET"].default is False
 
 
 # ------------------------------------------------------------------ the rate

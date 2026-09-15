@@ -384,7 +384,7 @@ async def run_voice_agent(
         tts = warm_tts
         startup.mark("tts (warm)")
     else:
-        tts = build_tts(settings)
+        tts = build_tts(settings, call_sid=call_sid)
 
     startup.mark("services built")
 
@@ -686,6 +686,15 @@ async def run_voice_agent(
 
         _ending = True
         closing_gate.arm()
+        # Both branches below run DETACHED, for a harder reason than the tool path's. This
+        # handler runs inside ToolSyntaxFilter.process_frame, and say_goodbye_then_hang_up
+        # queues an InterruptionWorkerFrame — on which pipecat cancels and recreates every
+        # processor's task, this one included. Awaited inline, the hangup cancelled itself
+        # halfway: call be096321, 15 Sep 2026, "Ending call after leaked end_call syntax"
+        # and then nothing — no goodbye, no timeout warning, no end, every later turn
+        # dropped by the gate armed just above, twenty-five seconds of silence, and the
+        # prospect hung up on the visit they had just booked.
+        #
         # Whether the prospect has already been said goodbye to — not merely whether the
         # agent spoke, which is what this used to test. On 5 Sep the words in front of the
         # markup were "Got it. Tuesday at 8 PM. I will book that for you.", read as a
@@ -700,15 +709,19 @@ async def run_voice_agent(
             # 14 Sep the old wait sat its full ceiling out against audio the cutter had
             # already dropped: twelve seconds of silence, then a dead line.
             logger.info(f"[{call_sid}] Ending call after leaked end_call syntax (goodbye already spoken)")
-            if not await farewell.wait_for_quiet(farewell_timeout(spoken_already)):
-                logger.warning(
-                    f"[{call_sid}] The goodbye on the wire never finished playing; hanging up "
-                    f"rather than holding the line open"
-                )
-            await task_ref[0].queue_frames([EndWorkerFrame(reason="leaked end_call, goodbye already spoken")])
+
+            async def hang_up_after_the_goodbye() -> None:
+                if not await farewell.wait_for_quiet(farewell_timeout(spoken_already)):
+                    logger.warning(
+                        f"[{call_sid}] The goodbye on the wire never finished playing; hanging up "
+                        f"rather than holding the line open"
+                    )
+                await task_ref[0].queue_frames([EndWorkerFrame(reason="leaked end_call, goodbye already spoken")])
+
+            asyncio.create_task(hang_up_after_the_goodbye())
             return
         logger.info(f"[{call_sid}] Ending call after leaked end_call syntax → \"{goodbye}\"")
-        await say_goodbye_then_hang_up(goodbye)
+        asyncio.create_task(say_goodbye_then_hang_up(goodbye))
 
     # Above the tool-syntax filter on purpose: a reply to half a sentence must not reach
     # the leaked-end_call path either. See app/utils/turn_gate.py.

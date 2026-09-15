@@ -177,6 +177,21 @@ def test_the_hangup_runs_detached_from_the_tool_call():
     assert "await say_goodbye_then_hang_up" not in src
 
 
+def test_the_hangup_runs_detached_from_the_leaked_syntax_too():
+    """Call be096321, 15 Sep 2026. on_leaked_end_call runs inside ToolSyntaxFilter's
+    process_frame; say_goodbye_then_hang_up queues an InterruptionWorkerFrame, on which
+    pipecat cancels and recreates every processor's task — this one included. Awaited
+    inline, the hangup cancelled itself: no goodbye, no timeout, no end, twenty-five
+    seconds of silence on a booked visit."""
+    src = _body("on_leaked_end_call")
+    assert "asyncio.create_task(say_goodbye_then_hang_up(goodbye))" in src
+    assert "await say_goodbye_then_hang_up" not in src
+    # The other branch waits on the farewell gate; that wait is detached for the same reason.
+    assert "asyncio.create_task(hang_up_after_the_goodbye())" in src
+    inline = src.split("async def hang_up_after_the_goodbye")[0]
+    assert "await farewell.wait_for_quiet" not in inline
+
+
 def test_only_one_hangup_per_call():
     """A model can emit a structured tool call and leaked syntax in the same turn. Two
     farewells racing would interrupt each other — the exact failure this path exists to

@@ -313,8 +313,11 @@ class Settings(BaseSettings):
     # first word.
     TTS_PRECONNECT: bool = True
     # A spare voice socket kept open per call, swapped in on a barge-in instead of tearing
-    # the live one down and reopening it — the churn that left call 5023ff25 mute.
-    TTS_SPARE_SOCKET: bool = True
+    # the live one down and reopening it — the churn that left call 5023ff25 mute. Off by
+    # default since 15 Sep 2026: every call that lost its voice mid-conversation that day
+    # had it on, and no call with it off did. One swap is known to have worked (b6d2bea9);
+    # the failure has not been reproduced on the bench. Off until it is understood.
+    TTS_SPARE_SOCKET: bool = False
 
     # What the agent calls itself in the opening line, so the prospect is told they are
     # talking to software before anything else is said. TRAI's February 2025 amendment to

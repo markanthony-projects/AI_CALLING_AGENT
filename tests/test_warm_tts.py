@@ -57,7 +57,7 @@ def clean():
 
 
 def _use(monkeypatch, service):
-    monkeypatch.setattr(warm_tts, "build_tts", lambda settings: service)
+    monkeypatch.setattr(warm_tts, "build_tts", lambda settings, call_sid="-": service)
     return service
 
 
@@ -157,7 +157,7 @@ def test_the_webhook_warms_after_replying_and_the_agent_adopts_it():
 
     run = inspect.getsource(agent.run_voice_agent)
     assert 'startup.mark("tts (warm)")' in run
-    assert "tts = build_tts(settings)" in run, "the cold path is the factory too"
+    assert "tts = build_tts(settings, call_sid=call_sid)" in run, "the cold path is the factory too"
 
 
 class _Slow(_Service):

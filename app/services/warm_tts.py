@@ -65,7 +65,7 @@ def begin(call_sid: str, settings) -> asyncio.Task:
 
 async def prepare(call_sid: str, settings) -> bool:
     """Open the voice socket for a call whose media stream is about to arrive."""
-    tts = build_tts(settings)
+    tts = build_tts(settings, call_sid=call_sid)
     tts._speech_sample_rate = str(rate_at_start(tts))
     try:
         await asyncio.wait_for(tts._connect_websocket(), timeout=CONNECT_TIMEOUT_SECS)
