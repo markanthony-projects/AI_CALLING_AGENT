@@ -63,6 +63,7 @@ from app.utils.repeat_request import (
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
 from app.utils.empty_reply import EmptyReplyGuard
+from app.utils.open_line import CHECK_EVERY_SECS, OPEN_LINE_SECS, line_has_gone_dead
 from app.utils.primed_speech import PrimedSpeech
 from app.utils.one_question import OneQuestionPerTurn
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
@@ -905,6 +906,7 @@ async def run_voice_agent(
         startup.mark("pipeline")
 
         async def startup_greeting():
+            nonlocal _last_agent_line
             # No delay before the opening line. A caller who picks up already waits about
             # four seconds — 611ms for the answer webhook to become a websocket, 2.4s for
             # Vobiz's start event, then the pipeline — and every one of those is silence on
@@ -919,6 +921,9 @@ async def run_voice_agent(
                     agent_name=agent_name,
                 )
                 context.add_message({"role": "assistant", "content": opening_line})
+                # So the greeting's own question can be asked again if nothing comes back
+                # to it — the open-line watchdog below has nothing else to repeat.
+                _last_agent_line = opening_line
                 logger.info(f"[{call_sid}] AGENT → \"{opening_line}\"")
                 # Alongside the greeting, not before it: the opening line is built locally and
                 # needs no model, so this is six to eight seconds of speech during which the
@@ -1440,6 +1445,47 @@ async def run_voice_agent(
 
     live_calls.register(call_sid, end_on_request)
 
+    # ─── The line has gone quiet ───────────────────────────────────────────────
+    # Watches the transport and the VAD, not the speech service's idea of a turn — on the
+    # three calls that motivated it the service held a turn open for twenty seconds and
+    # every existing backstop was waiting on that turn to end. See app/utils/open_line.py.
+    _last_nudge_at: Optional[float] = None
+    _open_line_reported = False
+
+    async def watch_open_line() -> None:
+        nonlocal _last_nudge_at, _open_line_reported
+        try:
+            while True:
+                await asyncio.sleep(CHECK_EVERY_SECS)
+                now = time.monotonic()
+                if not line_has_gone_dead(
+                    now,
+                    bot_speaking=latency.bot_speaking,
+                    bot_stopped_at=latency.bot_stopped_at,
+                    last_voice_at=latency.last_voice_at,
+                    last_nudge_at=_last_nudge_at,
+                    holding=_holding,
+                    ending=_ending,
+                ):
+                    continue
+                _last_nudge_at = now
+                spoke = await ask_again(
+                    f"Nothing said for {OPEN_LINE_SECS:.0f}s with the prospect on the line "
+                    f"(turn open={_turn_start_time is not None}, inference in flight={_llm_in_flight}); "
+                    f"asking again"
+                )
+                if not spoke and not _open_line_reported:
+                    _open_line_reported = True
+                    logger.error(
+                        f"[{call_sid}] The line has been quiet for {OPEN_LINE_SECS:.0f}s and "
+                        f"the agent has nothing left to ask again; if the prospect is still "
+                        f"there they are hearing silence"
+                    )
+        except asyncio.CancelledError:
+            return
+
+    _open_line_guard = asyncio.create_task(watch_open_line())
+
     runner = PipelineRunner()
     error: Optional[str] = None
     try:
@@ -1453,6 +1499,7 @@ async def run_voice_agent(
         # closure keeps the whole call's state alive for ten minutes after the caller has
         # gone. On a box capped at four concurrent calls that is a leak worth closing.
         _duration_guard.cancel()
+        _open_line_guard.cancel()
 
     # Deliberately not in a finally block: returning from finally discards any in-flight
     # exception, which is how a crashed session used to be recorded as a clean one.

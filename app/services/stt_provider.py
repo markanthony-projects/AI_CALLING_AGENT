@@ -160,6 +160,11 @@ def _service_turns(settings) -> BaseUserTurnStopStrategy:
     than 500ms after the stop. wait_for_transcript stays on: firing on the bare stop frame
     would push an empty aggregation and leave the transcript to arrive after the turn.
     """
+    # Known since 15 Sep 2026: the cap in this strategy cannot end a turn on its own.
+    # pipecat's UserTurnController refuses a stop while the service says the user is
+    # speaking, which on a stuck turn is exactly the state it is in, so the forced stop is
+    # dropped. The working backstop is the open-line watchdog in agent.py, which watches
+    # the transport and the VAD instead. The strategy stays for its transcript handling.
     return ServiceDecidesButNotForever(
         max_open_secs=settings.STT_MAX_TURN_SECS, timeout=TRANSCRIPT_POLL_SECS
     )

@@ -36,6 +36,7 @@ from typing import Optional
 from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     LLMContextFrame,
     LLMFullResponseStartFrame,
@@ -58,6 +59,7 @@ _TRACKED = (
     VADUserStoppedSpeakingFrame,
     UserStoppedSpeakingFrame,
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     MetricsFrame,
     LLMFullResponseStartFrame,
     TTSSpeakFrame,
@@ -116,9 +118,13 @@ class LatencyObserver(BaseObserver):
         call_sid: str,
         stream_open_at: Optional[float] = None,
         on_greeting_seen=None,
+        clock=time.monotonic,
     ):
         super().__init__()
         self._call_sid = call_sid
+        # Injectable for the same reason SocketWitness's is: asyncio itself calls
+        # time.monotonic, so a test cannot patch it globally without breaking the loop.
+        self._clock = clock
         # Called the first time the greeting frame is actually seen moving through the
         # pipeline. STARTUP marks when queue_frames RETURNS; this marks when the frame has
         # travelled, and on call ef6a13b3 the two were 810ms apart with nothing naming the
@@ -135,6 +141,12 @@ class LatencyObserver(BaseObserver):
         # The last moment their voice actually stopped. The honest start of a turn: what
         # follows is the VAD settling, the blind wait, and only then the turn being declared.
         self._voice_stopped_ns: Optional[int] = None
+        # The two facts app/utils/open_line.py watches, on the wall clock because they are
+        # compared with "now" from outside the pipeline: when the VAD last heard the
+        # prospect, and whether — and since when — the transport is not playing the agent.
+        self.last_voice_at: Optional[float] = None
+        self.bot_speaking: bool = False
+        self.bot_stopped_at: Optional[float] = None
         self._turn_start_ns: Optional[int] = None
         self._ttfb: dict[str, float] = {}
         self._ttfa: dict[str, TTFAMetricsData] = {}
@@ -223,6 +235,12 @@ class LatencyObserver(BaseObserver):
             # Talking again, so the last stop was a pause for breath and not the end of
             # anything. Only the final stop before the turn is declared is the turn's start.
             self._voice_stopped_ns = None
+            self.last_voice_at = self._clock()
+            return
+
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            self.bot_speaking = False
+            self.bot_stopped_at = self._clock()
             return
 
         if isinstance(frame, VADUserStoppedSpeakingFrame):
@@ -233,6 +251,7 @@ class LatencyObserver(BaseObserver):
             # this stays right if the setting moves.
             stop_secs = getattr(frame, "stop_secs", None) or 0.0
             self._voice_stopped_ns = data.timestamp - int(stop_secs * NS_PER_SEC)
+            self.last_voice_at = self._clock()
             return
 
         if isinstance(frame, UserStoppedSpeakingFrame):
@@ -295,6 +314,7 @@ class LatencyObserver(BaseObserver):
         # the Sarvam websocket handshake — which happens on StartFrame, so the first word
         # cannot be spoken until it completes — and only then the synthesis. All of it is
         # ours, and none of it was on any line.
+        self.bot_speaking = True
         if self._turn_start_ns is None:
             if self._greeting_queued_ns is not None:
                 synthesis = (data.timestamp - self._greeting_queued_ns) / NS_PER_SEC
