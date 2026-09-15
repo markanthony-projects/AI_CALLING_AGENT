@@ -151,3 +151,27 @@ def test_a_reply_that_never_starts_is_named_in_the_log():
     assert "No reply" in src and "inference in flight=" in src
     assert agent.REPLY_WATCHDOG_SECS > 2.0, "shorter than a slow healthy turn is a false alarm"
     assert agent.REPLY_WATCHDOG_SECS < 6.0, "the prospect asked 'Did you get it?' at six"
+
+
+def test_the_started_frame_counts_because_it_is_the_one_that_arrives_in_time():
+    """Call b6d2bea9, 15 Sep 2026: the end_call turn was reported as empty. The LLM service
+    broadcasts FunctionCallsStartedFrame synchronously and pushes LLMFullResponseEndFrame
+    in its finally; FunctionCallInProgressFrame comes from the call's task, after both."""
+    from pipecat.frames.frames import FunctionCallsStartedFrame
+
+    Start, End, *_ = _frames()
+    guard, seen = _guard()
+    asyncio.run(_run(guard, [Start(), FunctionCallsStartedFrame(function_calls=[]), End()]))
+    assert guard.empty == 0 and seen == []
+
+
+def test_the_order_pipecat_actually_uses_is_the_one_tested():
+    import inspect
+
+    from pipecat.services import llm_service
+    from pipecat.services.openai import base_llm
+
+    run = inspect.getsource(llm_service.LLMService.run_function_calls)
+    assert "broadcast_frame(FunctionCallsStartedFrame" in run
+    process = inspect.getsource(base_llm.BaseOpenAILLMService.process_frame)
+    assert process.index("_process_context(") < process.index("LLMFullResponseEndFrame()")

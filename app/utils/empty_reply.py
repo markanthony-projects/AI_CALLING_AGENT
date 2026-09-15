@@ -20,6 +20,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     Frame,
     FunctionCallInProgressFrame,
+    FunctionCallsStartedFrame,
     InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -64,7 +65,12 @@ class EmptyReplyGuard(FrameProcessor):
         elif isinstance(frame, InterruptionFrame):
             # Cut short by the prospect is not empty; it is unfinished.
             self._reset()
-        elif isinstance(frame, FunctionCallInProgressFrame):
+        elif isinstance(frame, (FunctionCallsStartedFrame, FunctionCallInProgressFrame)):
+            # Both, because of when they arrive. The LLM service broadcasts
+            # FunctionCallsStartedFrame before it schedules the calls and pushes its
+            # LLMFullResponseEndFrame straight after; FunctionCallInProgressFrame comes from
+            # the call's own task, later. On call b6d2bea9 (15 Sep) the end_call turn was
+            # reported as an empty reply because only the second was being counted.
             self._called_tool = True
         elif isinstance(frame, LLMTextFrame) and direction == FrameDirection.DOWNSTREAM:
             if frame.text and frame.text.strip():
