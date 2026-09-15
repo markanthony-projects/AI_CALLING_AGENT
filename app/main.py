@@ -83,16 +83,22 @@ _CALL_MODULES = {
 }
 
 
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# DEBUG is pipecat's own narrative of a call — bot started and stopped speaking, an
+# interruption, a websocket reconnect — and until 15 Sep 2026 this filter dropped it even
+# when LOG_LEVEL asked for it, so a silent call (5a2c8245) could not be dissected on the
+# server. With LOG_LEVEL=DEBUG everything passes, for the one call being investigated;
+# at any other level nothing changes.
+_DEBUG_EVERYTHING = _LOG_LEVEL == "DEBUG"
+
+
 def _log_filter(record: dict) -> bool:
-    """Let WARNING+ through always; INFO only for call-path modules."""
+    """Let WARNING+ through always; INFO only for call-path modules; DEBUG only on request."""
     if record["level"].no >= 30:  # WARNING = 30
         return True
     if record["level"].no >= 20:  # INFO = 20
         return record["name"] in _CALL_MODULES
-    return False
-
-
-_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+    return _DEBUG_EVERYTHING
 logger.remove()  # drop the default stderr sink
 logger.add(
     sys.stderr,

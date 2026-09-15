@@ -245,3 +245,16 @@ def test_that_check_is_actually_looking_at_something():
     assert "app.utils.latency" in found
     assert "app.utils.startup_clock" in found
     assert len(found) >= 5, found
+
+
+def test_debug_lines_pass_only_when_the_server_asked_for_them(monkeypatch):
+    """Call 5a2c8245, 15 Sep 2026: silent, and pipecat's own account of the call — bot
+    started speaking, interruptions — was dropped by this filter even with LOG_LEVEL=DEBUG."""
+    from app import main
+
+    monkeypatch.setattr(main, "_DEBUG_EVERYTHING", False)
+    assert main._log_filter({"level": _Level(10), "name": "pipecat.transports.base_output"}) is False
+    monkeypatch.setattr(main, "_DEBUG_EVERYTHING", True)
+    assert main._log_filter({"level": _Level(10), "name": "pipecat.transports.base_output"}) is True
+    # INFO from outside the set stays quiet even then: the allow-list is about INFO.
+    assert main._log_filter({"level": _Level(20), "name": "app.services.discovery"}) is False
