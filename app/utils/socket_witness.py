@@ -126,6 +126,18 @@ class SocketWitness:
         return message
 
     @property
+    def last_outbound_at(self) -> Optional[float]:
+        """When the last message left for Vobiz, on the witness's clock. None if none has.
+
+        The open-line watchdog's clock since 15 Sep 2026: audio actually leaving the socket
+        is the one fact about "is the agent speaking" that no frame bookkeeping can get
+        wrong. On call 511dfa31 the pipeline's bot-stopped event landed at the end of a
+        reply's first sentence, the watchdog counted ten seconds from there, and it asked
+        into a line the agent had finished speaking on six seconds earlier.
+        """
+        return self._last_outbound_at
+
+    @property
     def silence_before_close(self) -> Optional[float]:
         """Seconds between the last inbound frame and the disconnect, if both happened."""
         if self._closed_at is None or self._last_inbound_at is None:

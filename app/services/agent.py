@@ -70,7 +70,12 @@ from app.utils.repeat_request import (
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
 from app.utils.empty_reply import EmptyReplyGuard
-from app.utils.open_line import CHECK_EVERY_SECS, OPEN_LINE_SECS, line_has_gone_dead
+from app.utils.open_line import (
+    CHECK_EVERY_SECS,
+    OPEN_LINE_SECS,
+    STILL_SPEAKING_SECS,
+    line_has_gone_dead,
+)
 from app.utils.primed_speech import PrimedSpeech
 from app.utils.one_question import OneQuestionPerTurn
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
@@ -1530,10 +1535,15 @@ async def run_voice_agent(
             while True:
                 await asyncio.sleep(CHECK_EVERY_SECS)
                 now = time.monotonic()
+                # The socket's clock, not the pipeline's: on call 511dfa31 the bot-stopped
+                # event the observer records landed after a reply's FIRST sentence, and the
+                # watchdog asked into a line the agent had finished speaking on six seconds
+                # earlier. Audio leaving for Vobiz is the fact itself.
+                last_out = socket.last_outbound_at
                 if not line_has_gone_dead(
                     now,
-                    bot_speaking=latency.bot_speaking,
-                    bot_stopped_at=latency.bot_stopped_at,
+                    bot_speaking=last_out is not None and now - last_out < STILL_SPEAKING_SECS,
+                    bot_stopped_at=last_out,
                     last_voice_at=latency.last_voice_at,
                     last_nudge_at=_last_nudge_at,
                     holding=_holding,

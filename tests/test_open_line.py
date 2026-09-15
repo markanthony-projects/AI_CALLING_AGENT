@@ -121,7 +121,10 @@ def test_the_watchdog_runs_for_the_life_of_the_call_and_asks_through_the_bounded
     watchdog = src[src.index("async def watch_open_line") : src.index("_open_line_guard = ")]
     assert "line_has_gone_dead(" in watchdog
     assert "await ask_again(" in watchdog, "the same counters and ceiling as every other nudge"
-    assert "bot_speaking=latency.bot_speaking" in watchdog
+    assert "last_out = socket.last_outbound_at" in watchdog
+    assert "bot_stopped_at=last_out" in watchdog
+    assert "now - last_out < STILL_SPEAKING_SECS" in watchdog
+    assert "bot_speaking=latency.bot_speaking" not in watchdog, "the frame event misled it on 511dfa31"
     assert "last_voice_at=latency.last_voice_at" in watchdog
 
 
@@ -138,3 +141,30 @@ def test_the_strategy_cap_is_documented_as_inert():
     from app.services import stt_provider
 
     assert "cannot end a turn on its own" in inspect.getsource(stt_provider._service_turns)
+
+
+def test_the_socket_reports_when_audio_last_left():
+    import asyncio
+
+    from app.utils.socket_witness import SocketWitness
+
+    class _Socket:
+        async def send_text(self, data):
+            pass
+
+    ticks = iter([0.0, 4.0, 9.0])
+    witness = SocketWitness(_Socket(), clock=lambda: next(ticks))
+    assert witness.last_outbound_at is None
+    asyncio.run(witness.send_text("x"))
+    assert witness.last_outbound_at == 4.0
+    asyncio.run(witness.send_text("y"))
+    assert witness.last_outbound_at == 9.0
+
+
+def test_still_speaking_is_shorter_than_the_gap_between_sentences_is_long():
+    """A reply's sentences arrive with small gaps as each is synthesised; the watchdog must
+    not read a gap as the end of the reply, and must read a finished reply within a couple
+    of seconds so the ten-second count starts on time."""
+    from app.utils.open_line import STILL_SPEAKING_SECS
+
+    assert 0.5 <= STILL_SPEAKING_SECS <= 2.0

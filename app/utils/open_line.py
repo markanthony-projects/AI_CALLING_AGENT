@@ -15,8 +15,11 @@ and every existing backstop missed all three:
   * the idle timeout waits sixty seconds of nobody speaking, and the prospect was speaking.
 
 So this watches the two facts that are true regardless of what the speech service
-believes: the transport has not played the agent's voice for OPEN_LINE_SECS, and the
-VAD has not heard the prospect for PROSPECT_QUIET_SECS. Both, and the agent asks its last
+believes: no audio has left the socket for Vobiz for OPEN_LINE_SECS, and the VAD has not
+heard the prospect for PROSPECT_QUIET_SECS. The first is read off the socket witness, not
+off the pipeline's bot-speaking events: on call 511dfa31 that event landed after the first
+sentence of a three-sentence reply, and the watchdog asked "did the line drop?" into a
+reply that had finished six seconds before. Bytes leaving the socket cannot be misread. Both, and the agent asks its last
 question again through the same bounded door the other nudges use. It never talks over
 a prospect who is audibly speaking, and it never fires while the agent is.
 """
@@ -31,6 +34,9 @@ OPEN_LINE_SECS = 10.0
 PROSPECT_QUIET_SECS = 2.0
 # The loop's tick. Coarse on purpose: this is a backstop, not a metronome.
 CHECK_EVERY_SECS = 1.0
+# Audio left the socket this recently means the agent is still speaking. The transport
+# writes a chunk every 40ms while it plays; a second without one is a finished reply.
+STILL_SPEAKING_SECS = 1.0
 
 
 def line_has_gone_dead(
