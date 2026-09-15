@@ -195,7 +195,7 @@ def _checked_fields() -> set[str]:
 
 
 def test_the_worker_drops_ungrounded_fields():
-    assert _checked_fields() == {"budget", "preferred_location", "preferred_unit_type"}
+    assert _checked_fields() == {"budget", "preferred_location", "preferred_unit_type", "whatsapp_number"}
 
 
 def test_the_name_is_not_grounded_against_the_transcript():

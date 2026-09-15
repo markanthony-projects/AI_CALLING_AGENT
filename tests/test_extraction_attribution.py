@@ -121,3 +121,50 @@ def test_the_rest_of_the_sentence_is_left_alone():
 
     assert spoken_numbers_to_digits("3 BHK, two months, near the lake") == "3 BHK, 2 months, near the lake"
     assert money_in_rupees("Prospect: no one else is looking, only one flat") == []
+
+
+# --- a WhatsApp number has to have been said ------------------------------------------------
+
+
+def test_a_number_the_prospect_spelled_out_is_grounded():
+    from app.utils.attribution import number_is_grounded
+
+    transcript = (
+        "Agent: Shall I send it on WhatsApp, on this number?\n"
+        "Prospect: No, send it on nine eight six one two three four five six seven eight."
+    )
+    assert number_is_grounded("9861234567", transcript) is True
+    assert number_is_grounded("+91 98612 34567", transcript) is True
+
+
+def test_a_number_only_the_agent_said_is_not():
+    from app.utils.attribution import number_is_grounded
+
+    transcript = "Agent: I will send it to 9861234567.\nProspect: Okay, thanks."
+    assert number_is_grounded("9861234567", transcript) is False
+
+
+def test_no_number_is_fine_and_a_short_one_is_not():
+    from app.utils.attribution import number_is_grounded
+
+    assert number_is_grounded(None, "Prospect: yes") is True
+    assert number_is_grounded("12345", "Prospect: one two three four five") is False
+
+
+def test_the_worker_grounds_and_stores_it():
+    import inspect
+
+    from app import worker
+
+    assert "number_is_grounded(lead_data.whatsapp_number, transcript)" in inspect.getsource(worker._drop_ungrounded)
+    assert "whatsapp_number=lead_data.whatsapp_number" in inspect.getsource(worker.process_extraction)
+
+
+def test_the_field_exists_end_to_end():
+    from app.api.routes.dashboard import LeadSummary
+    from app.models.db import Lead
+    from app.models.schemas import LeadExtraction
+
+    assert "whatsapp_number" in LeadExtraction.model_fields
+    assert "whatsapp_number" in LeadSummary.model_fields
+    assert hasattr(Lead, "whatsapp_number")

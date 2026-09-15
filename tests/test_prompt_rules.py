@@ -333,3 +333,9 @@ def test_the_visit_is_the_first_close_and_a_close_must_be_heard():
     assert "WhatsApp is for a prospect who has declined the visit" in PROMPT
     assert "A CLOSE IS A QUESTION THEY HEARD AND ANSWERED" in PROMPT
     assert "Never hang up on a yes to a question you never finished asking" in PROMPT
+
+
+def test_the_whatsapp_close_confirms_the_number():
+    assert "on WhatsApp, on this number?" in PROMPT
+    assert "read it back digit by digit" in PROMPT
+    assert "wait for a yes before you call end_call" in PROMPT

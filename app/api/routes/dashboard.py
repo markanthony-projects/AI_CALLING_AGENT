@@ -142,6 +142,7 @@ class LeadSummary(BaseModel):
     preferred_location: Optional[str] = None
     preferred_unit_type: Optional[str] = None
     budget: Optional[float] = None
+    whatsapp_number: Optional[str] = None
     timeline: Optional[str] = None
     site_visit_time: Optional[datetime] = None
     callback_time: Optional[datetime] = None
@@ -303,6 +304,7 @@ _LEAD_COLUMNS = (
     Lead.preferred_location,
     Lead.preferred_unit_type,
     Lead.budget,
+    Lead.whatsapp_number,
     Lead.timeline,
     Lead.site_visit_time,
     Lead.callback_time,
@@ -319,6 +321,7 @@ def _lead_from_row(row: Any) -> LeadSummary:
         preferred_location=row.preferred_location,
         preferred_unit_type=row.preferred_unit_type,
         budget=_as_float(row.budget),
+        whatsapp_number=row.whatsapp_number,
         timeline=row.timeline,
         site_visit_time=row.site_visit_time,
         callback_time=row.callback_time,

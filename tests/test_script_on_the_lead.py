@@ -158,7 +158,9 @@ def test_a_lead_with_nothing_wrong_is_returned_unchanged():
 # the two times are validated as "HH:MM", and the transliterated transcript is the thing the
 # romanised values are recovered from — process_extraction warns about that one separately,
 # and nulling it would throw away the only record of what was actually said.
-NOT_FREE_TEXT = {"site_visit_at", "callback_at", "transliterated_transcript"}
+NOT_FREE_TEXT = {
+    # Digits only, and grounded against the transcript digit by digit (attribution.number_is_grounded).
+    "whatsapp_number","site_visit_at", "callback_at", "transliterated_transcript"}
 
 
 def _optional_str_fields() -> set[str]:

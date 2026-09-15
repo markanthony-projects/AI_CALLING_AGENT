@@ -17,6 +17,7 @@ from app.models.db import Call, Campaign, Contact, Lead, LeadStatus, Project, Tr
 from app.models.schemas import LeadExtraction
 from app.services.dial_pump import dial_due_contacts, release_stale_dialing
 from app.utils.attribution import (
+    number_is_grounded,
     budget_as_stated,
     budget_is_grounded,
     day_is_grounded,
@@ -397,6 +398,8 @@ def _drop_ungrounded(lead_data: LeadExtraction, transcript: str, call_sid: str) 
         ("budget", budget_is_grounded(lead_data.budget, transcript), lead_data.budget),
         ("preferred_location", phrase_is_grounded(lead_data.preferred_location, transcript), lead_data.preferred_location),
         ("preferred_unit_type", phrase_is_grounded(lead_data.preferred_unit_type, transcript), lead_data.preferred_unit_type),
+        # A WhatsApp number nobody said is a brochure sent to a stranger.
+        ("whatsapp_number", number_is_grounded(lead_data.whatsapp_number, transcript), lead_data.whatsapp_number),
     )
     dropped = {}
     for field, grounded, value in checks:
@@ -490,6 +493,8 @@ async def process_extraction(ctx: dict, call_sid: str) -> None:
                 db, call_record.campaign_id, lead_data.preferred_unit_type, call_sid
             ),
             budget=lead_data.budget,
+            # Only when it differs from the number dialled; sales already has that one.
+            whatsapp_number=lead_data.whatsapp_number,
             purpose=lead_data.purpose,
             timeline=lead_data.timeline,
             timeline_months=lead_data.timeline_months,

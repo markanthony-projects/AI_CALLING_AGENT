@@ -187,6 +187,8 @@ class Lead(Base):
     # so "2bhk"/"2 BHK"/"two bedroom" all land on the same value a rep can filter by.
     preferred_unit_type = Column(String)
     budget = Column(Numeric(14, 2))
+    # A different number the prospect gave for WhatsApp; null means the one we dialled.
+    whatsapp_number = Column(String, nullable=True)
     # Asked on nearly every call and, until now, discarded — there was nowhere to put it.
     # It decides which project a colleague pitches next and how.
     purpose = Column(Enum(Purpose), index=True)

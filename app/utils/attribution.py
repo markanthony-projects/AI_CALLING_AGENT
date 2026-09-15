@@ -343,3 +343,23 @@ def time_is_grounded(at: Optional[str], transcript: str) -> bool:
     if hour in numbers or twelve_hour in numbers:
         return True
     return _said(said, _HOUR_WORDS.get(twelve_hour, ()))
+
+
+_DIGITS = re.compile(r"\D+")
+
+
+def number_is_grounded(number: Optional[str], transcript: str) -> bool:
+    """True when the prospect actually said this number, digit by digit or in a run.
+
+    Numbers arrive in a transcript as words ("nine eight six one"), as spaced digits, or as
+    a run; the agent reads them back too, which is why only Prospect lines count. The last
+    ten digits are what has to match: a prospect who prefixes "plus nine one" and an
+    extractor that does not have still said the same number.
+    """
+    if not number:
+        return True
+    wanted = _DIGITS.sub("", number)[-10:]
+    if len(wanted) < 10:
+        return False
+    said = _DIGITS.sub("", spoken_numbers_to_digits(prospect_text(transcript)))
+    return wanted in said
