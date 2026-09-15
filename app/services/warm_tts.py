@@ -1,11 +1,16 @@
 """A voice socket opened while the phone is still being answered.
 
-Vobiz's answer webhook arrives about three seconds before the media stream opens: 611ms for
-the reply to become a websocket, then Vobiz's start event. On 14 Sep the voice engine's
-handshake — 180ms — was paid inside the first word, after that window had gone by unused.
-So the webhook builds the voice service and opens its socket, this module holds it under
-the call's id, and the agent adopts it when the stream opens. The service is built by the
-same factory the agent uses (app/services/voice.py), so a warmed voice is the voice.
+Vobiz's answer webhook arrives before the media stream opens — by three seconds on the
+14 Sep calls, by a few hundred milliseconds on the 15 Sep ones. The voice engine's
+handshake, 180ms, was paid inside the first word after that window had gone by unused. So
+the webhook builds the voice service and opens its socket, this module holds it under the
+call's id, and the agent adopts it when the stream opens. The service is built by the same
+factory the agent uses (app/services/voice.py), so a warmed voice is the voice.
+
+The window is not always long enough. On call 81bdc87a the stream opened while the
+handshake was still in flight, the agent found nothing to adopt, built its own, and the
+warmed socket sat unused until it expired. So adopting waits, briefly, for a handshake that
+has started but not finished: a socket 100ms from ready is worth more than a cold start.
 
 Best effort throughout. A handshake that fails or a stream that never opens leaves nothing
 behind but a log line; the agent finds no warm socket and builds its own as before.
@@ -24,15 +29,27 @@ from app.services.voice import KeepsItsVoice, build_tts
 # opened before the pipeline exists has to be told, or the config it sends is wrong.
 SAMPLE_RATE = 16000
 CONNECT_TIMEOUT_SECS = 3.0
+# How long the agent will wait for a handshake that is already in flight. Under the cold
+# path's own cost (183ms on 81bdc87a), so waiting can never be worse than not.
+ADOPT_WAIT_SECS = 0.4
 # Longer than any gap between the answer webhook and the media stream; short enough that a
 # call which never streamed does not hold a socket open on Sarvam's side.
 MAX_WAIT_SECS = 60.0
 
 _warm: Dict[str, Tuple[KeepsItsVoice, float]] = {}
+_pending: Dict[str, asyncio.Task] = {}
 
 
 def _socket_open(tts: KeepsItsVoice) -> bool:
     return tts._websocket is not None and tts._websocket.state is State.OPEN
+
+
+def begin(call_sid: str, settings) -> asyncio.Task:
+    """Start warming a socket for this call, off the webhook's own response path."""
+    task = asyncio.create_task(prepare(call_sid, settings))
+    _pending[call_sid] = task
+    task.add_done_callback(lambda t: _pending.pop(call_sid, None) if _pending.get(call_sid) is t else None)
+    return task
 
 
 async def prepare(call_sid: str, settings) -> bool:
@@ -53,8 +70,19 @@ async def prepare(call_sid: str, settings) -> bool:
     return True
 
 
-def adopt(call_sid: str) -> Optional[KeepsItsVoice]:
-    """The warmed service for this call, if there is one and its socket is still open."""
+async def adopt(call_sid: str, wait: float = ADOPT_WAIT_SECS) -> Optional[KeepsItsVoice]:
+    """The warmed service for this call, if there is one and its socket is still open.
+
+    A handshake still in flight is waited for, up to `wait`; one that has not started, or
+    does not finish in time, is a cold start as before.
+    """
+    if call_sid not in _warm:
+        pending = _pending.get(call_sid)
+        if pending is not None and not pending.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), timeout=wait)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                pass
     entry = _warm.pop(call_sid, None)
     if entry is None:
         return None

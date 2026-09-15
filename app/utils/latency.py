@@ -73,7 +73,15 @@ _TRACKED = (
 # The stations of one turn, in the order a reply passes through them. Each is the FIRST
 # such frame after the turn was declared over; the TIMELINE line prints the gap between
 # each and the one before it, so the gap that has no service behind it is visible by name.
+#
+# `request` is observed — LLMFullResponseStartFrame, which the LLM service pushes just
+# before it sends the request — and `first_token` is derived from it by adding the
+# service's own TTFB. The first version had those the other way round and printed a
+# negative request on every turn. `transcript` may be negative: Flux delivers the final
+# transcript a few milliseconds BEFORE the stop frame that declares the turn, and a
+# transcript that arrived within TRANSCRIPT_CARRY_NS of the turn is that turn's.
 _STATIONS = ("transcript", "context", "request", "first_token", "tts_start", "first_audio", "speaking")
+TRANSCRIPT_CARRY_NS = 3 * NS_PER_SEC
 
 # Below this, the remainder is ordinary frame plumbing and saying so on every turn would
 # bury the turns where it is not. Set from the clean turns on call db5027ae, whose
@@ -159,6 +167,7 @@ class LatencyObserver(BaseObserver):
         # Pipeline-clock timestamps of the first frame of each kind in the current turn.
         # Reset with the turn; read by _timeline().
         self._stations: dict[str, int] = {}
+        self._last_transcript_ns: Optional[int] = None
 
     @property
     def turns(self) -> list[float]:
@@ -186,6 +195,7 @@ class LatencyObserver(BaseObserver):
         self._seen.add(frame.id)
 
         if isinstance(frame, TranscriptionFrame):
+            self._last_transcript_ns = data.timestamp
             self._mark("transcript", data.timestamp)
             return
         if isinstance(frame, LLMContextFrame):
@@ -235,6 +245,11 @@ class LatencyObserver(BaseObserver):
             self._cached_tokens = None
             self._reasoning_tokens = None
             self._stations = {}
+            if (
+                self._last_transcript_ns is not None
+                and 0 <= data.timestamp - self._last_transcript_ns <= TRANSCRIPT_CARRY_NS
+            ):
+                self._stations["transcript"] = self._last_transcript_ns
             return
 
         if isinstance(frame, LLMFullResponseStartFrame):
@@ -243,7 +258,7 @@ class LatencyObserver(BaseObserver):
             if self._turn_start_ns is not None and self._llm_first_token_ns is None:
                 self._llm_first_token_ns = data.timestamp
                 self._llm_processor = str(data.source)
-                self._stations.setdefault("first_token", data.timestamp)
+                self._stations.setdefault("request", data.timestamp)
             return
 
         if isinstance(frame, MetricsFrame):
@@ -331,18 +346,19 @@ class LatencyObserver(BaseObserver):
     def _timeline(self) -> str:
         """The gap at each hand-off inside the turn, from the turn being declared over.
 
-        `request` is derived, not observed: the first token arrives TTFB after the request
-        went out, so subtracting the LLM's own TTFB from its arrival gives the send time.
-        A station that was never reached is printed as such, because "tts_start never came"
-        is the finding on a turn where the model replied with nothing.
+        `first_token` is derived, not observed: the LLM service pushes its start frame as
+        the request leaves and reports its own TTFB once the first token is back, so the
+        request time plus the TTFB is when the token arrived. A station that was never
+        reached is printed as such, because "tts_start never came" is the finding on a turn
+        where the model replied with nothing.
         """
         if self._turn_start_ns is None or not self._stations:
             return ""
         stations = dict(self._stations)
-        first_token = stations.get("first_token")
+        request = stations.get("request")
         ttfb = self._ttfb.get(self._llm_processor) if self._llm_processor else None
-        if first_token is not None and ttfb is not None:
-            stations["request"] = first_token - int(ttfb * NS_PER_SEC)
+        if request is not None and ttfb is not None:
+            stations["first_token"] = request + int(ttfb * NS_PER_SEC)
         parts = []
         previous = self._turn_start_ns
         for name in _STATIONS:
@@ -350,7 +366,7 @@ class LatencyObserver(BaseObserver):
             if at is None:
                 parts.append(f"{name}=—")
                 continue
-            parts.append(f"{name}=+{(at - previous) / NS_PER_SEC * 1000:.0f}ms")
+            parts.append(f"{name}={(at - previous) / NS_PER_SEC * 1000:+.0f}ms")
             previous = at
         return "  ".join(parts)
 

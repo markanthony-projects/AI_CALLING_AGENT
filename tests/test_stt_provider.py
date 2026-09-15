@@ -477,3 +477,16 @@ def test_without_a_task_manager_it_falls_back_to_waiting():
         sink.append(True)
 
     asyncio.run(run())
+
+
+def test_the_flux_turn_strategy_polls_for_the_transcript_every_fifty_milliseconds():
+    """Call 81bdc87a, 15 Sep 2026: TIMELINE context=+503ms on every turn. The stop frame
+    overtakes the transcript, the strategy declines to fire, and pipecat's poll loop fires
+    only on its next timeout — 0.5s by default. The transcript must still be waited for:
+    firing on the bare stop frame pushes an empty turn."""
+    from app.services.stt_provider import TRANSCRIPT_POLL_SECS, _service_turns
+    from app.core.config import Settings
+
+    strategy = _service_turns(Settings(_env_file=None))
+    assert strategy._timeout == TRANSCRIPT_POLL_SECS == 0.05
+    assert strategy.wait_for_transcript is True

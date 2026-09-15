@@ -49,8 +49,10 @@ def test_each_station_is_the_gap_from_the_one_before(monkeypatch):
     _push(observer, UserStoppedSpeakingFrame(), 1000)
     _push(observer, TranscriptionFrame("hi", "u", "t"), 1020)
     _push(observer, LLMContextFrame(context=None), 1030)
+    # The LLM service pushes its start frame as the request leaves; the first token is
+    # derived: request at 1050 plus a 400ms TTFB puts it at 1450.
+    _push(observer, LLMFullResponseStartFrame(), 1050, source="CerebrasLLMService#0")
     _push(observer, MetricsFrame(data=[TTFBMetricsData(processor="CerebrasLLMService#0", value=0.400)]), 1450)
-    _push(observer, LLMFullResponseStartFrame(), 1450, source="CerebrasLLMService#0")
     _push(observer, TTSStartedFrame(), 1500)
     _push(observer, TTSAudioRawFrame(audio=b"\0\0", sample_rate=16000, num_channels=1), 1700)
     _push(observer, BotStartedSpeakingFrame(), 1720)
@@ -58,7 +60,6 @@ def test_each_station_is_the_gap_from_the_one_before(monkeypatch):
     line = _timeline(lines)
     assert "transcript=+20ms" in line
     assert "context=+10ms" in line
-    # request is derived: first token at 1450 minus a 400ms TTFB puts the send at 1050.
     assert "request=+20ms" in line
     assert "first_token=+400ms" in line
     assert "tts_start=+50ms" in line
@@ -96,3 +97,37 @@ def test_the_stations_reset_with_the_turn(monkeypatch):
     _push(observer, BotStartedSpeakingFrame(), 5400)
     second = [line for line in lines if "TIMELINE turn 2" in line][0]
     assert "transcript=—" in second
+
+
+def test_a_transcript_that_landed_just_before_the_stop_frame_is_this_turns(monkeypatch):
+    """Flux delivers the final transcript a few milliseconds before the stop frame that
+    declares the turn. The first version reset the stations on the stop frame and printed
+    transcript=— on every live turn; the gap it hid was the one worth seeing."""
+    observer, lines = _observe(monkeypatch)
+    _push(observer, TranscriptionFrame("hi", "u", "t"), 990)
+    _push(observer, UserStoppedSpeakingFrame(), 1000)
+    _push(observer, LLMContextFrame(context=None), 1503)
+    _push(observer, BotStartedSpeakingFrame(), 1600)
+    line = _timeline(lines)
+    assert "transcript=-10ms" in line
+    assert "context=+513ms" in line
+
+
+def test_a_transcript_from_long_before_the_turn_is_not_borrowed(monkeypatch):
+    from app.utils.latency import TRANSCRIPT_CARRY_NS
+
+    observer, lines = _observe(monkeypatch)
+    _push(observer, TranscriptionFrame("hi", "u", "t"), 1000)
+    _push(observer, UserStoppedSpeakingFrame(), 1000 + TRANSCRIPT_CARRY_NS // MS + 1)
+    _push(observer, BotStartedSpeakingFrame(), 9000)
+    assert "transcript=—" in _timeline(lines)
+
+
+def test_the_request_is_observed_and_the_first_token_derived():
+    import inspect
+
+    from app.utils import latency
+
+    src = inspect.getsource(latency.LatencyObserver)
+    assert 'self._stations.setdefault("request", data.timestamp)' in src
+    assert 'stations["first_token"] = request + int(ttfb * NS_PER_SEC)' in src

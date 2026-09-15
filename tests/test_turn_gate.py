@@ -356,3 +356,23 @@ def test_what_the_agent_says_instead_is_not_swallowed_with_it():
         assert [getattr(f, "text", None) for f in sink.frames] == [HOLD_ACK]
 
     asyncio.run(run())
+
+
+def test_a_superseded_reply_is_dropped_once_however_many_chunks_it_streams_in(monkeypatch):
+    """Call 81bdc87a, 15 Sep 2026: one superseded runaway, fourteen log lines and a
+    held_replies of fourteen, one per streamed chunk."""
+    from app.utils import turn_gate as module
+
+    lines = []
+    monkeypatch.setattr(module.logger, "info", lambda msg: lines.append(msg))
+    gate, sink = _gate()
+    gate.inference_triggered()
+    asyncio.run(_send(gate, LLMFullResponseStartFrame()))
+    gate.inference_triggered()  # a newer inference; everything below is stale
+    asyncio.run(
+        _send(gate, *(LLMTextFrame(f"chunk {i}. ") for i in range(14)), LLMFullResponseEndFrame())
+    )
+    assert sink.spoken == ""
+    assert gate.dropped == 1
+    assert len([l for l in lines if "Held back" in l]) == 1
+    assert "chunk 0. chunk 1." in lines[0]

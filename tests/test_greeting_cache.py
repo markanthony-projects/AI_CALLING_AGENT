@@ -48,8 +48,14 @@ class _Redis:
         self.store.pop(key, None)
 
 
-def _wav(pcm: bytes) -> bytes:
-    return b"RIFF" + b"\x00" * 40 + pcm
+def _wav(pcm: bytes, rate: int = 16000, channels: int = 1, bits: int = 16) -> bytes:
+    """A real RIFF/WAVE file, header and all, the way Sarvam returns one."""
+    import struct
+
+    block = channels * bits // 8
+    fmt = struct.pack("<HHIIHH", 1, channels, rate, rate * block, block, bits)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(pcm)) + pcm
+    return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
 class _Client:
@@ -137,7 +143,7 @@ def test_the_rest_request_matches_the_websocket_config():
     # The live socket learns its rate from the StartFrame — the transport's 16kHz output —
     # so before start() it still says the constructor default. The REST request has to
     # say what the transport plays, which the next test pins in the agent.
-    assert rest["sample_rate"] == 16000
+    assert rest["speech_sample_rate"] == 16000
 
 
 def test_the_rate_is_the_rate_the_transport_plays():
@@ -161,11 +167,28 @@ def test_the_text_gets_the_same_dash_treatment_as_the_engine_input():
     assert gc.payload(text, _settings())["text"] == spoken_punctuation(text)
 
 
-def test_the_wave_header_is_stripped():
+def test_the_wave_header_is_read_not_assumed():
     pcm = b"\x10\x20" * 100
     data = {"audios": [base64.b64encode(_wav(pcm)).decode()]}
     assert gc.pcm_from_response(data) == pcm
     assert gc.pcm_from_response({"audios": []}) is None
+    assert gc.wav_pcm(_wav(pcm, rate=22050)) == (pcm, 22050, 1, 16)
+
+
+def test_audio_at_any_other_rate_is_a_miss_not_a_slow_deep_greeting():
+    """Call 8571d93b, 15 Sep 2026: 22050Hz played at 16000 — the greeting came out 38%
+    slower and five semitones down, in a voice nobody had chosen."""
+    pcm = b"\x10\x20" * 100
+    for wav in (_wav(pcm, rate=22050), _wav(pcm, rate=24000), _wav(pcm, channels=2), _wav(pcm, bits=8)):
+        assert gc.pcm_from_response({"audios": [base64.b64encode(wav).decode()]}) is None
+
+
+def test_the_request_asks_for_the_rate_by_the_name_the_api_honours():
+    """Sarvam's REST endpoint ignores `sample_rate` and honours `speech_sample_rate`; the
+    first version sent the former and got the default 22050 back."""
+    body = gc.payload("Hello.", _settings())
+    assert body["speech_sample_rate"] == 16000
+    assert "sample_rate" not in body
 
 
 # ------------------------------------------------------------------ round trip

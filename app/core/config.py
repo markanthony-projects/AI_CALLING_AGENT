@@ -397,6 +397,11 @@ class Settings(BaseSettings):
     # dialer refuses to place calls while neither the primary nor the fallback can answer.
     # Five minutes bounds the exposure to a few dials without hammering the providers.
     LLM_PROBE_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
+    # How long a turn waits for the primary model's first token before the same request is
+    # sent to the fallback. Call 81bdc87a, 15 Sep 2026: a request that Cerebras accepted
+    # and never answered held the prospect in silence for nineteen seconds, through two
+    # "Hello?"s, until they hung up. Typical first tokens arrive in 300-400ms.
+    LLM_FIRST_TOKEN_DEADLINE_SECS: float = Field(default=2.5, ge=0.5, le=15.0)
 
     # Where yesterday's latency summary is posted every morning, as {"text": "..."} — a
     # Slack or Google Chat incoming webhook, a WhatsApp bridge, anything that takes that

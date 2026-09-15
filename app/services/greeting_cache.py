@@ -16,7 +16,8 @@ asks to say — the time of day rolling over mid-ring — is a miss, not a wrong
 import asyncio
 import base64
 import json
-from typing import Dict, List, Optional
+import struct
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
@@ -68,7 +69,11 @@ def payload(text: str, settings) -> dict:
         "text": spoken_punctuation(text),
         "target_language_code": "en-IN",
         "speaker": settings.SARVAM_VOICE_ID,
-        "sample_rate": SAMPLE_RATE,
+        # The key Sarvam's REST endpoint honours. The first primed call (8571d93b, 15 Sep)
+        # sent `sample_rate`, which it ignores, got 22050Hz back and played it at 16000 —
+        # 38% slower and five semitones deeper than the rest of the call. The header of the
+        # reply is now read rather than assumed, so a rate that does not match is a miss.
+        "speech_sample_rate": SAMPLE_RATE,
         # What the live socket resolves to: pipecat's TTSSettings default is True, and the
         # Sarvam service's own False is overridden by it. Pinned against the real config in
         # tests/test_greeting_cache.py — change one, the test says so.
@@ -81,15 +86,54 @@ def payload(text: str, settings) -> dict:
     return body
 
 
+def wav_pcm(wav: bytes) -> Optional[Tuple[bytes, int, int, int]]:
+    """(pcm, rate, channels, bits) read from a RIFF/WAVE file, or None if it is not one.
+
+    Walks the chunks rather than slicing 44 bytes off: the format is what says what the
+    samples are, and a header that is not read is a header that is assumed.
+    """
+    if len(wav) < 12 or wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
+        return None
+    rate = channels = bits = None
+    pcm = None
+    at = 12
+    while at + 8 <= len(wav):
+        tag = wav[at : at + 4]
+        size = struct.unpack("<I", wav[at + 4 : at + 8])[0]
+        body = wav[at + 8 : at + 8 + size]
+        if tag == b"fmt " and len(body) >= 16:
+            _, channels, rate, _, _, bits = struct.unpack("<HHIIHH", body[:16])
+        elif tag == b"data":
+            # Some encoders leave the data size as 0 or 0xFFFFFFFF for streamed output.
+            pcm = body if 0 < size < 0xFFFFFFFF else wav[at + 8 :]
+            break
+        at += 8 + size + (size & 1)
+    if pcm is None or rate is None:
+        return None
+    return pcm, rate, channels, bits
+
+
 def pcm_from_response(data: dict) -> Optional[bytes]:
-    """16kHz mono PCM16 out of Sarvam's reply, or None if there was no audio in it."""
+    """16kHz mono PCM16 out of Sarvam's reply, or None if that is not what came back.
+
+    Anything else — no audio, a different rate, stereo, 8-bit — is a miss: the engine
+    synthesises the greeting live, as it did before, in the right voice.
+    """
     audios = data.get("audios") or []
     if not audios:
         return None
     audio = base64.b64decode(audios[0])
-    if len(audio) > 44 and audio.startswith(b"RIFF"):
-        audio = audio[44:]
-    return audio or None
+    parsed = wav_pcm(audio)
+    if parsed is None:
+        return None
+    pcm, rate, channels, bits = parsed
+    if rate != SAMPLE_RATE or channels != 1 or bits != 16:
+        logger.warning(
+            f"Greeting audio came back as {rate}Hz/{channels}ch/{bits}-bit, not "
+            f"{SAMPLE_RATE}Hz mono 16-bit; not priming it"
+        )
+        return None
+    return pcm or None
 
 
 async def synthesise(text: str, settings, client: httpx.AsyncClient) -> Optional[bytes]:

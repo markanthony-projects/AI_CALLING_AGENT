@@ -196,9 +196,13 @@ class TurnFinalityGate(FrameProcessor):
                     self._reply_generation = None
                 return
             if self._superseded:
+                # Held until the response ends, then dropped as one: call 81bdc87a logged
+                # a superseded runaway fourteen times, once per streamed chunk, and counted
+                # fourteen held replies where there was one. The next response's start
+                # frame drops whatever is still held if the end never comes.
                 self._held.append(frame)
-                self._drop()
                 if isinstance(frame, LLMFullResponseEndFrame):
+                    self._drop()
                     self._reply_generation = None
                 return
             if self._turn_open:

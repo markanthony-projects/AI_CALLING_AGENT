@@ -126,6 +126,12 @@ def languages(endpoint: SttEndpoint) -> list:
     return [part.strip() for part in (endpoint.language or "").split(",") if part.strip()]
 
 
+# How often the Flux turn strategy re-checks for a transcript that arrived after the stop
+# frame overtook it. Pipecat's default is 0.5s, and that was the ~500ms of every turn that
+# no service could account for.
+TRANSCRIPT_POLL_SECS = 0.05
+
+
 def _timer_turns(settings) -> BaseUserTurnStopStrategy:
     """The turn is over when nobody has spoken for a while. A guess, and a measured 600ms
     of it on every turn — VAD stop_secs plus this window — but the only thing available
@@ -145,8 +151,18 @@ def _service_turns(settings) -> BaseUserTurnStopStrategy:
     downstream and the stop frame is broadcast, and those are not the same path. If the
     first Flux call shows turns landing ~500ms late, this is the reason, and the fix is the
     strategy's `timeout`, not the settle window.
+
+    It did: call 81bdc87a, 15 Sep 2026, TIMELINE context=+503ms on every turn. The stop
+    frame is a system frame and overtakes the transcript, so the strategy sees the stop
+    first, declines to fire, and its poll loop only fires on the NEXT timeout — pipecat
+    wakes on the transcript's event but merely clears it. The poll is now fifty
+    milliseconds, so the turn is declared within 50ms of the transcript landing rather
+    than 500ms after the stop. wait_for_transcript stays on: firing on the bare stop frame
+    would push an empty aggregation and leave the transcript to arrive after the turn.
     """
-    return ServiceDecidesButNotForever(max_open_secs=settings.STT_MAX_TURN_SECS)
+    return ServiceDecidesButNotForever(
+        max_open_secs=settings.STT_MAX_TURN_SECS, timeout=TRANSCRIPT_POLL_SECS
+    )
 
 
 def _word_gate(settings) -> BaseUserTurnStartStrategy:

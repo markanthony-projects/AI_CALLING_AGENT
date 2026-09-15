@@ -26,6 +26,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from app.core.config import settings
 from app.services.stt_provider import build_listening
+from app.services import live_calls
 from app.services.voice import build_tts
 from app.services.llm_provider import (
     MAX_THROTTLE_WAIT_SECS,
@@ -950,6 +951,8 @@ async def run_voice_agent(
         # The whole point of SocketWitness, on its own line so it can be counted: `SOCKET`
         # appears nowhere else in these logs.
         logger.warning(f"[{call_sid}] SOCKET closed | {socket.report()}")
+        # Ending on our own; the hangup route must not end it a second time.
+        live_calls.forget(call_sid)
         await task.queue_frames([EndFrame(reason="the media stream closed")])
 
     # ─── Hard Duration Cap ─────────────────────────────────────────────────────
@@ -1390,6 +1393,12 @@ async def run_voice_agent(
         # prospect's turn, and a short answer can never be swallowed again.
         greeting_gate.relax()
 
+    async def end_on_request(reason: str) -> None:
+        """How the carrier's hangup callback ends this session — see live_calls.py."""
+        await task.queue_frames([EndFrame(reason=reason)])
+
+    live_calls.register(call_sid, end_on_request)
+
     runner = PipelineRunner()
     error: Optional[str] = None
     try:
@@ -1398,6 +1407,7 @@ async def run_voice_agent(
         logger.error(f"[{call_sid}] Pipeline exception: {e}")
         error = f"pipeline: {e}"
     finally:
+        live_calls.forget(call_sid)
         # The guard outlives the pipeline otherwise, and a sleeping task holding this
         # closure keeps the whole call's state alive for ten minutes after the caller has
         # gone. On a box capped at four concurrent calls that is a leak worth closing.

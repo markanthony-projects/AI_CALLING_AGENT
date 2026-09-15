@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+import asyncio
 import httpx
 from loguru import logger
 from openai import (
@@ -267,12 +268,17 @@ class ResilientLLMService(OpenAILLMService):
         fallback: Optional[LLMEndpoint] = None,
         warn_below: int = 4000,
         max_completion_tokens: Optional[int] = None,
+        first_token_deadline: Optional[float] = None,
         **kwargs,
     ):
         # Set before super().__init__, which calls create_client() on its last line.
         self._call_sid = call_sid
         self._endpoint = endpoint
         self._fallback = fallback
+        # Seconds the primary has to produce its first chunk before the turn goes to the
+        # fallback. None leaves the stream untouched.
+        self._first_token_deadline = first_token_deadline
+        self._stalls = 0
         self._fallback_client: Optional[AsyncOpenAI] = None
         self._last_throttle_delay: Optional[float] = None
         # Set the first time the primary answers 404 for its model. A model that is gone
@@ -430,7 +436,59 @@ class ResilientLLMService(OpenAILLMService):
             # Cleared on success, so a delay from an earlier turn cannot be read as the
             # explanation for a later, unrelated failure.
             self._last_throttle_delay = None
-            return completions
+            if self._first_token_deadline is None:
+                return completions
+            return self._within_deadline(completions, context)
+
+    @property
+    def stalls(self) -> int:
+        """Turns on which the primary accepted the request and sent nothing in time."""
+        return self._stalls
+
+    async def _within_deadline(self, stream, context):
+        """The primary's stream, unless its first chunk is late — then the fallback's.
+
+        Call 81bdc87a, 15 Sep 2026, turn 4. Cerebras accepted the request and sent nothing
+        for nineteen seconds. No error, so nothing fell back; the reply watchdog said so at
+        four seconds and could do nothing about it; the prospect said "Hello?" twice and
+        hung up. The OpenAI client's own timeout is ten minutes and covers the whole
+        response, which is not the kind of timeout a phone call needs. This one covers the
+        first chunk only: a stream that has started is left alone, however long its
+        reasoning runs.
+
+        Shaped as an async generator because that is what the base class iterates and
+        closes — it calls __aiter__, then aclose on the iterator and on the stream, and an
+        async generator answers all three.
+        """
+        deadline = self._first_token_deadline
+        iterator = stream.__aiter__()
+        try:
+            try:
+                first = await asyncio.wait_for(iterator.__anext__(), timeout=deadline)
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                self._stalls += 1
+                if self._fallback_client is None or self._fallback is None:
+                    logger.error(
+                        f"[{self._call_sid}] {self._endpoint} sent nothing for {deadline:.1f}s "
+                        f"and there is no fallback; the turn is lost"
+                    )
+                    raise
+                logger.warning(
+                    f"[{self._call_sid}] {self._endpoint} sent nothing for {deadline:.1f}s; "
+                    f"sending this turn to {self._fallback} instead (stall {self._stalls})"
+                )
+                await _close_stream(stream)
+                stream = await self._complete_on_fallback(context)
+                async for chunk in stream:
+                    yield chunk
+                return
+            yield first
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            await _close_stream(stream)
 
     async def _complete_on_fallback(self, context):
         """The same request, sent to a different provider.
@@ -491,6 +549,19 @@ def fallback_endpoint(settings) -> Optional[LLMEndpoint]:
     )
 
 
+async def _close_stream(stream) -> None:
+    """Release whatever the stream holds, whichever way it spells it. Never raises."""
+    close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def build_llm_service(call_sid: str, settings) -> ResilientLLMService:
     """Assemble the call's LLM service from configuration alone."""
     return ResilientLLMService(
@@ -499,4 +570,5 @@ def build_llm_service(call_sid: str, settings) -> ResilientLLMService:
         fallback=fallback_endpoint(settings),
         warn_below=settings.LLM_MIN_TOKENS_TO_DIAL,
         max_completion_tokens=settings.LLM_MAX_COMPLETION_TOKENS,
+        first_token_deadline=settings.LLM_FIRST_TOKEN_DEADLINE_SECS,
     )

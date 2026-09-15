@@ -1,4 +1,3 @@
-import asyncio
 import time
 import uuid
 from datetime import datetime
@@ -22,7 +21,7 @@ from app.services.dial_pump import (
     record_dial_outcome,
     record_outcome,
 )
-from app.services import warm_tts
+from app.services import live_calls, warm_tts
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
 from app.services.greeting_cache import recall_primed_greeting
@@ -83,7 +82,7 @@ async def vobiz_answer(campaign_id: str, call_sid: str, request: Request):
     # 180ms the first word waited for; it can happen in that window instead. Detached and
     # best effort — see app/services/warm_tts.py.
     if settings.TTS_PRECONNECT:
-        asyncio.create_task(warm_tts.prepare(call_sid, settings))
+        warm_tts.begin(call_sid, settings)
 
     # keepCallAlive="true" makes <Stream> execute exclusively, so <Hangup/> runs only once
     # the stream disconnects — which is what ends the PSTN leg and stops the billing.
@@ -177,7 +176,7 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             # What the ring bought: the greeting's audio, and a voice socket already open.
             # Either may be missing, and missing means the path the call took before.
             primed_speech=await recall_primed_greeting(call_sid),
-            warm_tts=warm_tts.adopt(call_sid),
+            warm_tts=await warm_tts.adopt(call_sid),
             project_name=project["name"],
             # .get, not [...]: the project dict is cached in Redis for 24 hours, so an entry
             # written before this field existed will simply not have the key. Missing means
@@ -454,5 +453,12 @@ async def vobiz_hangup(campaign_id: str, call_sid: str, request: Request):
         f" | vobiz_call_id={carrier_call_id(fields) or 'unreported'}"
         + (" | contact updated" if changed else "")
     )
+
+    # The session that served an answered call is told, rather than left to notice. On
+    # call 8571d93b the media websocket outlived the hangup by sixty seconds and the call
+    # was filed as an idle timeout. Usually the stream closes in the same instant and there
+    # is nothing left to end; when there is, this is what ends it.
+    if answered and await live_calls.end(call_sid, "the carrier reported the hangup"):
+        logger.info(f"[{call_sid}] Ending the session on the carrier's hangup")
     return Response(status_code=200)
 
