@@ -35,7 +35,7 @@ _ENGAGED = re.compile(
 )
 # The closes the script has. A yes to one of these is the end of the call, and rightly so.
 _CLOSING_OFFER = re.compile(
-    r"whatsapp|call you|property expert|expert (?:will|to) call|visit|come (?:and|to) see"
+    r"whatsapp|this number|call you|property expert|expert (?:will|to) call|visit|come (?:and|to) see"
     r"|anything else", re.I,
 )
 

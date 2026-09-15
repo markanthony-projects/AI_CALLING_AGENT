@@ -339,3 +339,11 @@ def test_the_whatsapp_close_confirms_the_number():
     assert "on WhatsApp, on this number?" in PROMPT
     assert "read it back digit by digit" in PROMPT
     assert "wait for a yes before you call end_call" in PROMPT
+
+
+def test_the_number_is_confirmed_even_when_they_ask_for_the_plans():
+    """Call 2dbf4ee1, 15 Sep 2026: "Can you share me the floor plan" — "I will send it on
+    WhatsApp on this number." — end. A statement, not a question; the prospect never got
+    to say which number."""
+    assert "This holds when THEY ask for the floor plans too" in PROMPT
+    assert "wait for their yes before you end" in PROMPT

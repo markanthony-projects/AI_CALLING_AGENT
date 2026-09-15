@@ -165,3 +165,10 @@ def test_the_tool_path_hands_the_turn_back_with_the_reason():
     cut = handler.index("offered_a_close(_last_agent_line)")
     assert 'callback({"refused": CUT_OFF_REASON})' in handler[cut : cut + 900]
     assert cut < handler.index("line = closing_line(")
+
+
+def test_a_yes_to_on_this_number_is_the_close():
+    from app.utils.engaged_answer import is_a_yes_to_a_close, offered_a_close
+
+    assert offered_a_close("Sure. Shall I send it on this number?")
+    assert is_a_yes_to_a_close("Yes.", "Shall I send it on this number?") is True
