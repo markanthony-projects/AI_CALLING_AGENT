@@ -72,6 +72,14 @@ class SocketWitness:
         self.close_reason: Optional[str] = None
         self.inbound_messages = 0
         self.inbound_bytes = 0
+        # Outbound too, since 15 Sep 2026. Calls 07709de3 and 5a2c8245: the pipeline
+        # reported the greeting on the wire, the prospect heard nothing, and nothing in
+        # the log said whether a single playAudio message actually left this socket. Now
+        # the close line does.
+        self.outbound_messages = 0
+        self.outbound_bytes = 0
+        self._first_outbound_at: Optional[float] = None
+        self._last_outbound_at: Optional[float] = None
         self._opened_at = clock()
         self._last_inbound_at: Optional[float] = None
         self._closed_at: Optional[float] = None
@@ -80,6 +88,22 @@ class SocketWitness:
         # Only reached for names this object does not define, so every real socket method
         # and property still resolves to the socket itself.
         return getattr(self._ws, name)
+
+    def _sent(self, size: int) -> None:
+        now = self._clock()
+        self.outbound_messages += 1
+        self.outbound_bytes += size
+        if self._first_outbound_at is None:
+            self._first_outbound_at = now
+        self._last_outbound_at = now
+
+    async def send_text(self, data: str):
+        await self._ws.send_text(data)
+        self._sent(len(data))
+
+    async def send_bytes(self, data: bytes):
+        await self._ws.send_bytes(data)
+        self._sent(len(data))
 
     async def receive(self):
         message = await self._ws.receive()
@@ -127,4 +151,13 @@ class SocketWitness:
             f"{self.inbound_messages} frames, {self.inbound_bytes / 1024:.0f}KB "
             f"over {held:.1f}s ({rate:.1f}KB/s in)"
         )
+        if self._first_outbound_at is None:
+            parts.append("OUT: nothing was ever sent")
+        else:
+            end = self._closed_at or self._clock()
+            parts.append(
+                f"OUT: {self.outbound_messages} msgs, {self.outbound_bytes / 1024:.0f}KB, "
+                f"first {(self._first_outbound_at - self._opened_at) * 1000:.0f}ms after open, "
+                f"last {(end - self._last_outbound_at) * 1000:.0f}ms before close"
+            )
         return " | ".join(parts)

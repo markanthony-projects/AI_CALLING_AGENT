@@ -214,3 +214,55 @@ def test_the_close_is_reported_on_its_own_countable_line():
     handler = handler[: handler.index("# ─── Hard Duration Cap")]
     assert "SOCKET closed" in handler
     assert "socket.report()" in handler
+
+
+# --- and what went OUT -----------------------------------------------------------------
+
+
+def test_outbound_traffic_is_counted_and_timed():
+    """Calls 07709de3 and 5a2c8245, 15 Sep 2026: the pipeline said the greeting was on the
+    wire, the prospect heard nothing, and no line said whether a single message had left
+    the socket. The close line now says how many did, and when the first and last went."""
+    import asyncio
+
+    class _Socket:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, data):
+            self.sent.append(data)
+
+        async def send_bytes(self, data):
+            self.sent.append(data)
+
+        async def receive(self):
+            return {"type": "websocket.disconnect", "code": 1000}
+
+    ticks = iter([0.0, 0.25, 0.30, 5.0, 5.0])
+    ws = _Socket()
+    witness = SocketWitness(ws, clock=lambda: next(ticks))
+
+    async def go():
+        await witness.send_text("x" * 1024)
+        await witness.send_bytes(b"y" * 1024)
+        await witness.receive()
+
+    asyncio.run(go())
+    assert ws.sent == ["x" * 1024, b"y" * 1024], "still delivered to the real socket"
+    assert witness.outbound_messages == 2 and witness.outbound_bytes == 2048
+    report = witness.report()
+    assert "OUT: 2 msgs, 2KB, first 250ms after open, last 4700ms before close" in report
+
+
+def test_a_socket_nothing_was_sent_on_says_so():
+    ticks = iter([0.0, 1.0, 1.0])
+
+    class _Socket:
+        async def receive(self):
+            return {"type": "websocket.disconnect", "code": 1000}
+
+    import asyncio
+
+    witness = SocketWitness(_Socket(), clock=lambda: next(ticks))
+    asyncio.run(witness.receive())
+    assert "OUT: nothing was ever sent" in witness.report()
