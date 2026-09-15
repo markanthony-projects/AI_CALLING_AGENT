@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from datetime import datetime
@@ -21,8 +22,10 @@ from app.services.dial_pump import (
     record_dial_outcome,
     record_outcome,
 )
+from app.services import warm_tts
 from app.services.discovery import get_project_by_campaign
 from app.services.extraction import enqueue_extraction
+from app.services.greeting_cache import recall_primed_greeting
 from app.utils.attribution import prospect_text
 from app.utils.context_builder import build_campaign_context
 from app.utils.timeutils import utc_now
@@ -74,6 +77,13 @@ async def vobiz_answer(campaign_id: str, call_sid: str, request: Request):
     ws_token = issue_call_token(campaign_id, call_sid)
     ws_url = f"{base_ws_url}/ws/vobiz/{campaign_id}/{call_sid}?token={ws_token}"
     logger.info(f"[{call_sid}] Issued Vobiz stream URL for campaign {campaign_id}")
+
+    # The media stream opens ~3 seconds from now (611ms for this reply to become a
+    # websocket, 2.4s for Vobiz's start event). The voice engine's handshake was the
+    # 180ms the first word waited for; it can happen in that window instead. Detached and
+    # best effort — see app/services/warm_tts.py.
+    if settings.TTS_PRECONNECT:
+        asyncio.create_task(warm_tts.prepare(call_sid, settings))
 
     # keepCallAlive="true" makes <Stream> execute exclusively, so <Hangup/> runs only once
     # the stream disconnects — which is what ends the PSTN leg and stops the billing.
@@ -164,6 +174,10 @@ async def _handle_call(websocket: WebSocket, campaign_id: str, call_sid: str, cl
             build_campaign_context(project),
             call_sid,
             client_type=client_type,
+            # What the ring bought: the greeting's audio, and a voice socket already open.
+            # Either may be missing, and missing means the path the call took before.
+            primed_speech=await recall_primed_greeting(call_sid),
+            warm_tts=warm_tts.adopt(call_sid),
             project_name=project["name"],
             # .get, not [...]: the project dict is cached in Redis for 24 hours, so an entry
             # written before this field existed will simply not have the key. Missing means

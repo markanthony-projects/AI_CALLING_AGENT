@@ -299,6 +299,23 @@ class Settings(BaseSettings):
     # Bounded by what bulbul:v3 accepts; the useful band is 1.0 to 1.2.
     SPEAKING_PACE: float = Field(default=1.0, ge=0.5, le=2.0)
 
+    # --- the first second of the call ------------------------------------------------
+    #
+    # Three switches, each a rollback for one Phase 1 change, each measured on the FIRST
+    # WORD and STARTUP lines. Off restores exactly the path the call took before.
+    #
+    # The opening line is a local f-string known at dial time, and its sentences can be
+    # synthesised while the phone is still ringing and played the instant the media
+    # stream opens. On 14 Sep the greeting waited 222ms of synthesis after a 340ms startup.
+    GREETING_PRIME: bool = True
+    # The answer webhook arrives ~3s before the media stream opens (611ms + Vobiz's start
+    # event). Opening the voice websocket in that window takes its 180ms handshake off the
+    # first word.
+    TTS_PRECONNECT: bool = True
+    # A spare voice socket kept open per call, swapped in on a barge-in instead of tearing
+    # the live one down and reopening it — the churn that left call 5023ff25 mute.
+    TTS_SPARE_SOCKET: bool = True
+
     # What the agent calls itself in the opening line, so the prospect is told they are
     # talking to software before anything else is said. TRAI's February 2025 amendment to
     # the TCCCPR makes that disclosure mandatory on every automated commercial call, and a

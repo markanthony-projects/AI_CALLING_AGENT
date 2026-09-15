@@ -43,6 +43,10 @@ _CALL_MODULES = {
     "app.services.extraction",
     "app.services.stale_calls",
     "app.api.routes.webhook",
+    "app.services.greeting_cache",
+    "app.services.warm_tts",
+    "app.services.voice",
+    "app.utils.primed_speech",
     # The per-turn timings. Left out of this set, so every LATENCY line was dropped at INFO
     # and the instrumentation looked broken from outside: hours of production calls with no
     # timing in them at all, and a request for logs that could not exist.

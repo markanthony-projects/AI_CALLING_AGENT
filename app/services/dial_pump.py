@@ -47,8 +47,11 @@ from app.models.db import (
     DialAttempt,
     Suppression,
 )
+from app.core.config import settings
 from app.services.call_context import remember_customer_name, remember_dialed_number
 from app.services.dialer import trigger_vobiz_call
+from app.services.discovery import get_project_by_campaign
+from app.services.greeting_cache import prime_greeting
 from app.utils.timeutils import is_within_calling_hours, to_ist, utc_now
 
 # Dials placed per contact before it is EXHAUSTED.
@@ -339,6 +342,18 @@ async def _place(db: AsyncSession, contact: Contact) -> bool:
         f"[{call_sid}] Dialling {contact.phone_number} "
         f"(attempt {contact.attempts} of {MAX_DIAL_ATTEMPTS})"
     )
+
+    # The phone is ringing. Everything the greeting will say is known now, so its
+    # sentences are synthesised here and left in Redis for the call to play the instant
+    # the media stream opens — see app/services/greeting_cache.py. Bounded and best
+    # effort: a slow or refusing voice engine costs the greeting its head start, never
+    # the dial.
+    try:
+        project = await get_project_by_campaign(db, str(contact.campaign_id))
+        if project:
+            await prime_greeting(call_sid, project, contact.name, settings)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[{call_sid}] Greeting not primed: {e}")
     return True
 
 

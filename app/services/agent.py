@@ -1,7 +1,6 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Optional
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -27,7 +26,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from app.core.config import settings
 from app.services.stt_provider import build_listening
-from app.services.voice import KeepsItsVoice
+from app.services.voice import build_tts
 from app.services.llm_provider import (
     MAX_THROTTLE_WAIT_SECS,
     build_llm_service,
@@ -43,7 +42,6 @@ from app.utils.project_rejected import rejects_the_project
 from app.utils.booking_claim import ASK_FOR_TIME, MAX_BOOKING_REFUSALS, unagreed_booking
 from app.utils.booking_claim import REFUSAL_REASON as BOOKING_REFUSAL_REASON
 from app.utils.closing_gate import ClosingGate
-from app.utils.dashes import DashFilter
 from app.utils.latency import LatencyObserver
 from app.utils.pace import adjusted_pace, pace_request
 from app.utils.person_name import spoken_name
@@ -62,12 +60,13 @@ from app.utils.repeat_request import (
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
 from app.utils.empty_reply import EmptyReplyGuard
+from app.utils.primed_speech import PrimedSpeech
 from app.utils.one_question import OneQuestionPerTurn
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
-from app.utils.timeutils import time_of_day_greeting
+from app.utils.opening_line import build_opening_line, build_reintroduction, caller_identity  # noqa: F401 — re-exported for callers and tests
 from app.utils.stt_witness import SttWitness
 from app.utils.turn_gate import TurnFinalityGate
-from app.prompts.agent_prompts import AGENT_NAME, get_system_prompt, introduction
+from app.prompts.agent_prompts import AGENT_NAME, get_system_prompt
 from app.utils.call_metrics import CallMetricsSnapshot
 import sys
 from loguru import logger
@@ -123,92 +122,6 @@ LLM_BUSY_LINE = "One moment please."
 FAREWELL_LINE = "Thank you so much for your time. Have a wonderful day!"
 
 
-
-
-def caller_identity(project_name: str, developer_name: Optional[str] = None) -> str:
-    """Who the agent says it is calling from.
-
-    The developer, when the project has one recorded. On a live call the agent said "I am
-    Priya calling you from Abhee Codename New Dimension" — which is the project, not an
-    employer. A person calls from the company and names the project when they describe it.
-
-    Falls back to the project name, which is what every call has said until now, so a
-    project nobody has filled this in for sounds exactly as it did before.
-    """
-    return (developer_name or "").strip() or project_name
-
-
-def build_opening_line(
-    project_name: str,
-    customer_name: Optional[str] = None,
-    now: Optional[datetime] = None,
-    developer_name: Optional[str] = None,
-    agent_name: Optional[str] = None,
-) -> str:
-    """The first thing the caller hears.
-
-    Greets by time of day and says who is calling, and nothing else. The name off the dial
-    list is used to address them, so a prospect who does hear their own name knows the call
-    is meant for them; without one the greeting simply omits it and the agent asks in its
-    first reply — never a guessed name.
-
-    It ends by asking for a minute of their time, and that was removed once and put back.
-
-    The argument for removing it was that eight words carried no information and invited a
-    "no" to a question that was not the one worth asking, since the opening gate asks for
-    the same permission and sorts the call as well. Half of that was right and the half that
-    was wrong cost more: nothing replaced them. A greeting that ends on a statement hands
-    the prospect nothing to answer, and on a live call on 5 Sep the line went quiet for
-    three seconds and then they had to ask "What is the purpose?" themselves.
-
-    A question is what passes the turn over. The words are not there for their information;
-    they are there so the other person knows it is their go.
-
-    Written as short sentences rather than one comma-spliced line, and SPOKEN as short
-    sentences too — see spoken() below. Pipecat synthesises the model's replies one sentence
-    per request, so there a full stop is a real gap the caller hears while a comma is not:
-    measured on bulbul:v3, the same words with and without commas take the same time to say.
-    But a TTSSpeakFrame skips that per-sentence cut, and this line was going to the voice
-    engine as one request, three sentences in one flat breath. On 10 Sep 2026 it was the
-    one line on the call reported as sounding like a machine. The full stops only became
-    real gaps once the line was queued one sentence per frame.
-    """
-    part = time_of_day_greeting(now)
-    # The lead list holds "Abhijit Kumar Singh", "RAHUL" and "mahantesha"; none of those is
-    # how a person is greeted. Idempotent, so applying it here as well as before the prompt
-    # costs nothing and means this line is safe whoever calls it. See app/utils/person_name.
-    name = spoken_name(customer_name)
-    # "Prestige Pvt. Ltd." already ends in a full stop; the sentence supplies its own.
-    identity = caller_identity(project_name, developer_name).rstrip(".")
-    who = (agent_name or "").strip() or AGENT_NAME
-    # Ends on a question about THEM, not on permission. "Can I speak to you for a minute?"
-    # invites a no from somebody who has not heard anything yet; "Am I speaking with Rahul?"
-    # invites a yes, and confirms we reached the person the dial list named. Without a name
-    # it asks for one, which is the same question pointed the other way.
-    ask = f"Am I speaking with {name}?" if name else "May I know your good name?"
-    # The introduction carries the AI disclosure and is built in one place, shared with the
-    # prompt, so the system-spoken greeting and the model's own introduction cannot drift.
-    return f"Hello, Good {part}. {introduction(who, identity)} {ask}"
-
-
-def build_reintroduction(
-    project_name: str,
-    customer_name: Optional[str] = None,
-    developer_name: Optional[str] = None,
-    agent_name: Optional[str] = None,
-) -> str:
-    """Said when their first words are "Hello?" — they heard the line, not the sentence.
-
-    The greeting without the time of day. "Good afternoon" is true once; said twice inside
-    ten seconds it is the single most obviously automated thing a caller can hear. What has
-    to come back is the part they missed: who this is, and the question that hands them the
-    turn.
-    """
-    name = spoken_name(customer_name)
-    identity = caller_identity(project_name, developer_name).rstrip(".")
-    who = (agent_name or "").strip() or AGENT_NAME
-    ask = f"Am I speaking with {name}?" if name else "May I know your good name?"
-    return f"{introduction(who, identity)} {ask}"
 
 
 def spoken(text: str, *, append_to_context: bool = True) -> list[TTSSpeakFrame]:
@@ -380,6 +293,8 @@ async def run_voice_agent(
     developer_name: Optional[str] = None,
     agent_name: Optional[str] = None,
     stream_open_at: Optional[float] = None,
+    primed_speech: Optional[dict] = None,
+    warm_tts=None,
 ):
     # Converted once, here, so the greeting and the prompt address the prospect the same
     # way. Told the full name, the model uses the full name for the rest of the call — and
@@ -452,34 +367,17 @@ async def run_voice_agent(
     listening = build_listening(call_sid, settings)
     stt = listening.service
     
-    # Passed only when somebody has set it. Unset, the key stays out of the connect payload
-    # exactly as it has on every call so far, so a deployment cannot change the voice on its
-    # own; set, it steadies the prosody Sarvam otherwise re-rolls at every full stop. See
-    # config.py and tests/test_voice_consistency.py.
-    tts_tuning = {}
     if settings.SARVAM_TEMPERATURE is not None:
-        tts_tuning["temperature"] = settings.SARVAM_TEMPERATURE
         logger.info(f"[{call_sid}] Voice steadiness set | temperature={settings.SARVAM_TEMPERATURE}")
 
-    # Low-latency streaming WebSocket Sarvam TTS with pace 1.0
-    tts = KeepsItsVoice(
-        api_key=settings.SARVAM_API_KEY,
-        # Dashes the engine misreads become commas and hyphens on the way in. See
-        # app/utils/dashes.py for the call that showed it.
-        text_filters=[DashFilter()],
-        settings=SarvamTTSService.Settings(
-            model="bulbul:v3",
-            voice=settings.SARVAM_VOICE_ID,
-            pace=settings.SPEAKING_PACE,
-            **tts_tuning,
-            max_chunk_length=150,
-            # min_buffer_size is deliberately left at Sarvam's default. Setting it to 25
-            # was rejected at connect time with "Input parameters has to be a valid
-            # dictionary", killing TTS for the whole call. Pipecat forwards the value
-            # straight into the config payload with no range check, so any new value here
-            # must be validated against Sarvam's API before it reaches a live call.
-        ),
-    )
+    # The voice. Built by one factory — app/services/voice.py — whether it is built here or
+    # three seconds earlier by the answer webhook, so a socket warmed before the media
+    # stream opened is the same service in every setting as one built now.
+    if warm_tts is not None:
+        tts = warm_tts
+        startup.mark("tts (warm)")
+    else:
+        tts = build_tts(settings)
 
     startup.mark("services built")
 
@@ -489,7 +387,9 @@ async def run_voice_agent(
     # timed out during the opening handshake and left the agent mute until the caller hung
     # up. None of that churn appeared anywhere, so the reconnects had to be inferred from a
     # docstring. These two lines make it countable.
-    _tts_reconnects: int = 0
+    # A socket warmed by the answer webhook connected before this handler existed, so its
+    # opening connection is counted here or every later reconnect would read one low.
+    _tts_reconnects: int = 1 if warm_tts is not None else 0
 
     @tts.event_handler("on_connected")
     async def on_tts_connected(service):
@@ -829,6 +729,10 @@ async def run_voice_agent(
     # does. Resolved at call time: ask_again is defined with the rest of the turn state
     # below, and no reply can end before the pipeline has started.
     empty_reply = EmptyReplyGuard(call_sid, on_empty=lambda count: on_empty_reply(count))
+    # The greeting's audio, synthesised while the phone rang, if the worker managed it.
+    # Directly in front of the voice engine: a sentence it has is played from here, one it
+    # does not have goes on to be synthesised. See app/utils/primed_speech.py.
+    primed = PrimedSpeech(call_sid, primed_speech if settings.GREETING_PRIME else None)
 
     pipeline = Pipeline([
         transport.input(),
@@ -856,6 +760,7 @@ async def run_voice_agent(
         # app/utils/empty_reply.py: call 29b2f355 went silent for six seconds on a reply
         # nobody could see was empty.
         empty_reply,
+        primed,
         tts,
         transport.output(),
         # After the output transport, never before it: BotStoppedSpeakingFrame is raised by

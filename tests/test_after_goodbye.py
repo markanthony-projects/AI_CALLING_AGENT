@@ -254,9 +254,9 @@ def test_the_floor_is_a_speed_sarvam_will_accept():
     than restated here, so a model swap cannot leave the floor below what it takes."""
     from pipecat.services.sarvam.tts import TTS_MODEL_CONFIGS
 
-    from app.services import agent
+    from app.services import voice
 
-    src = inspect.getsource(agent.run_voice_agent)
+    src = inspect.getsource(voice.build_tts)
     model = next(m for m in TTS_MODEL_CONFIGS if f'model="{m}"' in src)
     low, high = TTS_MODEL_CONFIGS[model].pace_range
     assert low <= MIN_PACE <= high, f"{model} accepts {low} to {high}"

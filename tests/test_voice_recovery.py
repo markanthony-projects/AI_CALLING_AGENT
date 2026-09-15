@@ -161,7 +161,16 @@ def test_the_revivals_are_countable():
 
 
 def test_the_agent_speaks_through_this_and_not_the_plain_service():
-    assert "KeepsItsVoice(" in AGENT_SRC
+    """Since 15 Sep the service is built by one factory, app/services/voice.py, for both
+    the cold path in the agent and the warm one in the answer webhook — so the check is
+    that the factory builds this class and the agent only builds through the factory."""
+    import inspect
+
+    from app.services import voice
+
+    assert "KeepsItsVoice(" in inspect.getsource(voice.build_tts)
+    assert "tts = build_tts(settings)" in AGENT_SRC
+    assert "KeepsItsVoice(" not in AGENT_SRC
     assert "SarvamTTSService(\n" not in AGENT_SRC
 
 

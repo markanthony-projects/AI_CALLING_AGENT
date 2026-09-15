@@ -123,9 +123,9 @@ def test_the_bounds_are_the_ones_the_model_documents():
     """Pipecat forwards this into the connect payload with no range check of its own."""
     from pipecat.services.sarvam.tts import TTS_MODEL_CONFIGS
 
-    from app.services import agent
+    from app.services import voice
 
-    src = inspect.getsource(agent.run_voice_agent)
+    src = inspect.getsource(voice.build_tts)
     model = next(m for m in TTS_MODEL_CONFIGS if f'model="{m}"' in src)
     low, high = TTS_MODEL_CONFIGS[model].pace_range
     bounds = {type(m).__name__: m for m in Settings.model_fields["SPEAKING_PACE"].metadata}
@@ -136,9 +136,9 @@ def test_the_bounds_are_the_ones_the_model_documents():
 def test_the_setting_actually_reaches_the_voice_engine():
     """A dial wired to nothing is worse than no dial: it invites somebody to change it,
     hear no difference, and conclude the voice cannot be steadied."""
-    from app.services import agent
+    from app.services import voice
 
-    tree = ast.parse(inspect.getsource(agent.run_voice_agent).lstrip())
+    tree = ast.parse(inspect.getsource(voice.build_tts).lstrip())
     guards = [
         n
         for n in ast.walk(tree)
@@ -171,9 +171,9 @@ def test_the_model_we_send_it_to_is_one_that_accepts_it():
     would be a setting that silently does nothing."""
     from pipecat.services.sarvam.tts import TTS_MODEL_CONFIGS
 
-    from app.services import agent
+    from app.services import voice
 
-    src = inspect.getsource(agent.run_voice_agent)
+    src = inspect.getsource(voice.build_tts)
     model = next(m for m in TTS_MODEL_CONFIGS if f'model="{m}"' in src)
     assert TTS_MODEL_CONFIGS[model].supports_temperature, f"{model} ignores temperature"
 
@@ -185,9 +185,9 @@ def test_pace_is_still_pinned():
     It is a named constant now rather than a literal, because it became two things: what the
     call opens with, and the ceiling a prospect can walk back up to after asking for slower.
     Both have to be the same number or "faster" would drift past where the call started."""
-    from app.services import agent
+    from app.services import voice
 
     from app.core.config import Settings
 
     assert Settings.model_fields["SPEAKING_PACE"].default == 1.0
-    assert "pace=settings.SPEAKING_PACE" in inspect.getsource(agent.run_voice_agent)
+    assert "pace=settings.SPEAKING_PACE" in inspect.getsource(voice.build_tts)

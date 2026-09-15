@@ -101,7 +101,8 @@ def test_the_pipecat_filter_applies_it():
 
 
 def test_the_voice_engine_is_built_with_it():
-    from app.services import agent
+    """The factory builds the voice for both the warm path and the cold one."""
+    from app.services import voice
 
-    src = inspect.getsource(agent.run_voice_agent)
+    src = inspect.getsource(voice.build_tts)
     assert "text_filters=[DashFilter()]" in src
