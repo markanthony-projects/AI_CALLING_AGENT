@@ -34,6 +34,9 @@ _CALL_MODULES = {
     "app.services.dialer",
     "app.services.extraction",
     "app.services.stale_calls",
+    # The morning summary. Logged whether or not a webhook receives it, and a line that is
+    # dropped here is a summary nobody gets.
+    "app.services.metrics_summary",
     "app.api.routes.webhook",
     "app.worker",
 }
@@ -584,9 +587,20 @@ async def unstick_dials(ctx: dict) -> int:
         return 0
 
 
+async def morning_metrics_summary(ctx: dict) -> str:
+    """Yesterday's numbers to the team, once, at 09:00 IST. See metrics_summary.py."""
+    from app.services.metrics_summary import send_yesterdays_summary
+
+    async with AsyncSessionLocal() as db:
+        return await send_yesterdays_summary(db)
+
+
 class WorkerSettings:
     functions = [process_extraction]
     cron_jobs = [
+        # arq's cron clock is UTC: 03:30 UTC is 09:00 IST, when the day's calling has not
+        # started and yesterday's number is the first thing worth reading.
+        cron(morning_metrics_summary, hour={3}, minute={30}, max_tries=1),
         # Every five seconds. Short because it bounds how long a freed slot sits idle, which
         # on a three-slot account is a third of the throughput; cheap because a tick with no
         # free slots and no active campaign is two indexed queries.

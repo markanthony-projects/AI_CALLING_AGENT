@@ -35,6 +35,7 @@ from app.core.ratelimit import window_keys
 from app.core.security import SessionClaims, require_admin, require_session
 from app.models.db import (
     Call,
+    CallMetrics,
     CallStatus,
     Campaign,
     CampaignStatus,
@@ -235,6 +236,43 @@ class TimeseriesPoint(BaseModel):
     talk_seconds: float
 
 
+class LatencyDay(BaseModel):
+    """One IST day of the numbers a call is judged by. Medians of per-call figures, so one
+    bad call cannot drag a day; counts summed, because one bad call is exactly what those
+    are for."""
+
+    date: str
+    calls: int
+    p50_ms: Optional[int]
+    p95_ms: Optional[int]
+    worst_ms: Optional[int]
+    first_word_ms: Optional[int]
+    held_replies: int
+    tts_reconnects: int
+    llm_failures: int
+
+
+class CallLatency(BaseModel):
+    call_id: uuid.UUID
+    started_at: datetime
+    phone_number: Optional[str]
+    turns: int
+    p50_ms: Optional[int]
+    p95_ms: Optional[int]
+    first_word_ms: Optional[int]
+    held_replies: int
+    tts_reconnects: int
+    llm_failures: int
+    end_reason: Optional[str]
+    stt: str
+    llm: str
+
+
+class LatencyReport(BaseModel):
+    days: List[LatencyDay]
+    recent: List[CallLatency]
+
+
 class FunnelStage(BaseModel):
     stage: str
     count: int
@@ -306,6 +344,34 @@ async def _paginate(db: AsyncSession, stmt: Select, page: int, page_size: int):
 
 def _window_start(days: int) -> datetime:
     return utc_now() - timedelta(days=days)
+
+
+def latency_days(rows, days: int, today_ist) -> List[LatencyDay]:
+    """Fill the window day by day, so a day with no calls is a gap and not a missing tick.
+
+    Pure, so the shape is testable without a database: `rows` carry the grouped
+    aggregates keyed by IST date, and every day in the window comes back whether or not
+    one of them matched it.
+    """
+    by_day = {str(r.day): r for r in rows}
+    out: List[LatencyDay] = []
+    for offset in range(days - 1, -1, -1):
+        key = str(today_ist - timedelta(days=offset))
+        r = by_day.get(key)
+        out.append(
+            LatencyDay(
+                date=key,
+                calls=int(r.calls) if r else 0,
+                p50_ms=round(float(r.p50)) if r and r.p50 is not None else None,
+                p95_ms=round(float(r.p95)) if r and r.p95 is not None else None,
+                worst_ms=int(r.worst) if r and r.worst is not None else None,
+                first_word_ms=round(float(r.first_word)) if r and r.first_word is not None else None,
+                held_replies=int(r.held) if r else 0,
+                tts_reconnects=int(r.reconnects) if r else 0,
+                llm_failures=int(r.failures) if r else 0,
+            )
+        )
+    return out
 
 
 # --- Overview -------------------------------------------------------------------------
@@ -447,6 +513,73 @@ async def timeseries(
             )
         )
     return points
+
+
+@router.get("/latency", response_model=LatencyReport)
+async def latency(
+    days: int = Query(default=30, ge=1, le=MAX_WINDOW_DAYS),
+    recent: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """The numbers a call is judged by, per IST day and per recent call.
+
+    Read from call_metrics rather than the logs, which rotate: this is the page that lets
+    "is today slower than yesterday" be answered by someone who is not grepping a box.
+    Per-day p50 and p95 are medians of the per-call figures — one runaway call moves a
+    day's worst, not its typical.
+    """
+    since = _window_start(days)
+    day = func.date(CallMetrics.created_at + _IST_SHIFT)
+
+    rows = (
+        await db.execute(
+            select(
+                day.label("day"),
+                func.count(CallMetrics.id).label("calls"),
+                func.percentile_cont(0.5).within_group(CallMetrics.p50_turn_ms).label("p50"),
+                func.percentile_cont(0.5).within_group(CallMetrics.p95_turn_ms).label("p95"),
+                func.max(CallMetrics.max_turn_ms).label("worst"),
+                func.percentile_cont(0.5).within_group(CallMetrics.first_word_ms).label("first_word"),
+                func.coalesce(func.sum(CallMetrics.held_replies), 0).label("held"),
+                func.coalesce(func.sum(CallMetrics.tts_reconnects), 0).label("reconnects"),
+                func.coalesce(func.sum(CallMetrics.llm_failures), 0).label("failures"),
+            )
+            .where(CallMetrics.created_at >= since)
+            .group_by(day)
+        )
+    ).all()
+
+    recent_rows = (
+        await db.execute(
+            select(CallMetrics, Call.started_at, Call.phone_number)
+            .join(Call, Call.id == CallMetrics.call_id)
+            .where(CallMetrics.created_at >= since)
+            .order_by(CallMetrics.created_at.desc())
+            .limit(recent)
+        )
+    ).all()
+
+    return LatencyReport(
+        days=latency_days(rows, days, to_ist(utc_now()).date()),
+        recent=[
+            CallLatency(
+                call_id=m.call_id,
+                started_at=started_at,
+                phone_number=phone_number,
+                turns=m.turns,
+                p50_ms=m.p50_turn_ms,
+                p95_ms=m.p95_turn_ms,
+                first_word_ms=m.first_word_ms,
+                held_replies=m.held_replies,
+                tts_reconnects=m.tts_reconnects,
+                llm_failures=m.llm_failures,
+                end_reason=m.end_reason,
+                stt=m.stt,
+                llm=m.llm,
+            )
+            for m, started_at, phone_number in recent_rows
+        ],
+    )
 
 
 @router.get("/funnel", response_model=List[FunnelStage])

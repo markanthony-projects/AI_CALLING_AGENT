@@ -61,6 +61,7 @@ from app.utils.repeat_request import (
 )
 from app.utils.reprompt import MAX_DEAD_AIR_NUDGES, dead_air_nudge
 from app.utils.socket_witness import SocketWitness
+from app.utils.empty_reply import EmptyReplyGuard
 from app.utils.one_question import OneQuestionPerTurn
 from app.utils.spoken_text import ToolSyntaxFilter, sounds_like_goodbye
 from app.utils.timeutils import time_of_day_greeting
@@ -99,6 +100,11 @@ IDLE_TIMEOUT_SECS = 60.0
 MAX_CALL_DURATION_SECS = 600.0
 
 MAX_LLM_TURN_FAILURES = 2
+
+# How long a finished prospect turn may go without a reply starting before the log says
+# so. Longer than any healthy turn (p95 was 1.7s on 14 Sep) and shorter than the six
+# seconds call 29b2f355 sat silent before the prospect asked "Did you get it?".
+REPLY_WATCHDOG_SECS = 4.0
 
 # TTS failure is not recoverable the way an LLM failure is: with no voice there is no
 # agent, and the caller pays for every second of the silence. Pipecat already retries the
@@ -819,6 +825,10 @@ async def run_voice_agent(
 
     # Any model can run away; the caller must not be able to hear it when one does.
     one_question = OneQuestionPerTurn(call_sid)
+    # And any model can reply with nothing; the caller must not be left in silence when one
+    # does. Resolved at call time: ask_again is defined with the rest of the turn state
+    # below, and no reply can end before the pipeline has started.
+    empty_reply = EmptyReplyGuard(call_sid, on_empty=lambda count: on_empty_reply(count))
 
     pipeline = Pipeline([
         transport.input(),
@@ -842,6 +852,10 @@ async def run_voice_agent(
         # six turns of a conversation that had not happened, including a booking nobody
         # agreed to. See app/utils/one_question.py.
         one_question,
+        # After the cutter, so what it counts is what would actually have been spoken. See
+        # app/utils/empty_reply.py: call 29b2f355 went silent for six seconds on a reply
+        # nobody could see was empty.
+        empty_reply,
         tts,
         transport.output(),
         # After the output transport, never before it: BotStoppedSpeakingFrame is raised by
@@ -1229,6 +1243,11 @@ async def run_voice_agent(
                     )
                     await task.queue_frames([EndFrame(reason="answering machine")])
             _turns_heard += 1
+            nonlocal _turn_serial, _reply_watchdog
+            _turn_serial += 1
+            if _reply_watchdog is not None:
+                _reply_watchdog.cancel()
+            _reply_watchdog = asyncio.create_task(watch_for_reply(_turn_serial))
             return
         # VAD heard speech but the STT produced nothing. Without this line a false barge-in
         # leaves no trace at all, which is what made the interruptions look inexplicable.
@@ -1251,7 +1270,8 @@ async def run_voice_agent(
             return
         # They asked for a moment. VAD firing on a rustle is not them giving it back, and
         # prompting into their silence is the same interruption the hold was meant to stop —
-        # arriving by a different door.
+        # arriving by a different door. Checked here as well as in ask_again: this is the
+        # door the hold guard was written for, and the test that proved it reads this one.
         if _holding:
             return
         if _dead_air_nudges >= MAX_DEAD_AIR_NUDGES:
@@ -1267,6 +1287,54 @@ async def run_voice_agent(
         logger.info(f"[{call_sid}] Nothing heard back; asking again → \"{nudge}\"")
         await task.queue_frames(spoken(nudge))
 
+    async def ask_again(announce: str) -> bool:
+        """Repeat the agent's last question — the other door into the dead-air nudge.
+
+        The prospect's empty turn is handled inline above, with the guard shape a test pins
+        against mutation. This is for the model's empty reply (call 29b2f355, "Whitefield",
+        six seconds of silence): same counters, same ceiling, same rule about never asking
+        over their hold and never repeating a sign-off, so the two doors cannot between them
+        badger a prospect more than MAX_DEAD_AIR_NUDGES allows.
+        """
+        nonlocal _dead_air_nudges, _last_nudged
+        if _holding or _ending:
+            return False
+        if _dead_air_nudges >= MAX_DEAD_AIR_NUDGES:
+            return False
+        nudge = dead_air_nudge(_last_agent_line)
+        # None when the last turn asked nothing — a sign-off must never be said twice.
+        # Equal to the previous nudge when this is the same question going unanswered a
+        # second time, which is a line that cannot carry the call, not a prospect to badger.
+        if not nudge or nudge == _last_nudged:
+            return False
+        _dead_air_nudges += 1
+        _last_nudged = nudge
+        logger.info(f"[{call_sid}] {announce} → \"{nudge}\"")
+        await task.queue_frames(spoken(nudge))
+        return True
+
+    async def on_empty_reply(count: int) -> None:
+        """The model's reply reached the voice engine with nothing in it."""
+        await ask_again(f"The model replied with nothing ({count}); asking again")
+
+    # A reply that never starts at all — no words, no tool call, no end of response — is
+    # invisible to the guard above, because there is no response to be empty. This names
+    # it: a turn the prospect finished that, six seconds on, has produced no reply, with
+    # whether an inference is even in flight. Log only; the finding is what is wanted.
+    _turn_serial: int = 0
+    _replied_serial: int = 0
+    _reply_watchdog: Optional[asyncio.Task] = None
+
+    async def watch_for_reply(serial: int) -> None:
+        await asyncio.sleep(REPLY_WATCHDOG_SECS)
+        if _ending or _holding or _replied_serial >= serial:
+            return
+        logger.warning(
+            f"[{call_sid}] No reply {REPLY_WATCHDOG_SECS:.0f}s after the prospect finished "
+            f"turn {serial} | inference in flight={_llm_in_flight} | "
+            f"agent speaking={_agent_speaking}"
+        )
+
     # The two edges of "a reply is being generated". Together they bound the window in
     # which a new user turn makes the in-flight inference worthless.
     @user_agg.event_handler("on_user_turn_inference_triggered")
@@ -1279,9 +1347,10 @@ async def run_voice_agent(
 
     @assistant_agg.event_handler("on_assistant_turn_started")
     async def on_assistant_turn_started(aggregator, *_):
-        nonlocal _llm_in_flight, _agent_speaking
+        nonlocal _llm_in_flight, _agent_speaking, _replied_serial
         _llm_in_flight = False
         _agent_speaking = True
+        _replied_serial = _turn_serial
 
     # ─── Agent Generation Logging ──────────────────────────────────────────────
     # GroqLLMService is HTTP-based: it has no on_client_connected. on_completion_timeout

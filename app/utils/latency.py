@@ -37,9 +37,13 @@ from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     Frame,
+    LLMContextFrame,
     LLMFullResponseStartFrame,
     MetricsFrame,
+    TranscriptionFrame,
+    TTSAudioRawFrame,
     TTSSpeakFrame,
+    TTSStartedFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -57,7 +61,19 @@ _TRACKED = (
     MetricsFrame,
     LLMFullResponseStartFrame,
     TTSSpeakFrame,
+    # The hand-offs inside a turn, for the TIMELINE line. Every Flux turn on 14 Sep carried
+    # ~450–520ms of `unattributed`: the decision, the LLM and the TTS were each measured
+    # and something between them was not. These name the boundaries in between.
+    TranscriptionFrame,
+    LLMContextFrame,
+    TTSStartedFrame,
+    TTSAudioRawFrame,
 )
+
+# The stations of one turn, in the order a reply passes through them. Each is the FIRST
+# such frame after the turn was declared over; the TIMELINE line prints the gap between
+# each and the one before it, so the gap that has no service behind it is visible by name.
+_STATIONS = ("transcript", "context", "request", "first_token", "tts_start", "first_audio", "speaking")
 
 # Below this, the remainder is ordinary frame plumbing and saying so on every turn would
 # bury the turns where it is not. Set from the clean turns on call db5027ae, whose
@@ -140,17 +156,44 @@ class LatencyObserver(BaseObserver):
         self._reasoning_tokens: Optional[int] = None
         self._prompt_total = 0
         self._cached_total = 0
+        # Pipeline-clock timestamps of the first frame of each kind in the current turn.
+        # Reset with the turn; read by _timeline().
+        self._stations: dict[str, int] = {}
 
     @property
     def turns(self) -> list[float]:
         return list(self._turns)
 
+    def _mark(self, station: str, timestamp: int) -> None:
+        """The first time this station is reached in the current turn, and only the first."""
+        if self._turn_start_ns is not None and station not in self._stations:
+            self._stations[station] = timestamp
+
     async def on_push_frame(self, data: FramePushed):
         frame: Frame = data.frame
+        if not isinstance(frame, _TRACKED):
+            return
+        # Audio frames arrive fifty times a second for the whole reply. Only the first one
+        # of a turn is a station; the rest are not recorded, not even as seen — a set of
+        # every audio frame id would be the one thing here that grew with call length.
+        if isinstance(frame, TTSAudioRawFrame):
+            if self._turn_start_ns is not None and "first_audio" not in self._stations:
+                self._stations["first_audio"] = data.timestamp
+            return
         # A frame is pushed between every pair of processors; only count it once.
-        if not isinstance(frame, _TRACKED) or frame.id in self._seen:
+        if frame.id in self._seen:
             return
         self._seen.add(frame.id)
+
+        if isinstance(frame, TranscriptionFrame):
+            self._mark("transcript", data.timestamp)
+            return
+        if isinstance(frame, LLMContextFrame):
+            self._mark("context", data.timestamp)
+            return
+        if isinstance(frame, TTSStartedFrame):
+            self._mark("tts_start", data.timestamp)
+            return
 
         if isinstance(frame, TTSSpeakFrame):
             # The opening line, which is spoken this way rather than generated. Read off the
@@ -191,6 +234,7 @@ class LatencyObserver(BaseObserver):
             self._prompt_tokens = None
             self._cached_tokens = None
             self._reasoning_tokens = None
+            self._stations = {}
             return
 
         if isinstance(frame, LLMFullResponseStartFrame):
@@ -199,6 +243,7 @@ class LatencyObserver(BaseObserver):
             if self._turn_start_ns is not None and self._llm_first_token_ns is None:
                 self._llm_first_token_ns = data.timestamp
                 self._llm_processor = str(data.source)
+                self._stations.setdefault("first_token", data.timestamp)
             return
 
         if isinstance(frame, MetricsFrame):
@@ -268,6 +313,8 @@ class LatencyObserver(BaseObserver):
         elapsed = (data.timestamp - began_ns) / NS_PER_SEC
         decision = (self._turn_start_ns - began_ns) / NS_PER_SEC
         breakdown = self._breakdown(elapsed, decision)
+        self._stations.setdefault("speaking", data.timestamp)
+        timeline = self._timeline()
         self._turn_start_ns = None
         self._voice_stopped_ns = None
         if elapsed < 0:
@@ -278,6 +325,34 @@ class LatencyObserver(BaseObserver):
             f"[{self._call_sid}] LATENCY turn {len(self._turns)}: "
             f"{elapsed * 1000:.0f}ms voice-to-voice{breakdown}"
         )
+        if timeline:
+            logger.info(f"[{self._call_sid}] TIMELINE turn {len(self._turns)}: {timeline}")
+
+    def _timeline(self) -> str:
+        """The gap at each hand-off inside the turn, from the turn being declared over.
+
+        `request` is derived, not observed: the first token arrives TTFB after the request
+        went out, so subtracting the LLM's own TTFB from its arrival gives the send time.
+        A station that was never reached is printed as such, because "tts_start never came"
+        is the finding on a turn where the model replied with nothing.
+        """
+        if self._turn_start_ns is None or not self._stations:
+            return ""
+        stations = dict(self._stations)
+        first_token = stations.get("first_token")
+        ttfb = self._ttfb.get(self._llm_processor) if self._llm_processor else None
+        if first_token is not None and ttfb is not None:
+            stations["request"] = first_token - int(ttfb * NS_PER_SEC)
+        parts = []
+        previous = self._turn_start_ns
+        for name in _STATIONS:
+            at = stations.get(name)
+            if at is None:
+                parts.append(f"{name}=—")
+                continue
+            parts.append(f"{name}=+{(at - previous) / NS_PER_SEC * 1000:.0f}ms")
+            previous = at
+        return "  ".join(parts)
 
     def _before_the_llm(self) -> Optional[float]:
         """Seconds between the prospect falling silent and the request leaving for the LLM.

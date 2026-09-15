@@ -308,3 +308,12 @@ def test_pauses_are_attributed_to_full_stops_and_not_commas():
     """
     assert "PAUSES COME FROM FULL STOPS, NOT COMMAS" in PROMPT
     assert "pauses with commas" not in PROMPT
+
+
+def test_the_first_sentence_is_told_to_be_short():
+    """The voice engine speaks one sentence at a time, so the prospect hears nothing until
+    the model's first full stop. On the 14 Sep calls the first sentence was routinely the
+    longest — the whole answer, then the question — and every one of those was silence.
+    The cheapest latency change in the system is a rule, and this pins it."""
+    assert "YOUR FIRST SENTENCE IS SHORT" in PROMPT
+    assert "eight words or fewer" in PROMPT

@@ -29,6 +29,7 @@ DASHBOARD_ROUTES = [
     "/api/v1/dashboard/campaigns",
     "/api/v1/dashboard/projects",
     "/api/v1/dashboard/appointments",
+    "/api/v1/dashboard/latency",
 ]
 
 

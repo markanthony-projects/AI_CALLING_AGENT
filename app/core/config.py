@@ -381,6 +381,11 @@ class Settings(BaseSettings):
     # Five minutes bounds the exposure to a few dials without hammering the providers.
     LLM_PROBE_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
 
+    # Where yesterday's latency summary is posted every morning, as {"text": "..."} — a
+    # Slack or Google Chat incoming webhook, a WhatsApp bridge, anything that takes that
+    # shape. Blank means the summary is only logged. See app/services/metrics_summary.py.
+    METRICS_SUMMARY_WEBHOOK_URL: str = ""
+
     @property
     def llm_api_key(self) -> str:
         """The key for whichever provider LLM_BASE_URL points at.
