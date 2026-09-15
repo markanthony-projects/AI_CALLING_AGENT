@@ -30,8 +30,10 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-SAMPLE_RATE = 16000
-# 20ms of 16kHz mono PCM16 — the frame size the transport paces playback by.
+from app.utils.voice_rate import SAMPLE_RATE
+
+# 20ms of mono PCM16 at the rate the voice engine produces — the same frames, at the same
+# rate, that the engine itself pushes; the transport resamples both alike.
 FRAME_BYTES = SAMPLE_RATE * 2 // 50
 
 

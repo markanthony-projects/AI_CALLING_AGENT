@@ -35,6 +35,7 @@ from app.services.discovery import get_redis_client
 from app.utils.dashes import spoken_punctuation
 from app.utils.opening_line import build_opening_line
 from app.utils.sentences import sentences
+from app.utils.voice_rate import SAMPLE_RATE
 
 # Longer than any ring the dialer allows (VOBIZ_RING_SECONDS caps at 120) plus the carrier's
 # start delay, short enough that a dial nobody answered does not sit in memory.
@@ -44,7 +45,6 @@ _TTL_SECONDS = 600
 _SYNTHESIS_BUDGET_SECS = 4.0
 # The same endpoint pipecat's SarvamTTSService connects to, with the same query.
 WS_URL = "wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v3&send_completion_event=true"
-SAMPLE_RATE = 16000
 
 
 def _key(call_sid: str) -> str:
@@ -120,8 +120,8 @@ def wav_pcm(wav: bytes) -> Optional[Tuple[bytes, int, int, int]]:
     return pcm, rate, channels, bits
 
 
-def pcm_16k_mono(audio: bytes) -> Optional[bytes]:
-    """The audio as 16kHz mono PCM16, or None if that is not what it is.
+def pcm_at_live_rate(audio: bytes) -> Optional[bytes]:
+    """The audio as mono PCM16 at the live socket's rate, or None if that is not what it is.
 
     The websocket returns linear16 frames bare; a RIFF header, if one ever appears, is
     read rather than assumed. Anything at another rate is a miss — the engine synthesises
@@ -163,7 +163,7 @@ async def synthesise(text: str, settings) -> Optional[bytes]:
             elif kind == "error":
                 logger.warning(f"Greeting synthesis refused: {message.get('data')}")
                 return None
-    return pcm_16k_mono(bytes(audio))
+    return pcm_at_live_rate(bytes(audio))
 
 
 async def prime_greeting(

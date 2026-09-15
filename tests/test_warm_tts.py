@@ -27,9 +27,10 @@ class _Socket:
 class _Service:
     """Just enough of KeepsItsVoice for the holder: a socket, and the two calls it makes."""
 
-    def __init__(self, socket=None, fail=None):
+    def __init__(self, socket=None, fail=None, init_rate=24000):
         self._websocket = None
-        self._speech_sample_rate = "0"
+        self._speech_sample_rate = str(init_rate)
+        self._init_sample_rate = init_rate
         self._socket = socket
         self._fail = fail
         self.connects = 0
@@ -74,8 +75,12 @@ def test_prepared_then_adopted_once(monkeypatch):
     assert service.connects == 1
 
 
-def test_the_socket_is_told_the_pipelines_sample_rate_before_it_connects(monkeypatch):
-    """SarvamTTSService learns its rate from the StartFrame. There is no StartFrame yet."""
+@pytest.mark.parametrize("init_rate,expected", [(24000, "24000"), (None, "16000")])
+def test_the_socket_is_configured_with_the_rate_start_will_label_the_audio_with(monkeypatch, init_rate, expected):
+    """Call 56398497: the warmed socket asked Sarvam for 16kHz "to match the transport";
+    start() then set the service's rate to its constructor's 24000 and labelled every
+    frame with it. 1.5x too fast, seven semitones up, until a barge-in opened a fresh
+    socket. The rule is start()'s own: the constructor rate, else the transport's."""
     seen = {}
 
     class Recording(_Service):
@@ -83,9 +88,26 @@ def test_the_socket_is_told_the_pipelines_sample_rate_before_it_connects(monkeyp
             seen["rate"] = self._speech_sample_rate
             await super()._connect_websocket()
 
-    _use(monkeypatch, Recording(_Socket()))
+    _use(monkeypatch, Recording(_Socket(), init_rate=init_rate))
     asyncio.run(warm_tts.prepare("c1", SimpleNamespace()))
-    assert seen["rate"] == "16000"
+    assert seen["rate"] == expected
+
+
+def test_that_rule_is_the_one_pipecat_applies_at_start():
+    import inspect
+
+    from pipecat.services.tts_service import TTSService
+
+    assert "self._init_sample_rate or frame.audio_out_sample_rate" in inspect.getsource(TTSService.start)
+    assert warm_tts.TRANSPORT_SAMPLE_RATE == 16000
+
+
+def test_a_real_service_is_warmed_at_the_rate_it_will_run_at():
+    from app.services.voice import build_tts
+    from app.utils.voice_rate import SAMPLE_RATE
+
+    tts = build_tts(SimpleNamespace(SARVAM_API_KEY="k", SARVAM_VOICE_ID="simran", SPEAKING_PACE=1.0, SARVAM_TEMPERATURE=None, TTS_SPARE_SOCKET=False))
+    assert warm_tts.rate_at_start(tts) == tts._init_sample_rate == SAMPLE_RATE == 24000
 
 
 def test_a_handshake_that_fails_leaves_nothing_behind(monkeypatch):

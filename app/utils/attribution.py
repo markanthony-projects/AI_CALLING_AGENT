@@ -80,12 +80,55 @@ def _multiplier(unit: str) -> float:
     return _CRORE if unit.lower().startswith("cr") else _LAKH
 
 
+_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19,
+}
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90,
+}
+_WORD_NUMBER = re.compile(
+    r"\b(?:(?P<tens>" + "|".join(_TENS) + r")(?:[\s-]+(?P<ones>" + "|".join(k for k in _ONES if _ONES[k] < 10) + r"))?"
+    r"|(?P<single>" + "|".join(_ONES) + r"))\b",
+    re.I,
+)
+_POINT = re.compile(r"\b(?P<whole>\d+)\s+point\s+(?P<frac>\d+(?:\s+\d)*)\b", re.I)
+_AND_A_HALF = re.compile(r"\b(?P<whole>\d+)\s+and\s+(?:a\s+)?half\b", re.I)
+
+
+def spoken_numbers_to_digits(text: str) -> str:
+    """"one point five CR" as "1.5 CR", "seventy five lakhs" as "75 lakhs".
+
+    Call 56398497, 15 Sep 2026: the prospect said "I have a budget, like, one point five
+    CR", the extractor wrote 1,50,00,000, and the grounding check threw it away because no
+    Prospect line contained a digit. The transcript writes what was said the way it was
+    said; the check has to read it that way too.
+    """
+
+    def words(match):
+        if match.group("single") is not None:
+            return str(_ONES[match.group("single").lower()])
+        value = _TENS[match.group("tens").lower()]
+        if match.group("ones"):
+            value += _ONES[match.group("ones").lower()]
+        return str(value)
+
+    text = _WORD_NUMBER.sub(words, text)
+    text = _POINT.sub(lambda m: f"{m.group('whole')}.{m.group('frac').replace(' ', '')}", text)
+    text = _AND_A_HALF.sub(lambda m: f"{m.group('whole')}.5", text)
+    return text
+
+
 def money_in_rupees(text: str) -> list[float]:
     """Every sum of money named in `text`, in rupees.
 
     Both ends of a range are returned. The two patterns overlap on the range's upper
     figure, which is harmless — only the smallest and largest are ever used.
     """
+    text = spoken_numbers_to_digits(text)
     found = []
     for match in _MONEY_RANGE.finditer(text):
         scale = _multiplier(match.group("unit"))

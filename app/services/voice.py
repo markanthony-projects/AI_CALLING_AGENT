@@ -131,6 +131,9 @@ class KeepsItsVoice(SarvamTTSService):
         self._spare_opener: Optional[asyncio.Task] = None
         self._spare_keepalive: Optional[asyncio.Task] = None
         self._swaps = 0
+        # The sample rate the live socket was last configured with. Compared against the
+        # service's own rate once start() has set it; see _reconfigure_if_rate_changed.
+        self._configured_rate: Optional[str] = None
 
     @property
     def revivals(self) -> int:
@@ -201,6 +204,8 @@ class KeepsItsVoice(SarvamTTSService):
             user_agent_header=sdk_headers()["User-Agent"],
         )
         await socket.send(json.dumps({"type": "config", "data": self._config_payload()}))
+        # A spare is opened after start(), so it carries the service's rate already; the
+        # record is for the live socket, which the spare becomes on a swap.
         return socket
 
     def _replenish_spare(self):
@@ -248,6 +253,37 @@ class KeepsItsVoice(SarvamTTSService):
         if self._spare is not None:
             spare, self._spare = self._spare, None
             await self._close_quietly(spare)
+
+    async def _send_config(self):
+        await super()._send_config()
+        self._configured_rate = self._speech_sample_rate
+
+    async def start(self, frame):
+        await super().start(frame)
+        await self._reconfigure_if_rate_changed()
+
+    async def _reconfigure_if_rate_changed(self):
+        """A socket opened before start() is re-configured if start() changed the rate.
+
+        start() sets _speech_sample_rate from the constructor or the transport and, finding
+        the socket already open, sends no config. On call 56398497 the warmed socket had
+        been configured for 16kHz, the service labelled its audio 24kHz, and every line
+        after the greeting played too fast and too high. The rate the socket was told is
+        recorded by _send_config; if it is not the rate the service now uses, the config
+        is sent again on the same socket — Sarvam accepts a new config mid-session, which
+        is how pipecat applies a voice change.
+        """
+        if (
+            self._websocket is not None
+            and self._websocket.state is State.OPEN
+            and self._configured_rate is not None
+            and self._configured_rate != self._speech_sample_rate
+        ):
+            logger.warning(
+                f"{self}: socket was configured for {self._configured_rate}Hz but the service "
+                f"runs at {self._speech_sample_rate}Hz; re-sending the config"
+            )
+            await self._send_config()
 
     async def _connect(self):
         await super()._connect()

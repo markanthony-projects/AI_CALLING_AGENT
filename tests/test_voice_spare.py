@@ -248,3 +248,57 @@ def test_the_switches_exist_with_rollback_defaults():
 
     for name in ("GREETING_PRIME", "TTS_PRECONNECT", "TTS_SPARE_SOCKET"):
         assert Settings.model_fields[name].default is True, name
+
+
+# ------------------------------------------------------------------ the rate
+
+
+def test_a_socket_configured_at_another_rate_is_reconfigured_at_start(monkeypatch):
+    """Call 56398497: warmed at 16kHz, started at 24kHz, every line after the greeting
+    1.5x too fast. The record of what the socket was told is compared with what the
+    service now uses, and the config is sent again on the same socket if they differ."""
+    service = _service(spare=False)
+    sent = []
+
+    async def send_config(self):
+        sent.append(self._speech_sample_rate)
+        self._configured_rate = self._speech_sample_rate
+
+    monkeypatch.setattr(SarvamTTSService, "_send_config", send_config)
+    service._websocket = _Socket()
+    service._speech_sample_rate = "16000"
+    asyncio.run(service._send_config())  # what the warm path did
+    service._speech_sample_rate = "24000"  # what start() then set
+    asyncio.run(service._reconfigure_if_rate_changed())
+    assert sent == ["16000", "24000"]
+    assert service._configured_rate == "24000"
+
+
+def test_a_socket_at_the_right_rate_is_left_alone(monkeypatch):
+    service = _service(spare=False)
+    sent = []
+
+    async def send_config(self):
+        sent.append(self._speech_sample_rate)
+        self._configured_rate = self._speech_sample_rate
+
+    monkeypatch.setattr(SarvamTTSService, "_send_config", send_config)
+    service._websocket = _Socket()
+    service._speech_sample_rate = "24000"
+    asyncio.run(service._send_config())
+    asyncio.run(service._reconfigure_if_rate_changed())
+    assert sent == ["24000"]
+
+
+def test_no_socket_means_nothing_to_reconfigure():
+    service = _service(spare=False)
+    service._configured_rate = "16000"
+    service._speech_sample_rate = "24000"
+    asyncio.run(service._reconfigure_if_rate_changed())  # no socket: no error, nothing sent
+
+
+def test_the_check_runs_after_pipecat_has_set_the_rate():
+    import inspect
+
+    src = inspect.getsource(KeepsItsVoice.start)
+    assert src.index("await super().start(frame)") < src.index("await self._reconfigure_if_rate_changed()")

@@ -317,3 +317,10 @@ def test_the_first_sentence_is_told_to_be_short():
     The cheapest latency change in the system is a rule, and this pins it."""
     assert "YOUR FIRST SENTENCE IS SHORT" in PROMPT
     assert "eight words or fewer" in PROMPT
+
+
+def test_several_questions_at_once_get_one_answer_and_a_choice():
+    """Call 56398497, 15 Sep 2026: "tell me about the locality, connectivity and amenity"
+    drew a seventy-word reply the prospect talked over halfway through."""
+    assert "ONE TOPIC PER REPLY" in PROMPT
+    assert "answer ONE of them in two sentences and ask which they want next" in PROMPT

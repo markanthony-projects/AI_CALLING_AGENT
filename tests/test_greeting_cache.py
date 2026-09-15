@@ -168,8 +168,9 @@ def test_the_config_is_the_live_calls_config_to_the_byte(temperature):
 
     settings = _settings(SARVAM_TEMPERATURE=temperature, SPEAKING_PACE=1.05)
     tts = build_tts(settings)
-    tts._speech_sample_rate = str(gc.SAMPLE_RATE)  # what start() sets from the 16kHz transport
+    # Untouched: the rate a fresh service carries is the rate start() keeps (voice_rate.py).
     assert gc.live_config(settings) == tts._config_payload()
+    assert gc.live_config(settings)["speech_sample_rate"] == "24000"
 
 
 def test_the_same_endpoint_and_query_as_pipecat():
@@ -195,22 +196,22 @@ def test_the_text_gets_the_same_dash_treatment_as_the_engine_input(sockets):
     assert _Socket.sockets[0].sent[1]["data"]["text"] == spoken_punctuation(text)
 
 
-def test_the_rate_is_the_rate_the_transport_plays():
-    import inspect
+def test_the_rate_is_the_rate_the_live_socket_runs_at():
+    """Not the transport's 16kHz: the service asks Sarvam for 24kHz and labels its frames
+    so, and the transport resamples. Cached audio must be labelled the same way or it plays
+    at the wrong speed (call 56398497)."""
+    from app.services.voice import build_tts
+    from app.utils import primed_speech, voice_rate
 
-    from app.services import agent
-    from app.utils import primed_speech
-
-    assert "audio_out_sample_rate=16000" in inspect.getsource(agent.run_voice_agent)
-    assert gc.SAMPLE_RATE == primed_speech.SAMPLE_RATE == 16000
-    assert gc.live_config(_settings())["speech_sample_rate"] == "16000"
+    tts = build_tts(_settings())
+    assert gc.SAMPLE_RATE == primed_speech.SAMPLE_RATE == voice_rate.SAMPLE_RATE == tts._init_sample_rate == 24000
 
 
 def test_a_wave_header_if_one_ever_appears_is_read_not_assumed():
     pcm = b"\x10\x20" * 100
-    assert gc.pcm_16k_mono(_wav(pcm)) == pcm
-    assert gc.pcm_16k_mono(pcm) == pcm, "bare linear16 is what the socket sends"
-    assert gc.pcm_16k_mono(b"") is None
+    assert gc.pcm_at_live_rate(_wav(pcm, rate=24000)) == pcm
+    assert gc.pcm_at_live_rate(pcm) == pcm, "bare linear16 is what the socket sends"
+    assert gc.pcm_at_live_rate(b"") is None
     assert gc.wav_pcm(_wav(pcm, rate=22050)) == (pcm, 22050, 1, 16)
 
 
@@ -218,8 +219,8 @@ def test_audio_at_any_other_rate_is_a_miss_not_a_slow_deep_greeting():
     """Call 8571d93b, 15 Sep 2026: 22050Hz played at 16000 — the greeting came out 38%
     slower and five semitones down, in a voice nobody had chosen."""
     pcm = b"\x10\x20" * 100
-    for wav in (_wav(pcm, rate=22050), _wav(pcm, rate=24000), _wav(pcm, channels=2), _wav(pcm, bits=8)):
-        assert gc.pcm_16k_mono(wav) is None
+    for wav in (_wav(pcm, rate=22050), _wav(pcm, rate=16000), _wav(pcm, rate=24000, channels=2), _wav(pcm, rate=24000, bits=8)):
+        assert gc.pcm_at_live_rate(wav) is None
 
 
 # ------------------------------------------------------------------ round trip

@@ -25,9 +25,11 @@ from websockets.protocol import State
 
 from app.services.voice import KeepsItsVoice, build_tts
 
-# The pipeline's output rate. SarvamTTSService sets this from the StartFrame; a socket
-# opened before the pipeline exists has to be told, or the config it sends is wrong.
-SAMPLE_RATE = 16000
+# What the transport plays at. SarvamTTSService takes its own rate from its constructor
+# and falls back to this only when that is unset — the same rule as its start(), and the
+# socket warmed here must be configured with the rate start() will label the audio with,
+# or the audio plays at the wrong speed. See app/utils/voice_rate.py for the call.
+TRANSPORT_SAMPLE_RATE = 16000
 CONNECT_TIMEOUT_SECS = 3.0
 # How long the agent will wait for a handshake that is already in flight. Under the cold
 # path's own cost (183ms on 81bdc87a), so waiting can never be worse than not.
@@ -38,6 +40,15 @@ MAX_WAIT_SECS = 60.0
 
 _warm: Dict[str, Tuple[KeepsItsVoice, float]] = {}
 _pending: Dict[str, asyncio.Task] = {}
+
+
+def rate_at_start(tts: KeepsItsVoice) -> int:
+    """The rate start() will set — its own constructor rate, else the transport's.
+
+    Mirrors TTSService.start: `self._init_sample_rate or frame.audio_out_sample_rate`. A
+    socket configured with anything else sends audio the service then mislabels.
+    """
+    return tts._init_sample_rate or TRANSPORT_SAMPLE_RATE
 
 
 def _socket_open(tts: KeepsItsVoice) -> bool:
@@ -55,7 +66,7 @@ def begin(call_sid: str, settings) -> asyncio.Task:
 async def prepare(call_sid: str, settings) -> bool:
     """Open the voice socket for a call whose media stream is about to arrive."""
     tts = build_tts(settings)
-    tts._speech_sample_rate = str(SAMPLE_RATE)
+    tts._speech_sample_rate = str(rate_at_start(tts))
     try:
         await asyncio.wait_for(tts._connect_websocket(), timeout=CONNECT_TIMEOUT_SECS)
     except Exception as e:  # noqa: BLE001

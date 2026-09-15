@@ -38,6 +38,14 @@ _AMOUNT = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>crores|crore|cr|lakhs|lakh|lacs|lac|l)\b",
     re.I,
 )
+# "1.64 - 1.74 Cr": the low end carries no unit of its own, so the pattern above sees only
+# 1.74 — and three calls on 15 Sep logged "Agent spoke a price that is not in the campaign
+# context (1.64 Crores)" for the Luxury configuration's own starting price.
+_AMOUNT_RANGE = re.compile(
+    r"(?P<low>\d+(?:\.\d+)?)\s*(?:to|-|–|—|and)\s*"
+    r"(?P<high>\d+(?:\.\d+)?)\s*(?P<unit>crores|crore|cr|lakhs|lakh|lacs|lac|l)\b",
+    re.I,
+)
 
 # How far a spoken figure may sit from a context figure and still count as the same one.
 # The agent is told to say "1.17 Crores", but a model rounding that to "1.2 Crores" has
@@ -49,6 +57,10 @@ _TOLERANCE = 0.05
 def amounts_in(text: str) -> List[float]:
     """Every money figure in the text, in Crores, in the order they appear."""
     found = []
+    for match in _AMOUNT_RANGE.finditer(text or ""):
+        unit = match.group("unit").lower()
+        for value in (float(match.group("low")), float(match.group("high"))):
+            found.append(value if unit.startswith("cr") else value / _LAKHS_PER_CRORE)
     for match in _AMOUNT.finditer(text or ""):
         value = float(match.group("value"))
         unit = match.group("unit").lower()

@@ -46,7 +46,7 @@ async def _run(processor, frames, direction=FrameDirection.DOWNSTREAM):
 
 
 def test_a_primed_sentence_is_played_as_the_engine_would_have_played_it():
-    pcm = bytes(range(256)) * 10  # 2560 bytes: four full frames
+    pcm = bytes(range(256)) * 15  # 3840 bytes: four full 20ms frames at 24kHz
     processor = PrimedSpeech("c1", {"Hello, Good morning.": pcm})
 
     out = asyncio.run(_run(processor, [TTSSpeakFrame("Hello, Good morning.")]))
@@ -55,7 +55,7 @@ def test_a_primed_sentence_is_played_as_the_engine_would_have_played_it():
     assert isinstance(out[-1], TTSStoppedFrame)
     audio = [f for f in out if isinstance(f, TTSAudioRawFrame)]
     assert len(audio) == 4
-    assert all(f.sample_rate == 16000 and f.num_channels == 1 for f in audio)
+    assert all(f.sample_rate == 24000 and f.num_channels == 1 for f in audio)
     assert b"".join(f.audio for f in audio) == pcm
     assert not any(isinstance(f, TTSSpeakFrame) for f in out), "the engine must not see it"
     assert processor.played == 1
@@ -100,9 +100,20 @@ def test_upstream_frames_are_never_intercepted():
 
 
 def test_the_frames_are_twenty_milliseconds_and_the_tail_is_kept():
-    assert FRAME_BYTES == 640
-    pieces = list(chunked(b"x" * 1500))
-    assert [len(p) for p in pieces] == [640, 640, 220]
+    assert FRAME_BYTES == 960, "20ms of 24kHz mono PCM16"
+    pieces = list(chunked(b"x" * 2200))
+    assert [len(p) for p in pieces] == [960, 960, 280]
+
+
+def test_the_frames_carry_the_rate_the_engine_labels_its_own_with():
+    """The transport resamples every TTSAudioRawFrame by the rate on the frame. Cached
+    audio labelled with any other rate plays at the wrong speed — call 56398497."""
+    from app.services.voice import build_tts
+    from app.utils.primed_speech import SAMPLE_RATE
+    from types import SimpleNamespace
+
+    tts = build_tts(SimpleNamespace(SARVAM_API_KEY="k", SARVAM_VOICE_ID="simran", SPEAKING_PACE=1.0, SARVAM_TEMPERATURE=None, TTS_SPARE_SOCKET=False))
+    assert SAMPLE_RATE == tts._init_sample_rate
 
 
 def test_it_sits_directly_in_front_of_the_voice_engine():

@@ -86,3 +86,38 @@ def test_untransliterated_transcript_is_flagged():
     assert "transcript_record.full_text.isascii" in checked, (
         f"no isascii check on the stored transcript, only on {checked or 'nothing'}"
     )
+
+
+# --- numbers said in words ---------------------------------------------------------------
+
+
+def test_a_budget_said_in_words_is_grounded():
+    """Call 56398497, 15 Sep 2026: "I have a budget, like, one point five CR" was extracted
+    as 1,50,00,000 and thrown away because no Prospect line held a digit."""
+    from app.utils.attribution import budget_is_grounded, spoken_numbers_to_digits
+
+    transcript = "Agent: May I know the budget?\nProspect: Yeah. I have a budget, like, one point five CR."
+    assert budget_is_grounded(15_000_000.0, transcript) is True
+    assert spoken_numbers_to_digits("one point five CR") == "1.5 CR"
+
+
+def test_the_usual_ways_of_saying_a_number():
+    from app.utils.attribution import money_in_rupees, spoken_numbers_to_digits
+
+    assert spoken_numbers_to_digits("seventy five lakhs") == "75 lakhs"
+    assert spoken_numbers_to_digits("seventy-five lakhs") == "75 lakhs"
+    assert spoken_numbers_to_digits("two crore") == "2 crore"
+    assert spoken_numbers_to_digits("one and a half crore") == "1.5 crore"
+    assert spoken_numbers_to_digits("one point two five crores") == "1.25 crores"
+    assert spoken_numbers_to_digits("around fifty lakh") == "around 50 lakh"
+    assert money_in_rupees("Prospect: maybe one point five CR") == [15_000_000.0]
+    assert money_in_rupees("Prospect: one to one and a half crore") == [10_000_000.0, 15_000_000.0, 15_000_000.0]
+
+
+def test_the_rest_of_the_sentence_is_left_alone():
+    """"one" on its own does become 1 — that is the trade, and money needs a unit after
+    it, so "no one else" can never be read as a budget."""
+    from app.utils.attribution import money_in_rupees, spoken_numbers_to_digits
+
+    assert spoken_numbers_to_digits("3 BHK, two months, near the lake") == "3 BHK, 2 months, near the lake"
+    assert money_in_rupees("Prospect: no one else is looking, only one flat") == []

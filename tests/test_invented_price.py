@@ -43,10 +43,10 @@ CONTEXT = (
         ("budgets usually start from 80 Lakhs and go up", [0.8]),
         ("Prices start at 1.17 Crores.", [1.17]),
         ("2 BHK homes from 1.2 Crores to 3.5 Crores", [1.2, 3.5]),
-        # "20 to" carries no unit of its own; only the figure the unit is attached to
-        # is money. Both halves of a range are still covered, because the context is
-        # searched the same way and carries the same phrase.
-        ("about 20 to 30 Lakhs below the launch price", [0.3]),
+        # "20 to" carries no unit of its own but is money all the same: both ends of a
+        # range are figures the context contains. The upper end appears twice, once from
+        # each pattern, which is harmless — grounding is membership.
+        ("about 20 to 30 Lakhs below the launch price", [0.2, 0.3, 0.3]),
     ],
 )
 def test_money_is_read_in_crores_whatever_unit_it_was_said_in(text, expected):
@@ -269,3 +269,16 @@ def test_the_prompt_names_the_other_area_case():
     prompt = get_system_prompt(CONTEXT, "Rahul")
     assert "OTHER areas" in prompt
     assert "property expert will share exact options" in prompt
+
+
+def test_both_ends_of_a_price_range_in_the_context_are_grounded():
+    """Three calls on 15 Sep logged "Agent spoke a price that is not in the campaign
+    context (1.64 Crores)" — the Luxury configuration's own starting price, written in
+    the context as "1.64 - 1.74 Cr". Only the figure touching the unit was being read."""
+    from app.utils.money import amounts_in, ungrounded
+
+    context = "3 BHK Luxury | 1646 - 1703 sqft | 1.64 - 1.74 Cr"
+    assert amounts_in(context) == [1.64, 1.74, 1.74]
+    assert ungrounded("Luxury starting from 1.64 Crores.", amounts_in(context)) == []
+    assert ungrounded("Luxury from 1.9 Crores.", amounts_in(context)) == [1.9]
+    assert amounts_in("70 to 80 lakhs") == [0.7, 0.8, 0.8]
