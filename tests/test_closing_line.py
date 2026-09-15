@@ -242,6 +242,7 @@ def _build(task, farewell, tool_syntax_filter=None, closing_gate=None):
         "MAX_EARLY_REFUSALS": agent.MAX_EARLY_REFUSALS,
         "EARLY_REFUSAL_REASON": agent.EARLY_REFUSAL_REASON,
         "said_yes_and_nothing_was_closed": agent.said_yes_and_nothing_was_closed,
+        "is_a_yes_to_a_close": agent.is_a_yes_to_a_close,
         "spoken": lambda text, **kw: [_Speak(s) for s in sentences(text)],
         "FAREWELL_LINE": FAREWELL_LINE,
         "logger": agent.logger,

@@ -96,3 +96,28 @@ def test_the_refusal_cue_is_shared_with_the_bare_answer_guard():
 
     assert engaged_answer.is_a_refusal is bare_answer.is_a_refusal
     assert bare_answer.is_a_refusal("not interested") and not bare_answer.is_a_refusal("yes please")
+
+
+# --- a yes to the close is the close ----------------------------------------------------
+
+
+def test_a_one_word_yes_to_the_whatsapp_offer_ends_the_call():
+    """Call be096321: "Yes." to the brochure offer was refused as a bare answer."""
+    from app.utils.engaged_answer import is_a_yes_to_a_close
+
+    offer = "Shall I send you the 3 BHK Regular floor plan and pricing on WhatsApp?"
+    assert is_a_yes_to_a_close("Yes.", offer) is True
+    assert is_a_yes_to_a_close("Haan.", offer) is True
+    assert is_a_yes_to_a_close("No.", offer) is False
+    assert is_a_yes_to_a_close("Yes.", "Is Varthur convenient for you?") is False
+    assert is_a_yes_to_a_close("", offer) is False
+
+
+def test_the_bare_answer_refusal_steps_aside_for_it():
+    from app.services import agent
+
+    src = inspect.getsource(agent.run_voice_agent)
+    handler = src[src.index("async def end_call_handler") :]
+    handler = handler[: handler.index('llm.register_function("end_call"')]
+    bare = handler.index("is_a_bare_answer(")
+    assert "and not is_a_yes_to_a_close(" in handler[bare : bare + 300]

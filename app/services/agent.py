@@ -38,7 +38,11 @@ from app.utils.answering_machine import OPENING_TURNS, machine_in_opening, machi
 from app.utils.asked import REPEAT_LIMIT, AskedSoFar
 from app.utils.bare_answer import MAX_BARE_REFUSALS, is_a_bare_answer
 from app.utils.bare_answer import REFUSAL_REASON as BARE_ANSWER_REASON
-from app.utils.engaged_answer import MAX_EARLY_REFUSALS, said_yes_and_nothing_was_closed
+from app.utils.engaged_answer import (
+    MAX_EARLY_REFUSALS,
+    is_a_yes_to_a_close,
+    said_yes_and_nothing_was_closed,
+)
 from app.utils.engaged_answer import REFUSAL_REASON as EARLY_REFUSAL_REASON
 from app.utils.project_rejected import BRIEF as PROJECT_RULED_OUT
 from app.utils.project_rejected import rejects_the_project
@@ -541,8 +545,15 @@ async def run_voice_agent(
         # 578195d1 a prospect who had just said they were buying answered "No." to "Have you
         # been to that side of town?" and the model hung up on them, forty-five seconds in.
         # See app/utils/bare_answer.py.
-        if _bare_refusals < MAX_BARE_REFUSALS and is_a_bare_answer(
-            prospect_lines[-1] if prospect_lines else None
+        # ...unless the one word was a yes to the close itself. On call be096321 "Yes." to
+        # "Shall I send you the floor plans on WhatsApp?" was refused as a bare answer and
+        # the model invented a step to fill the gap. See engaged_answer.is_a_yes_to_a_close.
+        if (
+            _bare_refusals < MAX_BARE_REFUSALS
+            and is_a_bare_answer(prospect_lines[-1] if prospect_lines else None)
+            and not is_a_yes_to_a_close(
+                prospect_lines[-1] if prospect_lines else None, _last_agent_line
+            )
         ):
             _bare_refusals += 1
             logger.warning(

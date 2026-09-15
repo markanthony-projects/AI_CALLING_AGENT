@@ -62,3 +62,17 @@ def said_yes_and_nothing_was_closed(
     if last_agent_line and _CLOSING_OFFER.search(last_agent_line):
         return False
     return True
+
+
+def is_a_yes_to_a_close(last_prospect_line: Optional[str], last_agent_line: Optional[str]) -> bool:
+    """A yes to "Shall I send it on WhatsApp?" is the close, however short it is.
+
+    Call be096321, 15 Sep 2026: the agent offered the WhatsApp brochure, the prospect said
+    "Yes.", and the one-word guard refused the hangup as "an answer, not a goodbye" — so
+    the model invented a step ("Could you share the best WhatsApp number?") and the close
+    slipped. The one-word rule is right everywhere except here.
+    """
+    text = (last_prospect_line or "").strip()
+    if not text or not _ENGAGED.search(text):
+        return False
+    return bool(last_agent_line and _CLOSING_OFFER.search(last_agent_line))
